@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package annotations;
+
+option go_package = "github.com/romannikov/fdb-go-layer-plugin/annotations;annotations";
+
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.MessageOptions {
+  // List of field names that constitute the primary key
+  repeated string primary_key = 50001;
+  // List of composite secondary indexes
+  repeated SecondaryIndex secondary_index = 50002;
+}
+
+message SecondaryIndex {
+  repeated string fields = 1;
+}
