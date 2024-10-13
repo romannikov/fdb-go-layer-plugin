@@ -111,3 +111,20 @@ func main() {
     fmt.Println("User saved successfully")
 }
 ```
+# Contributing
+Contributions are welcome! Please open issues and pull requests to improve the plugin.
+
+## Fork the repository.
+- Create a new branch: `git checkout -b feature/your-feature`.
+- Commit your changes: `git commit -am 'Add new feature'`.
+- Push to the branch: `git push origin feature/your-feature`.
+- Open a pull request.
+
+# License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+# Acknowledgments
+- [FoundationDB](https://www.foundationdb.org) for their powerful distributed database.
+- [Protocol Buffers](https://protobuf.dev) for efficient data serialization.
+- The [Go](https://go.dev) community for their valuable libraries and tools.
