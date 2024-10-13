@@ -67,3 +67,47 @@ protoc \
   --go_opt=paths=source_relative \
   user.proto
 ```
+### Use the Generated Repositories
+Import the generated repository code into your Go application.
+```
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    "github.com/apple/foundationdb/bindings/go/src/fdb"
+    pb "github.com/yourusername/yourproject/pb"
+    "github.com/yourusername/yourproject/repositories"
+)
+
+func main() {
+    fdb.MustAPIVersion(620)
+    db := fdb.MustOpenDefault()
+
+    userRepo, err := repositories.NewUserRepository(db)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    ctx := context.Background()
+
+    // Create a new user
+    user := &pb.User{
+        Id:    1,
+        Name:  "Alice",
+        Email: "alice@example.com",
+    }
+
+    // Save the user using a transaction
+    err = db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+        return nil, userRepo.Set(ctx, tr, user)
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Println("User saved successfully")
+}
+```
