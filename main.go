@@ -28,6 +28,7 @@ type Message struct {
 	Fields           []Field
 	PrimaryKeyFields []Field
 	SecondaryIndexes []SecondaryIndex
+	GoPackagePath    string
 }
 
 func main() {
@@ -39,6 +40,8 @@ func main() {
 			if !file.Generate {
 				continue
 			}
+
+			goPackagePath := string(file.GoImportPath)
 
 			for _, message := range file.Messages {
 				msgName := message.GoIdent.GoName
@@ -52,6 +55,7 @@ func main() {
 				msgOptions := message.Desc.Options()
 				processedMessage := processMessage(message, msgOptions)
 				if processedMessage != nil {
+					processedMessage.GoPackagePath = goPackagePath
 					messages = append(messages, *processedMessage)
 				}
 			}
@@ -66,13 +70,11 @@ func main() {
 			// Create a new generated file
 			fileName := fmt.Sprintf("%s_repository.go", strings.ToLower(msg.Name))
 			genFile := plugin.NewGeneratedFile(fileName, "")
-			// Passing empty GoImportPath since we're generating in the current directory
 
 			err := tmpl.Execute(genFile, msg)
 			if err != nil {
 				return err
 			}
-			// Redirect output to stderr
 			fmt.Fprintf(os.Stderr, "Generated %s\n", fileName)
 		}
 		return nil
@@ -213,8 +215,10 @@ import (
     "fmt"
 
     "github.com/apple/foundationdb/bindings/go/src/fdb"
+	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
     "github.com/apple/foundationdb/bindings/go/src/fdb/directory"
-    pb "path/to/generated/schema"
+	"google.golang.org/protobuf/proto"
+    pb "{{.GoPackagePath}}"
 )
 
 type {{.Name}}Repository struct {
@@ -233,13 +237,13 @@ func New{{.Name}}Repository(db fdb.Database) (*{{.Name}}Repository, error) {
 func (repo *{{.Name}}Repository) Get(ctx context.Context, tr fdb.ReadTransaction, {{range $index, $element := .PrimaryKeyFields}}{{if $index}}, {{end}}{{.Name}} {{.Type}}{{end}}) (*pb.{{.Name}}, error) {
     var entity *pb.{{.Name}}
 
-    key := repo.dir.Pack(fdb.Tuple{ {{range .PrimaryKeyFields}} {{.Name}}, {{end}} })
+    key := repo.dir.Pack(tuple.Tuple{ {{range .PrimaryKeyFields}} {{.Name}}, {{end}} })
     value := tr.Get(key).MustGet()
     if value == nil {
         return nil, fmt.Errorf("{{.Name}} not found")
     }
     entity = &pb.{{.Name}}{}
-    err := entity.Unmarshal(value)
+    err := proto.Unmarshal(value, entity)
     if err != nil {
         return nil, err
     }
@@ -247,8 +251,8 @@ func (repo *{{.Name}}Repository) Get(ctx context.Context, tr fdb.ReadTransaction
 }
 
 func (repo *{{.Name}}Repository) Set(ctx context.Context, tr fdb.Transaction, entity *pb.{{.Name}}) error {
-    key := repo.dir.Pack(fdb.Tuple{ {{range .PrimaryKeyFields}} entity.{{.Name}}, {{end}} })
-    value, err := entity.Marshal()
+    key := repo.dir.Pack(tuple.Tuple{ {{range .PrimaryKeyFields}} entity.{{.Name}}, {{end}} })
+    value, err := proto.Marshal(entity)
     if err != nil {
         return err
     }
@@ -256,7 +260,7 @@ func (repo *{{.Name}}Repository) Set(ctx context.Context, tr fdb.Transaction, en
 
     // Handle secondary indexes
     {{range $idxIndex, $idx := .SecondaryIndexes}}
-    indexKey := repo.dir.Sub("{{joinFieldNames $idx.Fields}}_index").Pack(fdb.Tuple{
+    indexKey := repo.dir.Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
         {{range $i, $f := $idx.Fields}} entity.{{ $f.Name }}, {{end}}
         {{range $.PrimaryKeyFields}} entity.{{.Name}}, {{end}}
     })
@@ -267,15 +271,15 @@ func (repo *{{.Name}}Repository) Set(ctx context.Context, tr fdb.Transaction, en
 }
 
 func (repo *{{.Name}}Repository) Delete(ctx context.Context, tr fdb.Transaction, {{range $index, $element := .PrimaryKeyFields}}{{if $index}}, {{end}}{{.Name}} {{.Type}}{{end}}) error {
-    key := repo.dir.Pack(fdb.Tuple{ {{range .PrimaryKeyFields}} {{.Name}}, {{end}} })
+    key := repo.dir.Pack(tuple.Tuple{ {{range .PrimaryKeyFields}} {{.Name}}, {{end}} })
     value := tr.Get(key).MustGet()
     if value != nil {
         entity := &pb.{{.Name}}{}
-        err := entity.Unmarshal(value)
+        err := proto.Unmarshal(value, entity)
         if err == nil {
             // Handle index cleanup
             {{range $idxIndex, $idx := .SecondaryIndexes}}
-            indexKey := repo.dir.Sub("{{joinFieldNames $idx.Fields}}_index").Pack(fdb.Tuple{
+            indexKey := repo.dir.Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
                 {{range $i, $f := $idx.Fields}} entity.{{ $f.Name }}, {{end}}
                 {{range $.PrimaryKeyFields}} entity.{{.Name}}, {{end}}
             })
@@ -292,23 +296,26 @@ func (repo *{{.Name}}Repository) Delete(ctx context.Context, tr fdb.Transaction,
 func (repo *{{$.Name}}Repository) GetBy{{joinFieldNames $idx.Fields}}(ctx context.Context, tr fdb.ReadTransaction, {{range $i, $f := $idx.Fields}}{{if $i}}, {{end}}{{$f.Name}} {{$f.Type}}{{end}}) ([]*pb.{{$.Name}}, error) {
     entities := []*pb.{{$.Name}}{}
 
-    indexKeyPrefix := repo.dir.Sub("{{joinFieldNames $idx.Fields}}_index").Pack(fdb.Tuple{ {{range $i, $f := $idx.Fields}} {{$f.Name}}, {{end}} })
-    indexRange := fdb.PrefixRange(indexKeyPrefix)
+    indexKeyPrefix := repo.dir.Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{ {{range $i, $f := $idx.Fields}} {{$f.Name}}, {{end}} })
+    indexRange, err := fdb.PrefixRange(indexKeyPrefix)
+	if err != nil {
+		return nil, err
+	}
     kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
     for _, kv := range kvs {
-        tuple, err := repo.dir.Sub("{{joinFieldNames $idx.Fields}}_index").Unpack(kv.Key)
+        tpl, err := repo.dir.Sub("{{joinFieldNames $idx.Fields}}_index").Unpack(kv.Key)
         if err != nil {
             return nil, err
         }
         // The primary key fields are after the index fields
-        pkTuple := tuple[{{len $idx.Fields}}:] // Skip the index fields
+        pkTuple := tpl[{{len $idx.Fields}}:] // Skip the index fields
         key := repo.dir.Pack(pkTuple)
         value := tr.Get(key).MustGet()
         if value == nil {
             continue
         }
         entity := &pb.{{$.Name}}{}
-        err = entity.Unmarshal(value)
+        err = proto.Unmarshal(value, entity)
         if err != nil {
             return nil, err
         }

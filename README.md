@@ -46,7 +46,7 @@ package myapp;
 
 option go_package = "github.com/yourusername/yourproject/pb;pb";
 
-import "fdb-go-layer/annotations.proto";
+import "fdb-layer/annotations.proto";
 
 message User {
   option (annotations.primary_key) = "id";
@@ -61,6 +61,7 @@ message User {
 Run the `protoc` compiler with the plugin to generate Go code for your messages and repositories.
 ```
 protoc \
+  -I=. -I=$(go list -m -f '{{ .Dir }}' github.com/romannikov/fdb-go-layer-plugin) \
   --plugin=protoc-gen-fdb-go-layer-plugin=./fdb-go-layer-plugin \
   --fdb-go-layer-plugin_out=. \
   --go_out=. \
@@ -101,7 +102,7 @@ func main() {
     }
 
     // Save the user using a transaction
-    err = db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+    _, err = db.Transact(func(tr fdb.Transaction) (interface{}, error) {
         return nil, userRepo.Set(ctx, tr, user)
     })
     if err != nil {
