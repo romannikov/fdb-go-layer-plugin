@@ -1,65 +1,56 @@
-# FoundationDB Go Layer Plugin
+# FDB Go Layer Plugin
 
-A `protoc` plugin that generates Go repository code for interacting with FoundationDB, based on annotated Protobuf definitions.
-
-## Overview
-
-The FoundationDB Go Layer Plugin simplifies the process of creating Go repositories that interact with FoundationDB. By annotating your Protobuf messages with custom options, you can automatically generate repository code that handles common CRUD operations, including support for primary keys and secondary indexes.
+A protoc plugin that generates FoundationDB data access layer code for Proto messages.
 
 ## Features
 
--   Automatic Repository Generation: Generate Go code for repositories based on your Protobuf message definitions.
--   Primary Key Support: Define primary keys using custom annotations in your .proto files.
--   Secondary Indexes: Add secondary indexes to your messages for efficient querying.
--   FoundationDB Integration: Generated code uses the FoundationDB Go bindings for database operations.
--   Transaction Management: Supports both automatic and manual transaction management.
--   Customizable and Extensible: Extend and customize the generated code without modifying the generated files.
+- Generates FoundationDB data access functions for Proto messages
+- Supports primary key and secondary index annotations
+- Provides CRUD operations and batch operations
+- Handles index management automatically
+- Thread-safe operations using FoundationDB transactions
 
 ## Installation
 
-### Prerequisites
--   Go 1.18 or later
--   `protoc` compiler (version compatible with your Protobuf definitions)
--   FoundationDB installed and configured
--   `protoc-gen-go` and `protoc-gen-go-grpc` plugins installed
-
-### Install the Plugin
-You can install the plugin using go install:
-```
+```bash
 go install github.com/romannikov/fdb-go-layer-plugin@latest
 ```
+
 Ensure that your GOPATH/bin is in your PATH so that protoc can find the plugin:
-```
+
+```bash
 export PATH="$PATH:$(go env GOPATH)/bin"
 ```
 
 ## Usage
 
-### Define Your Protobuf Messages
-Create your `.proto` files with custom annotations for primary keys and secondary indexes.
+1. Add annotations to your Proto messages:
 
-Example `user.proto`:
-```
-syntax = "proto3";
-
-package myapp;
-
-option go_package = "github.com/yourusername/yourproject/pb;pb";
-
+```protobuf
+syntax = "proto3"
 import "fdb-layer/annotations.proto";
 
 message User {
-  option (annotations.primary_key) = "id";
-  option (annotations.secondary_index) = { fields: "email" };
+    option (fdb_layer.primary_key) = "id";
+    option (fdb_layer.secondary_index) = {
+        fields: ["email"]
+    };
+    option (fdb_layer.secondary_index) = {
+        fields: ["name", "age"]
+    };
 
-  int64 id = 1;
-  string name = 2;
-  string email = 3;
+    string id = 1;
+    string email = 2;
+    string name = 3;
+    int32 age = 4;
 }
 ```
+
 ### Generate Code
+
 Run the `protoc` compiler with the plugin to generate Go code for your messages and repositories.
-```
+
+```bash
 protoc \
   -I=. -I=$(go list -m -f '{{ .Dir }}' github.com/romannikov/fdb-go-layer-plugin) \
   --plugin=protoc-gen-fdb-go-layer-plugin=./fdb-go-layer-plugin \
@@ -68,64 +59,93 @@ protoc \
   --go_opt=paths=source_relative \
   user.proto
 ```
-### Use the Generated Repositories
-Import the generated repository code into your Go application.
+
+## Generated Code
+
+The plugin generates the following functions for each message:
+
+### Basic Operations
+
+```go
+// Create a new entity
+CreateUser(tr fdb.Transaction, dir directory.DirectorySubspace, entity *pb.User) error
+
+// Get an entity by primary key
+GetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, id string) (*pb.User, error)
+
+// Update an existing entity
+SetUser(tr fdb.Transaction, dir directory.DirectorySubspace, entity *pb.User) error
+
+// Delete an entity
+DeleteUser(tr fdb.Transaction, dir directory.DirectorySubspace, id string) error
+
+// Batch get multiple entities by their primary keys
+BatchGetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*pb.User, error)
 ```
+
+### Secondary Index Operations
+
+For each secondary index, the plugin generates a lookup function:
+
+```go
+// Get by email index
+GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, email string) ([]*pb.User, error)
+
+// Get by name and age index
+GetUserByNameAndAge(tr fdb.ReadTransaction, dir directory.DirectorySubspace, name string, age int32) ([]*pb.User, error)
+```
+
+## Example Usage
+
+```go
 package main
 
 import (
-    "context"
-    "fmt"
-    "log"
-
     "github.com/apple/foundationdb/bindings/go/src/fdb"
-    pb "github.com/yourusername/yourproject/pb"
-    "github.com/yourusername/yourproject/repositories"
+    "github.com/apple/foundationdb/bindings/go/src/fdb/directory"
+    "your/package/db"
+    pb "your/package/proto"
 )
 
 func main() {
-    fdb.MustAPIVersion(620)
+    // Initialize FDB
+    fdb.MustAPIVersion(710)
     db := fdb.MustOpenDefault()
 
-    userRepo, err := repositories.NewUserRepository(db)
+    // Create directory subspace
+    dir, err := directory.CreateOrOpen(db, []string{"myapp"}, nil)
     if err != nil {
-        log.Fatal(err)
+        panic(err)
     }
 
-    ctx := context.Background()
+    // Start a transaction
+    tr, err := db.CreateTransaction()
+    if err != nil {
+        panic(err)
+    }
 
     // Create a new user
     user := &pb.User{
-        Id:    1,
-        Name:  "Alice",
-        Email: "alice@example.com",
+        Id:    "123",
+        Email: "user@example.com",
+        Name:  "John Doe",
+        Age:   30,
+    }
+    err = db.CreateUser(tr, dir, user)
+    if err != nil {
+        panic(err)
     }
 
-    // Save the user using a transaction
-    _, err = db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-        return nil, userRepo.Set(ctx, tr, user)
-    })
+    // Commit the transaction
+    err = tr.Commit().Get()
     if err != nil {
-        log.Fatal(err)
+        panic(err)
     }
 
     fmt.Println("User saved successfully")
 }
 ```
-# Contributing
-Contributions are welcome! Please open issues and pull requests to improve the plugin.
 
-## Fork the repository.
-- Create a new branch: `git checkout -b feature/your-feature`.
-- Commit your changes: `git commit -am 'Add new feature'`.
-- Push to the branch: `git push origin feature/your-feature`.
-- Open a pull request.
+## License
 
-# License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-# Acknowledgments
-- [FoundationDB](https://www.foundationdb.org) for their powerful distributed database.
-- [Protocol Buffers](https://protobuf.dev) for efficient data serialization.
-- The [Go](https://go.dev) community for their valuable libraries and tools.
+MIT
