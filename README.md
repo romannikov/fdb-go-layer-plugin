@@ -47,9 +47,7 @@ message User {
 ```
 
 ### Generate Code
-
 Run the `protoc` compiler with the plugin to generate Go code for your messages and repositories.
-
 ```bash
 protoc \
   -I=. -I=$(go list -m -f '{{ .Dir }}' github.com/romannikov/fdb-go-layer-plugin) \
