@@ -1,4 +1,4 @@
-# FDB Go Layer Plugin
+# FoundationDB Go Layer Plugin
 
 A protoc plugin that generates FoundationDB data access layer code for Proto messages.
 
