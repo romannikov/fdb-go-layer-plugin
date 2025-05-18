@@ -366,4 +366,37 @@ func Get{{$.Name}}By{{joinFieldNames $idx.Fields}}(tr fdb.ReadTransaction, dir d
     return entities, nil
 }
 {{end}}
+
+// BatchGet{{.Name}} retrieves multiple {{.Name}} entities by their primary keys.
+// Parameters:
+//   - tr: FoundationDB read transaction
+//   - dir: directory subspace for the entity
+//   - ids: slice of primary key tuples, where each tuple contains {{range $index, $element := .PrimaryKeyFields}}{{if $index}}, {{end}}{{.Name}} {{.Type}}{{end}}
+// Returns:
+//   - map of primary key tuples (as strings) to their corresponding entities
+//   - error if any occurred during the operation
+func BatchGet{{.Name}}(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*pb.{{.Name}}, error) {
+    result := make(map[string]*pb.{{.Name}})
+    futures := make([]fdb.FutureByteSlice, len(ids))
+
+    for i, id := range ids {
+        key := dir.Sub("{{.Name}}").Pack(id)
+        futures[i] = tr.Get(key)
+    }
+
+    for i, future := range futures {
+        value := future.MustGet()
+        if value == nil {
+            continue
+        }
+        entity := &pb.{{.Name}}{}
+        err := proto.Unmarshal(value, entity)
+        if err != nil {
+            return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
+        }
+        result[ids[i].String()] = entity
+    }
+
+    return result, nil
+}
 `
