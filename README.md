@@ -24,7 +24,7 @@ export PATH="$PATH:$(go env GOPATH)/bin"
 
 ## Usage
 
-1. Add annotations to your Proto messages:
+### Add annotations to your Proto messages:
 
 ```protobuf
 syntax = "proto3"
