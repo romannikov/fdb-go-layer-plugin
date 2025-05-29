@@ -64,6 +64,7 @@ func main() {
 		// Generate code for each message
 		tmpl := template.Must(template.New("fdb").Funcs(template.FuncMap{
 			"joinFieldNames": joinFieldNames,
+			"lower":          strings.ToLower,
 		}).Parse(fdbTemplate))
 
 		for _, msg := range messages {
@@ -223,13 +224,17 @@ import (
     pb "{{.GoPackagePath}}"
 )
 
+const (
+    {{.Name}}KeyPrefix = "{{.Name | lower}}"
+)
+
 // Create{{.Name}} creates a new {{.Name}} entity in the database.
 // Parameters:
 //   - tr: FoundationDB transaction
 //   - dir: directory subspace for the entity
 //   - entity: the {{.Name}} entity to create
 func Create{{.Name}}(tr fdb.Transaction, dir directory.DirectorySubspace, entity *pb.{{.Name}}) error {
-    key := dir.Sub("{{.Name}}").Pack(tuple.Tuple{ {{range .PrimaryKeyFields}} entity.{{.Name}}, {{end}} })
+    key := dir.Sub({{.Name}}KeyPrefix).Pack(tuple.Tuple{ {{range .PrimaryKeyFields}} entity.{{.Name}}, {{end}} })
     value, err := proto.Marshal(entity)
     if err != nil {
         return err
@@ -238,9 +243,9 @@ func Create{{.Name}}(tr fdb.Transaction, dir directory.DirectorySubspace, entity
 
     {{range $idxIndex, $idx := .SecondaryIndexes}}
     {{if eq $idxIndex 0}}
-    indexKey := dir.Sub("{{$.Name}}").Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
+    indexKey := dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
     {{else}}
-    indexKey = dir.Sub("{{$.Name}}").Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
+    indexKey = dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
     {{end}}
         {{range $i, $f := $idx.Fields}} entity.{{ $f.Name }}, {{end}}
         {{range $.PrimaryKeyFields}} entity.{{.Name}}, {{end}}
@@ -255,13 +260,12 @@ func Create{{.Name}}(tr fdb.Transaction, dir directory.DirectorySubspace, entity
 // Parameters:
 //   - tr: FoundationDB read transaction
 //   - dir: directory subspace for the entity
-//   {{range .PrimaryKeyFields}}//   - {{.Name}}: primary key field {{.Name}} of type {{.Type}}
-//   {{end}}
+//   {{range .PrimaryKeyFields}}//   - {{.Name}}: primary key field {{.Name}} of type {{.Type}}{{end}}
 func Get{{.Name}}(tr fdb.ReadTransaction, dir directory.DirectorySubspace, {{range $index, $element := .PrimaryKeyFields}}{{if $index}}, {{end}}{{.Name}} {{.Type}}{{end}}) (*pb.{{.Name}}, error) {
-    key := dir.Sub("{{.Name}}").Pack(tuple.Tuple{ {{range .PrimaryKeyFields}} {{.Name}}, {{end}} })
+    key := dir.Sub({{.Name}}KeyPrefix).Pack(tuple.Tuple{ {{range .PrimaryKeyFields}} {{.Name}}, {{end}} })
     value := tr.Get(key).MustGet()
     if value == nil {
-        return nil, fmt.Errorf("{{.Name}} not found")
+        return nil, fmt.Errorf("{{.Name | lower}} not found")
     }
     entity := &pb.{{.Name}}{}
     err := proto.Unmarshal(value, entity)
@@ -277,7 +281,7 @@ func Get{{.Name}}(tr fdb.ReadTransaction, dir directory.DirectorySubspace, {{ran
 //   - dir: directory subspace for the entity
 //   - entity: the {{.Name}} entity to update
 func Set{{.Name}}(tr fdb.Transaction, dir directory.DirectorySubspace, entity *pb.{{.Name}}) error {
-    key := dir.Sub("{{.Name}}").Pack(tuple.Tuple{ {{range .PrimaryKeyFields}} entity.{{.Name}}, {{end}} })
+    key := dir.Sub({{.Name}}KeyPrefix).Pack(tuple.Tuple{ {{range .PrimaryKeyFields}} entity.{{.Name}}, {{end}} })
     value, err := proto.Marshal(entity)
     if err != nil {
         return err
@@ -286,9 +290,9 @@ func Set{{.Name}}(tr fdb.Transaction, dir directory.DirectorySubspace, entity *p
 
     {{range $idxIndex, $idx := .SecondaryIndexes}}
     {{if eq $idxIndex 0}}
-    indexKey := dir.Sub("{{$.Name}}").Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
+    indexKey := dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
     {{else}}
-    indexKey = dir.Sub("{{$.Name}}").Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
+    indexKey = dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
     {{end}}
         {{range $i, $f := $idx.Fields}} entity.{{ $f.Name }}, {{end}}
         {{range $.PrimaryKeyFields}} entity.{{.Name}}, {{end}}
@@ -303,10 +307,9 @@ func Set{{.Name}}(tr fdb.Transaction, dir directory.DirectorySubspace, entity *p
 // Parameters:
 //   - tr: FoundationDB transaction
 //   - dir: directory subspace for the entity
-//   {{range .PrimaryKeyFields}}//   - {{.Name}}: primary key field {{.Name}} of type {{.Type}}
-//   {{end}}
+//   {{range .PrimaryKeyFields}}//   - {{.Name}}: primary key field {{.Name}} of type {{.Type}}{{end}}
 func Delete{{.Name}}(tr fdb.Transaction, dir directory.DirectorySubspace, {{range $index, $element := .PrimaryKeyFields}}{{if $index}}, {{end}}{{.Name}} {{.Type}}{{end}}) error {
-    key := dir.Sub("{{.Name}}").Pack(tuple.Tuple{ {{range .PrimaryKeyFields}} {{.Name}}, {{end}} })
+    key := dir.Sub({{.Name}}KeyPrefix).Pack(tuple.Tuple{ {{range .PrimaryKeyFields}} {{.Name}}, {{end}} })
     value := tr.Get(key).MustGet()
     if value != nil {
         entity := &pb.{{.Name}}{}
@@ -314,9 +317,9 @@ func Delete{{.Name}}(tr fdb.Transaction, dir directory.DirectorySubspace, {{rang
         if err == nil {
             {{range $idxIndex, $idx := .SecondaryIndexes}}
             {{if eq $idxIndex 0}}
-            indexKey := dir.Sub("{{$.Name}}").Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
+            indexKey := dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
             {{else}}
-            indexKey = dir.Sub("{{$.Name}}").Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
+            indexKey = dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
             {{end}}
                 {{range $i, $f := $idx.Fields}} entity.{{ $f.Name }}, {{end}}
                 {{range $.PrimaryKeyFields}} entity.{{.Name}}, {{end}}
@@ -334,24 +337,23 @@ func Delete{{.Name}}(tr fdb.Transaction, dir directory.DirectorySubspace, {{rang
 // Parameters:
 //   - tr: FoundationDB read transaction
 //   - dir: directory subspace for the entity
-//   {{range $i, $f := $idx.Fields}}//   - {{$f.Name}}: index field {{$f.Name}} of type {{$f.Type}}
-//   {{end}}
+//   {{range $i, $f := $idx.Fields}}//   - {{$f.Name}}: index field {{$f.Name}} of type {{$f.Type}}{{end}}
 func Get{{$.Name}}By{{joinFieldNames $idx.Fields}}(tr fdb.ReadTransaction, dir directory.DirectorySubspace, {{range $i, $f := $idx.Fields}}{{if $i}}, {{end}}{{$f.Name}} {{$f.Type}}{{end}}) ([]*pb.{{$.Name}}, error) {
     entities := []*pb.{{$.Name}}{}
 
-    indexKeyPrefix := dir.Sub("{{$.Name}}").Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{ {{range $i, $f := $idx.Fields}} {{$f.Name}}, {{end}} })
+    indexKeyPrefix := dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{ {{range $i, $f := $idx.Fields}} {{$f.Name}}, {{end}} })
     indexRange, err := fdb.PrefixRange(indexKeyPrefix)
     if err != nil {
         return nil, err
     }
     kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
     for _, kv := range kvs {
-        tpl, err := dir.Sub("{{$.Name}}").Sub("{{joinFieldNames $idx.Fields}}_index").Unpack(kv.Key)
+        tpl, err := dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Unpack(kv.Key)
         if err != nil {
             return nil, err
         }
         pkTuple := tpl[{{len $idx.Fields}}:]
-        key := dir.Sub("{{$.Name}}").Pack(pkTuple)
+        key := dir.Sub({{$.Name}}KeyPrefix).Pack(pkTuple)
         value := tr.Get(key).MustGet()
         if value == nil {
             continue
@@ -380,7 +382,7 @@ func BatchGet{{.Name}}(tr fdb.ReadTransaction, dir directory.DirectorySubspace, 
     futures := make([]fdb.FutureByteSlice, len(ids))
 
     for i, id := range ids {
-        key := dir.Sub("{{.Name}}").Pack(id)
+        key := dir.Sub({{.Name}}KeyPrefix).Pack(id)
         futures[i] = tr.Get(key)
     }
 
