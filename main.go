@@ -226,7 +226,21 @@ import (
 
 const (
     {{.Name}}KeyPrefix = "{{.Name | lower}}"
+    {{.Name}}IndexPrefix = "indexes"
 )
+
+// {{.Name}}PaginationOptions represents options for paginated queries
+type {{.Name}}PaginationOptions struct {
+    Begin tuple.Tuple
+    Limit int
+}
+
+// {{.Name}}PaginatedResult represents a paginated result set
+type {{.Name}}PaginatedResult struct {
+    Items      []*pb.{{.Name}}
+    NextKey    tuple.Tuple
+    HasMore    bool
+}
 
 // Create{{.Name}} creates a new {{.Name}} entity in the database.
 // Parameters:
@@ -243,9 +257,9 @@ func Create{{.Name}}(tr fdb.Transaction, dir directory.DirectorySubspace, entity
 
     {{range $idxIndex, $idx := .SecondaryIndexes}}
     {{if eq $idxIndex 0}}
-    indexKey := dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
+    indexKey := dir.Sub({{$.Name}}IndexPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
     {{else}}
-    indexKey = dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
+    indexKey = dir.Sub({{$.Name}}IndexPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
     {{end}}
         {{range $i, $f := $idx.Fields}} entity.{{ $f.Name }}, {{end}}
         {{range $.PrimaryKeyFields}} entity.{{.Name}}, {{end}}
@@ -290,9 +304,9 @@ func Set{{.Name}}(tr fdb.Transaction, dir directory.DirectorySubspace, entity *p
 
     {{range $idxIndex, $idx := .SecondaryIndexes}}
     {{if eq $idxIndex 0}}
-    indexKey := dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
+    indexKey := dir.Sub({{$.Name}}IndexPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
     {{else}}
-    indexKey = dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
+    indexKey = dir.Sub({{$.Name}}IndexPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
     {{end}}
         {{range $i, $f := $idx.Fields}} entity.{{ $f.Name }}, {{end}}
         {{range $.PrimaryKeyFields}} entity.{{.Name}}, {{end}}
@@ -317,9 +331,9 @@ func Delete{{.Name}}(tr fdb.Transaction, dir directory.DirectorySubspace, {{rang
         if err == nil {
             {{range $idxIndex, $idx := .SecondaryIndexes}}
             {{if eq $idxIndex 0}}
-            indexKey := dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
+            indexKey := dir.Sub({{$.Name}}IndexPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
             {{else}}
-            indexKey = dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
+            indexKey = dir.Sub({{$.Name}}IndexPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{
             {{end}}
                 {{range $i, $f := $idx.Fields}} entity.{{ $f.Name }}, {{end}}
                 {{range $.PrimaryKeyFields}} entity.{{.Name}}, {{end}}
@@ -341,14 +355,14 @@ func Delete{{.Name}}(tr fdb.Transaction, dir directory.DirectorySubspace, {{rang
 func Get{{$.Name}}By{{joinFieldNames $idx.Fields}}(tr fdb.ReadTransaction, dir directory.DirectorySubspace, {{range $i, $f := $idx.Fields}}{{if $i}}, {{end}}{{$f.Name}} {{$f.Type}}{{end}}) ([]*pb.{{$.Name}}, error) {
     entities := []*pb.{{$.Name}}{}
 
-    indexKeyPrefix := dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{ {{range $i, $f := $idx.Fields}} {{$f.Name}}, {{end}} })
+    indexKeyPrefix := dir.Sub({{$.Name}}IndexPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Pack(tuple.Tuple{ {{range $i, $f := $idx.Fields}} {{$f.Name}}, {{end}} })
     indexRange, err := fdb.PrefixRange(indexKeyPrefix)
     if err != nil {
         return nil, err
     }
     kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
     for _, kv := range kvs {
-        tpl, err := dir.Sub({{$.Name}}KeyPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Unpack(kv.Key)
+        tpl, err := dir.Sub({{$.Name}}IndexPrefix).Sub("{{joinFieldNames $idx.Fields}}_index").Unpack(kv.Key)
         if err != nil {
             return nil, err
         }
@@ -397,6 +411,60 @@ func BatchGet{{.Name}}(tr fdb.ReadTransaction, dir directory.DirectorySubspace, 
             return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
         }
         result[ids[i].String()] = entity
+    }
+
+    return result, nil
+}
+
+// List{{.Name}} retrieves a list of {{.Name}} entities starting from the given key.
+// Parameters:
+//   - tr: FoundationDB read transaction
+//   - dir: directory subspace for the entity
+//   - opts: pagination options with begin key and limit
+// Returns:
+//   - {{.Name}}PaginatedResult containing the items and the next key if there are more items
+//   - error if any occurred during the operation
+func List{{.Name}}(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts {{.Name}}PaginationOptions) (*{{.Name}}PaginatedResult, error) {
+    result := &{{.Name}}PaginatedResult{
+        Items: make([]*pb.{{.Name}}, 0),
+    }
+
+    // Get the range for all {{.Name}} entities
+    keyPrefix := dir.Sub({{.Name}}KeyPrefix)
+    begin := keyPrefix.Pack(opts.Begin)
+    end := keyPrefix.Pack(tuple.Tuple{math.MaxInt64})
+
+    // Get the paginated items
+    iter := tr.GetRange(fdb.KeyRange{
+        Begin: begin,
+        End:   end,
+    }, fdb.RangeOptions{
+        Limit:   opts.Limit + 1, // Get one extra to check if there are more
+        Reverse: false,
+    }).Iterator()
+
+    var nextKey fdb.Key
+    for iter.Advance() {
+        kv := iter.MustGet()
+        entity := &pb.{{.Name}}{}
+        err := proto.Unmarshal(kv.Value, entity)
+        if err != nil {
+            return nil, fmt.Errorf("failed to unmarshal entity: %w", err)
+        }
+        result.Items = append(result.Items, entity)
+        nextKey = kv.Key
+    }
+
+    // Check if there are more items
+    result.HasMore = len(result.Items) > opts.Limit
+    if result.HasMore {
+        // Get the key of the next item
+        tpl, err := keyPrefix.Unpack(nextKey)
+        if err != nil {
+            return nil, fmt.Errorf("failed to unpack next key: %w", err)
+        }
+        result.NextKey = tpl
+        result.Items = result.Items[:opts.Limit]
     }
 
     return result, nil

@@ -9,6 +9,7 @@ A protoc plugin that generates FoundationDB data access layer code for Proto mes
 - Provides CRUD operations and batch operations
 - Handles index management automatically
 - Thread-safe operations using FoundationDB transactions
+- Supports pagination for list operations
 
 ## Installation
 
@@ -79,6 +80,28 @@ DeleteUser(tr fdb.Transaction, dir directory.DirectorySubspace, id string) error
 
 // Batch get multiple entities by their primary keys
 BatchGetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*pb.User, error)
+
+// List entities with pagination
+ListUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
+```
+
+### Pagination
+
+The plugin generates pagination support with the following types:
+
+```go
+// Pagination options
+type UserPaginationOptions struct {
+    Begin tuple.Tuple  // Starting key for the query
+    Limit int         // Maximum number of items to return
+}
+
+// Paginated result
+type UserPaginatedResult struct {
+    Items   []*pb.User  // List of items
+    NextKey tuple.Tuple // Key for the next page
+    HasMore bool        // Whether there are more items
+}
 ```
 
 ### Secondary Index Operations
@@ -100,6 +123,7 @@ package main
 
 import (
     "github.com/apple/foundationdb/bindings/go/src/fdb"
+    "github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
     "github.com/apple/foundationdb/bindings/go/src/fdb/directory"
     "your/package/db"
     pb "your/package/proto"
