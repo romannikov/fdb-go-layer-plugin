@@ -48,9 +48,15 @@ func TestVersionstampIndex(t *testing.T) {
 	
 	// Our mock uses "0123456789" as dummy versionstamp
 	dummyVS := []byte("0123456789")
-	indexKey := dir.Pack(tuple.Tuple{typeID, "index", "versionstamp", dummyVS, doc.Id})
 	
-	if !kv.HasKey(indexKey) {
+	prefixTpl := tuple.Tuple{typeID, "index", "versionstamp"}
+	prefixBytes := dir.Pack(prefixTpl)
+	pkBytes := tuple.Tuple{doc.Id}.Pack()
+	
+	expectedKey := append(prefixBytes, dummyVS...)
+	expectedKey = append(expectedKey, pkBytes...)
+	
+	if !kv.HasKey(expectedKey) {
 		t.Errorf("Missing index entry for versionstamp")
 	}
 }
