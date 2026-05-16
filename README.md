@@ -4,12 +4,14 @@ A protoc plugin that generates FoundationDB data access layer code for Proto mes
 
 ## Features
 
-- Generates FoundationDB data access functions for Proto messages
+- **Multi-Type Record Stores** — multiple Protobuf messages share the same subspace with automatic integer-based type IDs
+- **Runtime Metadata Registry** — stable type IDs are managed in an FDB meta-space via `SyncMetadata`
+- **RecordStore Pattern** — no global state; all operations are methods on a `RecordStore` struct
 - Supports primary key and secondary index annotations
-- Provides CRUD operations and batch operations
-- Handles index management automatically
+- Provides CRUD, batch, and paginated list operations
 - Thread-safe operations using FoundationDB transactions
 - Supports pagination for list operations
+- Handles index management automatically
 
 ## Installation
 
@@ -25,80 +27,110 @@ export PATH="$PATH:$(go env GOPATH)/bin"
 
 ## Usage
 
-### Add annotations to your Proto messages:
+### 1. Add annotations to your Proto messages
 
 ```protobuf
-syntax = "proto3"
+syntax = "proto3";
 import "fdb-layer/annotations.proto";
 
 message User {
-    option (fdb_layer.primary_key) = "id";
-    option (fdb_layer.secondary_index) = {
+    option (annotations.primary_key) = "id";
+    option (annotations.secondary_index) = {
         fields: ["email"]
-    };
-    option (fdb_layer.secondary_index) = {
-        fields: ["name", "age"]
     };
 
     string id = 1;
-    string email = 2;
-    string name = 3;
-    int32 age = 4;
+    string name = 2;
+    string email = 3;
+}
+
+message Product {
+    option (annotations.primary_key) = "id";
+    option (annotations.secondary_index) = {
+        fields: ["category"]
+    };
+
+    string id = 1;
+    string name = 2;
+    string category = 3;
+    int32 price = 4;
 }
 ```
 
-### Generate Code
-Run the `protoc` compiler with the plugin to generate Go code for your messages and repositories.
+### 2. Generate Code
+
 ```bash
 protoc \
   -I=. -I=$(go list -m -f '{{ .Dir }}' github.com/romannikov/fdb-go-layer-plugin) \
-  --plugin=protoc-gen-fdb-go-layer-plugin=./fdb-go-layer-plugin \
-  --fdb-go-layer-plugin_out=. \
+  --plugin=protoc-gen-fdb-layer=./fdb-go-layer-plugin \
+  --fdb-layer_out=. \
+  --fdb-layer_opt=paths=source_relative \
   --go_out=. \
   --go_opt=paths=source_relative \
-  user.proto
+  your/proto/file.proto
 ```
+
+This generates:
+- `*_metadata.go` — `RecordStore` struct, `Transaction` interface, and `SyncMetadata` method
+- `*_<message>.go` — CRUD methods for each annotated message
 
 ## Generated Code
 
-The plugin generates the following functions for each message:
+### Core Types
 
-### Basic Operations
+```go
+// Transaction is a mockable interface that abstracts fdb.Transaction.
+type Transaction interface {
+    fdb.ReadTransaction
+    Set(key fdb.KeyConvertible, value []byte)
+    Clear(key fdb.KeyConvertible)
+}
+
+// RecordStore holds metadata mapping between message names and their integer type IDs.
+type RecordStore struct { /* unexported metadata field */ }
+
+// NewRecordStore creates a new RecordStore instance.
+func NewRecordStore() *RecordStore
+
+// SyncMetadata reads the existing metadata from FDB and assigns new IDs to any unmapped messages.
+func (s *RecordStore) SyncMetadata(tr Transaction, metaDir directory.DirectorySubspace) error
+
+// Metadata returns a read-only copy of the metadata mapping.
+func (s *RecordStore) Metadata() map[string]int64
+```
+
+### CRUD Operations (methods on `*RecordStore`)
 
 ```go
 // Create a new entity
-CreateUser(tr fdb.Transaction, dir directory.DirectorySubspace, entity *pb.User) error
+store.CreateUser(tr Transaction, dir directory.DirectorySubspace, entity *User) error
 
 // Get an entity by primary key
-GetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, id string) (*pb.User, error)
+store.GetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, id string) (*User, error)
 
 // Update an existing entity
-SetUser(tr fdb.Transaction, dir directory.DirectorySubspace, entity *pb.User) error
+store.SetUser(tr Transaction, dir directory.DirectorySubspace, entity *User) error
 
 // Delete an entity
-DeleteUser(tr fdb.Transaction, dir directory.DirectorySubspace, id string) error
+store.DeleteUser(tr Transaction, dir directory.DirectorySubspace, id string) error
 
 // Batch get multiple entities by their primary keys
-BatchGetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*pb.User, error)
+store.BatchGetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error)
 
 // List entities with pagination
-ListUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
+store.ListUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
 ```
 
 ### Pagination
 
-The plugin generates pagination support with the following types:
-
 ```go
-// Pagination options
 type UserPaginationOptions struct {
     Begin tuple.Tuple  // Starting key for the query
-    Limit int         // Maximum number of items to return
+    Limit int          // Maximum number of items to return
 }
 
-// Paginated result
 type UserPaginatedResult struct {
-    Items   []*pb.User  // List of items
+    Items   []*User     // List of items
     NextKey tuple.Tuple // Key for the next page
     HasMore bool        // Whether there are more items
 }
@@ -106,14 +138,10 @@ type UserPaginatedResult struct {
 
 ### Secondary Index Operations
 
-For each secondary index, the plugin generates a lookup function:
+For each secondary index, the plugin generates a lookup method:
 
 ```go
-// Get by email index
-GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, email string) ([]*pb.User, error)
-
-// Get by name and age index
-GetUserByNameAndAge(tr fdb.ReadTransaction, dir directory.DirectorySubspace, name string, age int32) ([]*pb.User, error)
+store.GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, email string) ([]*User, error)
 ```
 
 ## Example Usage
@@ -122,47 +150,35 @@ GetUserByNameAndAge(tr fdb.ReadTransaction, dir directory.DirectorySubspace, nam
 package main
 
 import (
+    "fmt"
     "github.com/apple/foundationdb/bindings/go/src/fdb"
-    "github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
     "github.com/apple/foundationdb/bindings/go/src/fdb/directory"
-    "your/package/db"
-    pb "your/package/proto"
+    db "your/package/generated"
 )
 
 func main() {
-    // Initialize FDB
-    fdb.MustAPIVersion(710)
-    db := fdb.MustOpenDefault()
+    fdb.MustAPIVersion(730)
+    fdbConn := fdb.MustOpenDefault()
 
-    // Create directory subspace
-    dir, err := directory.CreateOrOpen(db, []string{"myapp"}, nil)
-    if err != nil {
-        panic(err)
-    }
+    // Create directory subspaces for data and metadata
+    dataDir, _ := directory.CreateOrOpen(fdbConn, []string{"app_data"}, nil)
+    metaDir, _ := directory.CreateOrOpen(fdbConn, []string{"app_data", "_meta"}, nil)
 
-    // Start a transaction
-    tr, err := db.CreateTransaction()
-    if err != nil {
-        panic(err)
-    }
+    // Initialize the RecordStore and sync metadata
+    store := db.NewRecordStore()
+    fdbConn.Transact(func(tr fdb.Transaction) (interface{}, error) {
+        return nil, store.SyncMetadata(tr, metaDir)
+    })
 
     // Create a new user
-    user := &pb.User{
-        Id:    "123",
-        Email: "user@example.com",
-        Name:  "John Doe",
-        Age:   30,
-    }
-    err = db.CreateUser(tr, dir, user)
-    if err != nil {
-        panic(err)
-    }
-
-    // Commit the transaction
-    err = tr.Commit().Get()
-    if err != nil {
-        panic(err)
-    }
+    fdbConn.Transact(func(tr fdb.Transaction) (interface{}, error) {
+        user := &db.User{
+            Id:    "123",
+            Email: "user@example.com",
+            Name:  "John Doe",
+        }
+        return nil, store.CreateUser(tr, dataDir, user)
+    })
 
     fmt.Println("User saved successfully")
 }
