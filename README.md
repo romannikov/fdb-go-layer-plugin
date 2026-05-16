@@ -55,6 +55,17 @@ message Product {
     string category = 3;
     int32 price = 4;
 }
+
+// Fan-out index: repeated fields create one index entry per element
+message Post {
+    option (annotations.primary_key) = "id";
+    option (annotations.secondary_index) = {
+        fields: ["tags"]
+    };
+
+    string id = 1;
+    repeated string tags = 2;
+}
 ```
 
 ### 2. Generate Code
@@ -141,8 +152,21 @@ type UserPaginatedResult struct {
 For each secondary index, the plugin generates a lookup method:
 
 ```go
+// Standard index — lookup by a single scalar field
 store.GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, email string) ([]*User, error)
 ```
+
+#### Fan-Out Indexes
+
+When a secondary index references a `repeated` field, the plugin generates a **fan-out index**.
+One index entry is written per element in the repeated field, enabling efficient lookups by any single value:
+
+```go
+// Fan-out index — lookup posts by any one of their tags
+store.GetPostByTags(tr fdb.ReadTransaction, dir directory.DirectorySubspace, tag string) ([]*Post, error)
+```
+
+On `Set` and `Delete`, all old fan-out entries are automatically cleared and re-written.
 
 ## Example Usage
 

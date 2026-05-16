@@ -577,3 +577,410 @@ func TestIntegration_BatchGetUser(t *testing.T) {
 		t.Fatalf("expected 3, got %d", len(result))
 	}
 }
+
+// Fan-Out Index (Post / Tags)
+func TestIntegration_CreateAndGetPost(t *testing.T) {
+	db := fdb.MustOpenDefault()
+	dir, cleanup := testDir(t, db)
+	defer cleanup()
+
+	store := NewRecordStore()
+	withTx(t, db, func(tr fdb.Transaction) error {
+		if err := store.SyncMetadata(tr, dir); err != nil {
+			return err
+		}
+		return store.CreatePost(tr, dir, &Post{Id: "p1", Tags: []string{"go", "fdb", "testing"}})
+	})
+
+	var post *Post
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		post, err = store.GetPost(tr, dir, "p1")
+		return err
+	})
+	if post.Id != "p1" {
+		t.Fatalf("unexpected post id: %s", post.Id)
+	}
+	if len(post.Tags) != 3 {
+		t.Fatalf("expected 3 tags, got %d", len(post.Tags))
+	}
+}
+
+func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
+	db := fdb.MustOpenDefault()
+	dir, cleanup := testDir(t, db)
+	defer cleanup()
+
+	store := NewRecordStore()
+	withTx(t, db, func(tr fdb.Transaction) error {
+		if err := store.SyncMetadata(tr, dir); err != nil {
+			return err
+		}
+		if err := store.CreatePost(tr, dir, &Post{Id: "p1", Tags: []string{"go", "fdb"}}); err != nil {
+			return err
+		}
+		if err := store.CreatePost(tr, dir, &Post{Id: "p2", Tags: []string{"go", "rust"}}); err != nil {
+			return err
+		}
+		return store.CreatePost(tr, dir, &Post{Id: "p3", Tags: []string{"rust", "wasm"}})
+	})
+
+	// "go" should match p1 and p2
+	var posts []*Post
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		posts, err = store.GetPostByTags(tr, dir, "go")
+		return err
+	})
+	if len(posts) != 2 {
+		t.Fatalf("expected 2 posts tagged 'go', got %d", len(posts))
+	}
+
+	// "rust" should match p2 and p3
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		posts, err = store.GetPostByTags(tr, dir, "rust")
+		return err
+	})
+	if len(posts) != 2 {
+		t.Fatalf("expected 2 posts tagged 'rust', got %d", len(posts))
+	}
+
+	// "fdb" should match only p1
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		posts, err = store.GetPostByTags(tr, dir, "fdb")
+		return err
+	})
+	if len(posts) != 1 || posts[0].Id != "p1" {
+		t.Fatalf("expected p1 for 'fdb', got %+v", posts)
+	}
+
+	// "wasm" should match only p3
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		posts, err = store.GetPostByTags(tr, dir, "wasm")
+		return err
+	})
+	if len(posts) != 1 || posts[0].Id != "p3" {
+		t.Fatalf("expected p3 for 'wasm', got %+v", posts)
+	}
+
+	// Nonexistent tag
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		posts, err = store.GetPostByTags(tr, dir, "python")
+		return err
+	})
+	if len(posts) != 0 {
+		t.Fatalf("expected 0 posts for 'python', got %d", len(posts))
+	}
+}
+
+func TestIntegration_SetPost_FanOutIndexUpdated(t *testing.T) {
+	db := fdb.MustOpenDefault()
+	dir, cleanup := testDir(t, db)
+	defer cleanup()
+
+	store := NewRecordStore()
+	withTx(t, db, func(tr fdb.Transaction) error {
+		if err := store.SyncMetadata(tr, dir); err != nil {
+			return err
+		}
+		return store.CreatePost(tr, dir, &Post{Id: "p1", Tags: []string{"alpha", "beta"}})
+	})
+
+	// Update tags: remove "alpha", keep "beta", add "gamma"
+	withTx(t, db, func(tr fdb.Transaction) error {
+		return store.SetPost(tr, dir, &Post{Id: "p1", Tags: []string{"beta", "gamma"}})
+	})
+
+	// "alpha" should no longer return any results (stale index cleared)
+	var posts []*Post
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		posts, err = store.GetPostByTags(tr, dir, "alpha")
+		return err
+	})
+	if len(posts) != 0 {
+		t.Fatal("stale fan-out index: 'alpha' still returns results after update")
+	}
+
+	// "beta" should still find the post
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		posts, err = store.GetPostByTags(tr, dir, "beta")
+		return err
+	})
+	if len(posts) != 1 || posts[0].Id != "p1" {
+		t.Fatalf("expected p1 for 'beta', got %+v", posts)
+	}
+
+	// "gamma" should find the post (new index entry)
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		posts, err = store.GetPostByTags(tr, dir, "gamma")
+		return err
+	})
+	if len(posts) != 1 || posts[0].Id != "p1" {
+		t.Fatalf("expected p1 for 'gamma', got %+v", posts)
+	}
+}
+
+func TestIntegration_DeletePost_ClearsFanOutIndex(t *testing.T) {
+	db := fdb.MustOpenDefault()
+	dir, cleanup := testDir(t, db)
+	defer cleanup()
+
+	store := NewRecordStore()
+	withTx(t, db, func(tr fdb.Transaction) error {
+		if err := store.SyncMetadata(tr, dir); err != nil {
+			return err
+		}
+		return store.CreatePost(tr, dir, &Post{Id: "p1", Tags: []string{"x", "y", "z"}})
+	})
+
+	withTx(t, db, func(tr fdb.Transaction) error {
+		return store.DeletePost(tr, dir, "p1")
+	})
+
+	// All tag index entries should be cleared
+	for _, tag := range []string{"x", "y", "z"} {
+		var posts []*Post
+		withTx(t, db, func(tr fdb.Transaction) error {
+			var err error
+			posts, err = store.GetPostByTags(tr, dir, tag)
+			return err
+		})
+		if len(posts) != 0 {
+			t.Fatalf("fan-out index not cleared for tag %q after delete", tag)
+		}
+	}
+
+	// Get should fail
+	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+		return store.GetPost(tr, dir, "p1")
+	})
+	if err == nil {
+		t.Fatal("expected not found after delete")
+	}
+}
+
+func TestIntegration_ListPost_WithFanOutIndex(t *testing.T) {
+	db := fdb.MustOpenDefault()
+	dir, cleanup := testDir(t, db)
+	defer cleanup()
+
+	store := NewRecordStore()
+	withTx(t, db, func(tr fdb.Transaction) error {
+		if err := store.SyncMetadata(tr, dir); err != nil {
+			return err
+		}
+		// Create posts with multiple tags each — generates many index entries
+		for i := 0; i < 5; i++ {
+			if err := store.CreatePost(tr, dir, &Post{
+				Id:   fmt.Sprintf("p%d", i),
+				Tags: []string{"common", fmt.Sprintf("unique%d", i)},
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	// List should return all 5 posts, skipping index entries
+	var result *PostPaginatedResult
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		result, err = store.ListPost(tr, dir, PostPaginationOptions{Limit: 10})
+		return err
+	})
+	if len(result.Items) != 5 {
+		t.Fatalf("expected 5 posts, got %d", len(result.Items))
+	}
+	if result.HasMore {
+		t.Fatal("should not have more pages")
+	}
+}
+
+func TestIntegration_ListPost_Pagination(t *testing.T) {
+	db := fdb.MustOpenDefault()
+	dir, cleanup := testDir(t, db)
+	defer cleanup()
+
+	store := NewRecordStore()
+	withTx(t, db, func(tr fdb.Transaction) error {
+		if err := store.SyncMetadata(tr, dir); err != nil {
+			return err
+		}
+		for i := 0; i < 5; i++ {
+			if err := store.CreatePost(tr, dir, &Post{
+				Id:   fmt.Sprintf("p%d", i),
+				Tags: []string{"t1", "t2", "t3"},
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	// Page through with limit 2
+	var page1 *PostPaginatedResult
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		page1, err = store.ListPost(tr, dir, PostPaginationOptions{Limit: 2})
+		return err
+	})
+	if len(page1.Items) != 2 {
+		t.Fatalf("page1: expected 2 items, got %d", len(page1.Items))
+	}
+	if !page1.HasMore {
+		t.Fatal("page1: expected HasMore=true")
+	}
+
+	var page2 *PostPaginatedResult
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		page2, err = store.ListPost(tr, dir, PostPaginationOptions{Begin: page1.NextKey, Limit: 2})
+		return err
+	})
+	if len(page2.Items) != 2 {
+		t.Fatalf("page2: expected 2 items, got %d", len(page2.Items))
+	}
+
+	var page3 *PostPaginatedResult
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		page3, err = store.ListPost(tr, dir, PostPaginationOptions{Begin: page2.NextKey, Limit: 2})
+		return err
+	})
+	if len(page3.Items) != 1 {
+		t.Fatalf("page3: expected 1 item, got %d", len(page3.Items))
+	}
+	if page3.HasMore {
+		t.Fatal("page3: expected HasMore=false")
+	}
+}
+
+func TestIntegration_Post_EmptyTags(t *testing.T) {
+	db := fdb.MustOpenDefault()
+	dir, cleanup := testDir(t, db)
+	defer cleanup()
+
+	store := NewRecordStore()
+	withTx(t, db, func(tr fdb.Transaction) error {
+		if err := store.SyncMetadata(tr, dir); err != nil {
+			return err
+		}
+		return store.CreatePost(tr, dir, &Post{Id: "p1", Tags: []string{}})
+	})
+
+	var post *Post
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		post, err = store.GetPost(tr, dir, "p1")
+		return err
+	})
+	if post.Id != "p1" {
+		t.Fatalf("unexpected post: %+v", post)
+	}
+	if len(post.Tags) != 0 {
+		t.Fatalf("expected empty tags, got %v", post.Tags)
+	}
+}
+
+func TestIntegration_BatchGetPost(t *testing.T) {
+	db := fdb.MustOpenDefault()
+	dir, cleanup := testDir(t, db)
+	defer cleanup()
+
+	store := NewRecordStore()
+	withTx(t, db, func(tr fdb.Transaction) error {
+		if err := store.SyncMetadata(tr, dir); err != nil {
+			return err
+		}
+		for _, id := range []string{"p1", "p2", "p3"} {
+			if err := store.CreatePost(tr, dir, &Post{Id: id, Tags: []string{"tag"}}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	var result map[string]*Post
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		result, err = store.BatchGetPost(tr, dir, []tuple.Tuple{{"p1"}, {"p2"}, {"p3"}})
+		return err
+	})
+	if len(result) != 3 {
+		t.Fatalf("expected 3, got %d", len(result))
+	}
+}
+
+// ==========================================================================
+// Cross-Type Isolation with Complex Indexes
+// ==========================================================================
+
+func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
+	db := fdb.MustOpenDefault()
+	dir, cleanup := testDir(t, db)
+	defer cleanup()
+
+	store := NewRecordStore()
+	withTx(t, db, func(tr fdb.Transaction) error {
+		if err := store.SyncMetadata(tr, dir); err != nil {
+			return err
+		}
+		// Create entities of all types simultaneously
+		if err := store.CreateUser(tr, dir, &User{Id: "u1", Name: "Alice", Email: "a@test.com"}); err != nil {
+			return err
+		}
+		if err := store.CreateProduct(tr, dir, &Product{Id: "pr1", Name: "Widget", Category: "tools", Price: 10}); err != nil {
+			return err
+		}
+		return store.CreatePost(tr, dir, &Post{Id: "po1", Tags: []string{"go"}})
+	})
+
+	// Each type's operations should be completely isolated
+	var users []*User
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		users, err = store.GetUserByEmail(tr, dir, "a@test.com")
+		return err
+	})
+	if len(users) != 1 {
+		t.Fatalf("expected 1 user, got %d", len(users))
+	}
+
+	var posts []*Post
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		posts, err = store.GetPostByTags(tr, dir, "go")
+		return err
+	})
+	if len(posts) != 1 {
+		t.Fatalf("expected 1 post, got %d", len(posts))
+	}
+
+	// Verify listing each type returns exactly 1 entity
+	var userResult *UserPaginatedResult
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		userResult, err = store.ListUser(tr, dir, UserPaginationOptions{Limit: 10})
+		return err
+	})
+	if len(userResult.Items) != 1 {
+		t.Fatalf("expected 1 user in list, got %d", len(userResult.Items))
+	}
+
+	var postResult *PostPaginatedResult
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		postResult, err = store.ListPost(tr, dir, PostPaginationOptions{Limit: 10})
+		return err
+	})
+	if len(postResult.Items) != 1 {
+		t.Fatalf("expected 1 post in list, got %d", len(postResult.Items))
+	}
+}

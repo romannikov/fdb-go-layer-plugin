@@ -21,9 +21,9 @@ func TestSyncMetadata_FreshStore(t *testing.T) {
 	if meta["User"] == meta["Product"] {
 		t.Fatalf("User and Product got the same type ID")
 	}
-	// Two metadata keys should have been written
-	if len(tr.kv.Snapshot()) != 4 {
-		t.Fatalf("expected 4 keys written, got %d", len(tr.kv.Snapshot()))
+	// Three metadata keys should have been written
+	if len(tr.kv.Snapshot()) != 3 {
+		t.Fatalf("expected 3 keys written, got %d", len(tr.kv.Snapshot()))
 	}
 }
 

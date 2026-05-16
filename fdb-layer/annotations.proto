@@ -15,5 +15,4 @@ extend google.protobuf.MessageOptions {
 
 message SecondaryIndex {
   repeated string fields = 1;
-  bool versionstamp = 2;
 }

@@ -38,13 +38,3 @@ message Post {
     string id = 1;
     repeated string tags = 2;
 }
-
-message Document {
-    option (annotations.primary_key) = "id";
-    option (annotations.secondary_index) = {
-        versionstamp: true
-    };
-
-    string id = 1;
-    string content = 2;
-}
