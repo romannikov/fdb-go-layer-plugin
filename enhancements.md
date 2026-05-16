@@ -3,12 +3,9 @@
 ## 1. Functional Enhancements
 
 ### Support for Multi-Type Record Stores
-Currently, the plugin seems to focus on single-message repositories. FoundationDB’s "Record Layer" (the Java inspiration) allows multiple message types to share the same subspace.
-
-**Improvement:** Allow a single repository to manage multiple Protobuf messages, using a "type header" in the FDB key to distinguish between them.
 
 ### Complex Indexing (Function Indexes)
-**Improvement:** Support for fan-out indexes (indexing individual elements of a repeated field) and versionstamp indexes (using FDB’s atomic versionstamps to track when a record was last modified).
+**Improvement:** Support for versionstamp indexes (using FDB’s atomic versionstamps to track when a record was last modified).
 
 ### Atomic Operations
 **Improvement:** Add support for FDB atomic mutations (like `ADD`, `MAX`, `MIN`) directly via Proto annotations. This would allow updating specific fields without a full read-modify-write cycle.
