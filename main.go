@@ -320,7 +320,6 @@ package {{.GoPackageName}}
 
 import (
 	"fmt"
-	"math"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
@@ -566,28 +565,49 @@ func (s *RecordStore) List{{.Name}}(tr fdb.ReadTransaction, dir directory.Direct
 
 	beginTpl := append(tuple.Tuple{typeID}, opts.Begin...)
 	begin := dir.Pack(beginTpl)
-	
-	endTpl := append(tuple.Tuple{typeID}, math.MaxInt64)
-	end := dir.Pack(endTpl)
+
+	// Scan all keys under typeID. We request extra rows to account for
+	// index entries that will be filtered out.
+	typePrefix := dir.Pack(tuple.Tuple{typeID})
+	typePrefixRange, err := fdb.PrefixRange(typePrefix)
+	if err != nil {
+		return nil, err
+	}
 
 	iter := tr.GetRange(fdb.KeyRange{
 		Begin: begin,
-		End:   end,
+		End:   typePrefixRange.End,
 	}, fdb.RangeOptions{
-		Limit:   opts.Limit + 1,
 		Reverse: false,
 	}).Iterator()
 
 	var nextKey fdb.Key
 	for iter.Advance() {
 		kv := iter.MustGet()
+
+		// Skip index entries: their second tuple element is the string "index".
+		tpl, err := dir.Unpack(kv.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unpack key: %w", err)
+		}
+		if len(tpl) >= 2 {
+			if s, ok := tpl[1].(string); ok && s == "index" {
+				continue
+			}
+		}
+
 		entity := &{{.Name}}{}
-		err := proto.Unmarshal(kv.Value, entity)
+		err = proto.Unmarshal(kv.Value, entity)
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)
 		}
 		result.Items = append(result.Items, entity)
 		nextKey = kv.Key
+
+		// Stop once we have enough items for pagination check
+		if len(result.Items) > opts.Limit {
+			break
+		}
 	}
 
 	result.HasMore = len(result.Items) > opts.Limit
