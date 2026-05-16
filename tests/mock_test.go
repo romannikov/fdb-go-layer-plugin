@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"encoding/binary"
 	"sort"
 	"sync"
 
@@ -172,6 +173,26 @@ func (m *MockTransaction) Clear(key fdb.KeyConvertible) {
 
 func (m *MockTransaction) Get(key fdb.KeyConvertible) fdb.FutureByteSlice {
 	return &MockFutureByteSlice{value: m.kv.get(key.FDBKey())}
+}
+
+func (m *MockTransaction) SetVersionstampedKey(key fdb.KeyConvertible, value []byte) {
+	keyBytes := key.FDBKey()
+	if len(keyBytes) < 2 {
+		panic("invalid versionstamped key: too short")
+	}
+	offset := binary.LittleEndian.Uint16(keyBytes[len(keyBytes)-2:])
+	
+	dummyVS := []byte("0123456789")
+	
+	newKey := make([]byte, len(keyBytes)-2)
+	copy(newKey, keyBytes[:len(keyBytes)-2])
+	
+	if int(offset)+10 > len(newKey) {
+		panic("invalid versionstamped key: offset out of bounds")
+	}
+	copy(newKey[offset:], dummyVS)
+	
+	m.kv.set(newKey, value)
 }
 
 // GetRange returns a zero-value fdb.RangeResult. This means GetSliceOrPanic()

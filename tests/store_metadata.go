@@ -14,6 +14,7 @@ type Transaction interface {
 	fdb.ReadTransaction
 	Set(key fdb.KeyConvertible, value []byte)
 	Clear(key fdb.KeyConvertible)
+	SetVersionstampedKey(key fdb.KeyConvertible, value []byte)
 }
 
 // RecordStore holds metadata mapping between message names and their integer type IDs.
@@ -62,6 +63,8 @@ func (s *RecordStore) SyncMetadata(tr Transaction, metaDir directory.DirectorySu
 	messages := []string{
 		"User",
 		"Product",
+		"Post",
+		"Document",
 	}
 
 	for _, msg := range messages {

@@ -6,40 +6,39 @@ package store
 import (
 	"fmt"
 
-
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	"google.golang.org/protobuf/proto"
 )
 
-// UserPaginationOptions represents options for paginated queries
-type UserPaginationOptions struct {
+// ProductPaginationOptions represents options for paginated queries
+type ProductPaginationOptions struct {
 	Begin tuple.Tuple
 	Limit int
 }
 
-// UserPaginatedResult represents a paginated result set
-type UserPaginatedResult struct {
-	Items   []*User
+// ProductPaginatedResult represents a paginated result set
+type ProductPaginatedResult struct {
+	Items   []*Product
 	NextKey tuple.Tuple
 	HasMore bool
 }
 
-func (s *RecordStore) getUserTypeID() (int64, error) {
+func (s *RecordStore) getProductTypeID() (int64, error) {
 	if s.metadata == nil {
 		return 0, fmt.Errorf("metadata not initialized, call SyncMetadata first")
 	}
-	typeID, ok := s.metadata["User"]
+	typeID, ok := s.metadata["Product"]
 	if !ok {
-		return 0, fmt.Errorf("type User not found in metadata")
+		return 0, fmt.Errorf("type Product not found in metadata")
 	}
 	return typeID, nil
 }
 
-// CreateUser creates a new User entity in the database.
-func (s *RecordStore) CreateUser(tr Transaction, dir directory.DirectorySubspace, entity *User) error {
-	typeID, err := s.getUserTypeID()
+// CreateProduct creates a new Product entity in the database.
+func (s *RecordStore) CreateProduct(tr Transaction, dir directory.DirectorySubspace, entity *Product) error {
+	typeID, err := s.getProductTypeID()
 	if err != nil {
 		return err
 	}
@@ -51,19 +50,23 @@ func (s *RecordStore) CreateUser(tr Transaction, dir directory.DirectorySubspace
 	}
 	tr.Set(key, value)
 
-	indexKey := dir.Pack(tuple.Tuple{typeID, "index", "Email",
+	{
 
-		entity.Email,
-		entity.Id,
-	})
-	tr.Set(indexKey, []byte{})
+		// Standard index
+		indexKey := dir.Pack(tuple.Tuple{typeID, "index", "Category",
+			entity.Category,
+			entity.Id,
+		})
+		tr.Set(indexKey, []byte{})
+
+	}
 
 	return nil
 }
 
-// GetUser retrieves a User entity by its primary key.
-func (s *RecordStore) GetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Id string) (*User, error) {
-	typeID, err := s.getUserTypeID()
+// GetProduct retrieves a Product entity by its primary key.
+func (s *RecordStore) GetProduct(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Id string) (*Product, error) {
+	typeID, err := s.getProductTypeID()
 	if err != nil {
 		return nil, err
 	}
@@ -71,9 +74,9 @@ func (s *RecordStore) GetUser(tr fdb.ReadTransaction, dir directory.DirectorySub
 	key := dir.Pack(tuple.Tuple{typeID, Id})
 	value := tr.Get(key).MustGet()
 	if value == nil {
-		return nil, fmt.Errorf("user not found")
+		return nil, fmt.Errorf("product not found")
 	}
-	entity := &User{}
+	entity := &Product{}
 	err = proto.Unmarshal(value, entity)
 	if err != nil {
 		return nil, err
@@ -81,9 +84,9 @@ func (s *RecordStore) GetUser(tr fdb.ReadTransaction, dir directory.DirectorySub
 	return entity, nil
 }
 
-// SetUser updates an existing User entity in the database.
-func (s *RecordStore) SetUser(tr Transaction, dir directory.DirectorySubspace, entity *User) error {
-	typeID, err := s.getUserTypeID()
+// SetProduct updates an existing Product entity in the database.
+func (s *RecordStore) SetProduct(tr Transaction, dir directory.DirectorySubspace, entity *Product) error {
+	typeID, err := s.getProductTypeID()
 	if err != nil {
 		return err
 	}
@@ -93,15 +96,19 @@ func (s *RecordStore) SetUser(tr Transaction, dir directory.DirectorySubspace, e
 	// Clear stale index entries from the old version of the entity
 	oldValue := tr.Get(key).MustGet()
 	if oldValue != nil {
-		old := &User{}
+		old := &Product{}
 		if unmarshalErr := proto.Unmarshal(oldValue, old); unmarshalErr == nil {
 
-			oldIndexKey := dir.Pack(tuple.Tuple{typeID, "index", "Email",
+			{
 
-				old.Email,
-				old.Id,
-			})
-			tr.Clear(oldIndexKey)
+				// Standard index
+				oldIndexKey := dir.Pack(tuple.Tuple{typeID, "index", "Category",
+					old.Category,
+					old.Id,
+				})
+				tr.Clear(oldIndexKey)
+
+			}
 
 		}
 	}
@@ -112,19 +119,23 @@ func (s *RecordStore) SetUser(tr Transaction, dir directory.DirectorySubspace, e
 	}
 	tr.Set(key, value)
 
-	indexKey := dir.Pack(tuple.Tuple{typeID, "index", "Email",
+	{
 
-		entity.Email,
-		entity.Id,
-	})
-	tr.Set(indexKey, []byte{})
+		// Standard index
+		indexKey := dir.Pack(tuple.Tuple{typeID, "index", "Category",
+			entity.Category,
+			entity.Id,
+		})
+		tr.Set(indexKey, []byte{})
+
+	}
 
 	return nil
 }
 
-// DeleteUser removes a User entity from the database.
-func (s *RecordStore) DeleteUser(tr Transaction, dir directory.DirectorySubspace, Id string) error {
-	typeID, err := s.getUserTypeID()
+// DeleteProduct removes a Product entity from the database.
+func (s *RecordStore) DeleteProduct(tr Transaction, dir directory.DirectorySubspace, Id string) error {
+	typeID, err := s.getProductTypeID()
 	if err != nil {
 		return err
 	}
@@ -132,16 +143,20 @@ func (s *RecordStore) DeleteUser(tr Transaction, dir directory.DirectorySubspace
 	key := dir.Pack(tuple.Tuple{typeID, Id})
 	value := tr.Get(key).MustGet()
 	if value != nil {
-		entity := &User{}
+		entity := &Product{}
 		err := proto.Unmarshal(value, entity)
 		if err == nil {
 
-			indexKey := dir.Pack(tuple.Tuple{typeID, "index", "Email",
+			{
 
-				entity.Email,
-				entity.Id,
-			})
-			tr.Clear(indexKey)
+				// Standard index
+				indexKey := dir.Pack(tuple.Tuple{typeID, "index", "Category",
+					entity.Category,
+					entity.Id,
+				})
+				tr.Clear(indexKey)
+
+			}
 
 		}
 	}
@@ -149,15 +164,15 @@ func (s *RecordStore) DeleteUser(tr Transaction, dir directory.DirectorySubspace
 	return nil
 }
 
-// GetUserByEmail retrieves User entities by their Email index.
-func (s *RecordStore) GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error) {
-	typeID, err := s.getUserTypeID()
+// GetProductByCategory retrieves Product entities by their Category index.
+func (s *RecordStore) GetProductByCategory(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Category string) ([]*Product, error) {
+	typeID, err := s.getProductTypeID()
 	if err != nil {
 		return nil, err
 	}
 
-	entities := []*User{}
-	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, "index", "Email", Email})
+	entities := []*Product{}
+	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, "index", "Category", Category})
 	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
 	if err != nil {
 		return nil, err
@@ -168,8 +183,6 @@ func (s *RecordStore) GetUserByEmail(tr fdb.ReadTransaction, dir directory.Direc
 		if err != nil {
 			return nil, err
 		}
-		// tpl is: {typeID, "index", "index_name", ...idx_fields, ...pk_fields}
-		// pk starts at index 3 + len(idx.Fields)
 		pkIndexStart := 3 + 1
 		pkTuple := tpl[pkIndexStart:]
 		keyTpl := append(tuple.Tuple{typeID}, pkTuple...)
@@ -178,7 +191,7 @@ func (s *RecordStore) GetUserByEmail(tr fdb.ReadTransaction, dir directory.Direc
 		if value == nil {
 			continue
 		}
-		entity := &User{}
+		entity := &Product{}
 		err = proto.Unmarshal(value, entity)
 		if err != nil {
 			return nil, err
@@ -188,14 +201,14 @@ func (s *RecordStore) GetUserByEmail(tr fdb.ReadTransaction, dir directory.Direc
 	return entities, nil
 }
 
-// BatchGetUser retrieves multiple User entities by their primary keys.
-func (s *RecordStore) BatchGetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error) {
-	typeID, err := s.getUserTypeID()
+// BatchGetProduct retrieves multiple Product entities by their primary keys.
+func (s *RecordStore) BatchGetProduct(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Product, error) {
+	typeID, err := s.getProductTypeID()
 	if err != nil {
 		return nil, err
 	}
 
-	result := make(map[string]*User)
+	result := make(map[string]*Product)
 	futures := make([]fdb.FutureByteSlice, len(ids))
 
 	for i, id := range ids {
@@ -209,7 +222,7 @@ func (s *RecordStore) BatchGetUser(tr fdb.ReadTransaction, dir directory.Directo
 		if value == nil {
 			continue
 		}
-		entity := &User{}
+		entity := &Product{}
 		err := proto.Unmarshal(value, entity)
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
@@ -220,21 +233,22 @@ func (s *RecordStore) BatchGetUser(tr fdb.ReadTransaction, dir directory.Directo
 	return result, nil
 }
 
-// ListUser retrieves a list of User entities starting from the given key.
-func (s *RecordStore) ListUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error) {
-	typeID, err := s.getUserTypeID()
+// ListProduct retrieves a list of Product entities starting from the given key.
+func (s *RecordStore) ListProduct(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts ProductPaginationOptions) (*ProductPaginatedResult, error) {
+	typeID, err := s.getProductTypeID()
 	if err != nil {
 		return nil, err
 	}
 
-	result := &UserPaginatedResult{
-		Items: make([]*User, 0),
+	result := &ProductPaginatedResult{
+		Items: make([]*Product, 0),
 	}
 
 	beginTpl := append(tuple.Tuple{typeID}, opts.Begin...)
 	begin := dir.Pack(beginTpl)
 
-	// Scan all keys under typeID. We filter out index entries during iteration.
+	// Scan all keys under typeID. We request extra rows to account for
+	// index entries that will be filtered out.
 	typePrefix := dir.Pack(tuple.Tuple{typeID})
 	typePrefixRange, err := fdb.PrefixRange(typePrefix)
 	if err != nil {
@@ -263,7 +277,7 @@ func (s *RecordStore) ListUser(tr fdb.ReadTransaction, dir directory.DirectorySu
 			}
 		}
 
-		entity := &User{}
+		entity := &Product{}
 		err = proto.Unmarshal(kv.Value, entity)
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)
