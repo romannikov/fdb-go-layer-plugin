@@ -28,3 +28,23 @@ message Product {
     string category = 3;
     int32 price = 4;
 }
+
+message Post {
+    option (annotations.primary_key) = "id";
+    option (annotations.secondary_index) = {
+        fields: ["tags"]
+    };
+
+    string id = 1;
+    repeated string tags = 2;
+}
+
+message Document {
+    option (annotations.primary_key) = "id";
+    option (annotations.secondary_index) = {
+        versionstamp: true
+    };
+
+    string id = 1;
+    string content = 2;
+}
