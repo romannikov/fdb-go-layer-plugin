@@ -889,215 +889,6 @@ func TestIntegration_Post_EmptyTags(t *testing.T) {
 	}
 }
 
-// Versionstamp Index (Document)
-func TestIntegration_CreateAndGetDocument(t *testing.T) {
-	db := fdb.MustOpenDefault()
-	dir, cleanup := testDir(t, db)
-	defer cleanup()
-
-	store := NewRecordStore()
-	withTx(t, db, func(tr fdb.Transaction) error {
-		if err := store.SyncMetadata(tr, dir); err != nil {
-			return err
-		}
-		return store.CreateDocument(tr, dir, &Document{Id: "d1", Content: "Hello World"})
-	})
-
-	var doc *Document
-	withTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		doc, err = store.GetDocument(tr, dir, "d1")
-		return err
-	})
-	if doc.Id != "d1" || doc.Content != "Hello World" {
-		t.Fatalf("unexpected document: %+v", doc)
-	}
-}
-
-func TestIntegration_GetDocumentByVersionstamp_Ordering(t *testing.T) {
-	db := fdb.MustOpenDefault()
-	dir, cleanup := testDir(t, db)
-	defer cleanup()
-
-	store := NewRecordStore()
-
-	// Create documents in separate transactions so each gets a distinct versionstamp
-	withTx(t, db, func(tr fdb.Transaction) error {
-		if err := store.SyncMetadata(tr, dir); err != nil {
-			return err
-		}
-		return store.CreateDocument(tr, dir, &Document{Id: "d1", Content: "First"})
-	})
-	withTx(t, db, func(tr fdb.Transaction) error {
-		return store.CreateDocument(tr, dir, &Document{Id: "d2", Content: "Second"})
-	})
-	withTx(t, db, func(tr fdb.Transaction) error {
-		return store.CreateDocument(tr, dir, &Document{Id: "d3", Content: "Third"})
-	})
-
-	// Query all by versionstamp (nil bounds = full range)
-	var docs []*Document
-	withTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		docs, err = store.GetDocumentByVersionstamp(tr, dir, nil, nil)
-		return err
-	})
-	if len(docs) != 3 {
-		t.Fatalf("expected 3 documents, got %d", len(docs))
-	}
-	// Documents should be in insertion order (versionstamp is monotonically increasing)
-	if docs[0].Content != "First" || docs[1].Content != "Second" || docs[2].Content != "Third" {
-		t.Fatalf("unexpected order: %s, %s, %s", docs[0].Content, docs[1].Content, docs[2].Content)
-	}
-}
-
-func TestIntegration_SetDocument_UpdateContent(t *testing.T) {
-	db := fdb.MustOpenDefault()
-	dir, cleanup := testDir(t, db)
-	defer cleanup()
-
-	store := NewRecordStore()
-	withTx(t, db, func(tr fdb.Transaction) error {
-		if err := store.SyncMetadata(tr, dir); err != nil {
-			return err
-		}
-		return store.CreateDocument(tr, dir, &Document{Id: "d1", Content: "Original"})
-	})
-
-	withTx(t, db, func(tr fdb.Transaction) error {
-		return store.SetDocument(tr, dir, &Document{Id: "d1", Content: "Updated"})
-	})
-
-	var doc *Document
-	withTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		doc, err = store.GetDocument(tr, dir, "d1")
-		return err
-	})
-	if doc.Content != "Updated" {
-		t.Fatalf("expected 'Updated', got %q", doc.Content)
-	}
-}
-
-func TestIntegration_DeleteDocument(t *testing.T) {
-	db := fdb.MustOpenDefault()
-	dir, cleanup := testDir(t, db)
-	defer cleanup()
-
-	store := NewRecordStore()
-	withTx(t, db, func(tr fdb.Transaction) error {
-		if err := store.SyncMetadata(tr, dir); err != nil {
-			return err
-		}
-		return store.CreateDocument(tr, dir, &Document{Id: "d1", Content: "Bye"})
-	})
-
-	withTx(t, db, func(tr fdb.Transaction) error {
-		return store.DeleteDocument(tr, dir, "d1")
-	})
-
-	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		return store.GetDocument(tr, dir, "d1")
-	})
-	if err == nil {
-		t.Fatal("expected not found after delete")
-	}
-}
-
-func TestIntegration_ListDocument_WithVersionstampIndex(t *testing.T) {
-	db := fdb.MustOpenDefault()
-	dir, cleanup := testDir(t, db)
-	defer cleanup()
-
-	store := NewRecordStore()
-	withTx(t, db, func(tr fdb.Transaction) error {
-		if err := store.SyncMetadata(tr, dir); err != nil {
-			return err
-		}
-		for i := 0; i < 4; i++ {
-			if err := store.CreateDocument(tr, dir, &Document{
-				Id:      fmt.Sprintf("d%d", i),
-				Content: fmt.Sprintf("Content%d", i),
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-
-	// List should return all 4 documents, correctly skipping versionstamp index entries
-	var result *DocumentPaginatedResult
-	withTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		result, err = store.ListDocument(tr, dir, DocumentPaginationOptions{Limit: 10})
-		return err
-	})
-	if len(result.Items) != 4 {
-		t.Fatalf("expected 4 documents, got %d", len(result.Items))
-	}
-	if result.HasMore {
-		t.Fatal("should not have more pages")
-	}
-}
-
-func TestIntegration_ListDocument_Pagination(t *testing.T) {
-	db := fdb.MustOpenDefault()
-	dir, cleanup := testDir(t, db)
-	defer cleanup()
-
-	store := NewRecordStore()
-	withTx(t, db, func(tr fdb.Transaction) error {
-		if err := store.SyncMetadata(tr, dir); err != nil {
-			return err
-		}
-		for i := 0; i < 5; i++ {
-			if err := store.CreateDocument(tr, dir, &Document{
-				Id:      fmt.Sprintf("d%d", i),
-				Content: fmt.Sprintf("Content%d", i),
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-
-	var page1 *DocumentPaginatedResult
-	withTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		page1, err = store.ListDocument(tr, dir, DocumentPaginationOptions{Limit: 2})
-		return err
-	})
-	if len(page1.Items) != 2 {
-		t.Fatalf("page1: expected 2, got %d", len(page1.Items))
-	}
-	if !page1.HasMore {
-		t.Fatal("page1: expected HasMore=true")
-	}
-
-	var page2 *DocumentPaginatedResult
-	withTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		page2, err = store.ListDocument(tr, dir, DocumentPaginationOptions{Begin: page1.NextKey, Limit: 2})
-		return err
-	})
-	if len(page2.Items) != 2 {
-		t.Fatalf("page2: expected 2, got %d", len(page2.Items))
-	}
-
-	var page3 *DocumentPaginatedResult
-	withTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		page3, err = store.ListDocument(tr, dir, DocumentPaginationOptions{Begin: page2.NextKey, Limit: 2})
-		return err
-	})
-	if len(page3.Items) != 1 {
-		t.Fatalf("page3: expected 1, got %d", len(page3.Items))
-	}
-	if page3.HasMore {
-		t.Fatal("page3: expected HasMore=false")
-	}
-}
-
 func TestIntegration_BatchGetPost(t *testing.T) {
 	db := fdb.MustOpenDefault()
 	dir, cleanup := testDir(t, db)
@@ -1127,35 +918,6 @@ func TestIntegration_BatchGetPost(t *testing.T) {
 	}
 }
 
-func TestIntegration_BatchGetDocument(t *testing.T) {
-	db := fdb.MustOpenDefault()
-	dir, cleanup := testDir(t, db)
-	defer cleanup()
-
-	store := NewRecordStore()
-	withTx(t, db, func(tr fdb.Transaction) error {
-		if err := store.SyncMetadata(tr, dir); err != nil {
-			return err
-		}
-		for _, id := range []string{"d1", "d2"} {
-			if err := store.CreateDocument(tr, dir, &Document{Id: id, Content: "c" + id}); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-
-	var result map[string]*Document
-	withTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		result, err = store.BatchGetDocument(tr, dir, []tuple.Tuple{{"d1"}, {"d2"}, {"d3"}})
-		return err
-	})
-	if len(result) != 2 {
-		t.Fatalf("expected 2 (d3 missing), got %d", len(result))
-	}
-}
-
 // ==========================================================================
 // Cross-Type Isolation with Complex Indexes
 // ==========================================================================
@@ -1177,10 +939,7 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 		if err := store.CreateProduct(tr, dir, &Product{Id: "pr1", Name: "Widget", Category: "tools", Price: 10}); err != nil {
 			return err
 		}
-		if err := store.CreatePost(tr, dir, &Post{Id: "po1", Tags: []string{"go"}}); err != nil {
-			return err
-		}
-		return store.CreateDocument(tr, dir, &Document{Id: "d1", Content: "doc"})
+		return store.CreatePost(tr, dir, &Post{Id: "po1", Tags: []string{"go"}})
 	})
 
 	// Each type's operations should be completely isolated
@@ -1204,16 +963,6 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 		t.Fatalf("expected 1 post, got %d", len(posts))
 	}
 
-	var docs []*Document
-	withTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		docs, err = store.GetDocumentByVersionstamp(tr, dir, nil, nil)
-		return err
-	})
-	if len(docs) != 1 {
-		t.Fatalf("expected 1 document, got %d", len(docs))
-	}
-
 	// Verify listing each type returns exactly 1 entity
 	var userResult *UserPaginatedResult
 	withTx(t, db, func(tr fdb.Transaction) error {
@@ -1233,15 +982,5 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 	})
 	if len(postResult.Items) != 1 {
 		t.Fatalf("expected 1 post in list, got %d", len(postResult.Items))
-	}
-
-	var docResult *DocumentPaginatedResult
-	withTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		docResult, err = store.ListDocument(tr, dir, DocumentPaginationOptions{Limit: 10})
-		return err
-	})
-	if len(docResult.Items) != 1 {
-		t.Fatalf("expected 1 document in list, got %d", len(docResult.Items))
 	}
 }

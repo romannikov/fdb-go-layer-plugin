@@ -66,17 +66,6 @@ message Post {
     string id = 1;
     repeated string tags = 2;
 }
-
-// Versionstamp index: ordered by FDB commit versionstamp
-message Document {
-    option (annotations.primary_key) = "id";
-    option (annotations.secondary_index) = {
-        versionstamp: true
-    };
-
-    string id = 1;
-    string content = 2;
-}
 ```
 
 ### 2. Generate Code
@@ -178,22 +167,6 @@ store.GetPostByTags(tr fdb.ReadTransaction, dir directory.DirectorySubspace, tag
 ```
 
 On `Set` and `Delete`, all old fan-out entries are automatically cleared and re-written.
-
-#### Versionstamp Indexes
-
-When a secondary index has `versionstamp: true`, the plugin writes an index key that includes the FDB commit versionstamp, enabling retrieval in commit order:
-
-```go
-// Versionstamp index — retrieve documents ordered by insertion/update time
-store.GetDocumentByVersionstamp(
-    tr fdb.ReadTransaction,
-    dir directory.DirectorySubspace,
-    beginVersionstamp []byte, // nil for start
-    endVersionstamp []byte,   // nil for end
-) ([]*Document, error)
-```
-
-> **Note:** Versionstamp index entries cannot be cleared on update or delete because the old versionstamp value is not stored. Successive updates will accumulate additional index entries pointing to the same record.
 
 ## Example Usage
 
