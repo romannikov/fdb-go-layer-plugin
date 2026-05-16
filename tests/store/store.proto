@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package tests.store;
+
+option go_package = "github.com/romannikov/fdb-go-layer-plugin/tests/store;store";
+
+import "fdb-layer/annotations.proto";
+
+message User {
+    option (annotations.primary_key) = "id";
+    option (annotations.secondary_index) = {
+        fields: ["email"]
+    };
+
+    string id = 1;
+    string name = 2;
+    string email = 3;
+}
+
+message Product {
+    option (annotations.primary_key) = "id";
+    option (annotations.secondary_index) = {
+        fields: ["category"]
+    };
+
+    string id = 1;
+    string name = 2;
+    string category = 3;
+    int32 price = 4;
+}
