@@ -55,6 +55,28 @@ message Product {
     string category = 3;
     int32 price = 4;
 }
+
+// Fan-out index: repeated fields create one index entry per element
+message Post {
+    option (annotations.primary_key) = "id";
+    option (annotations.secondary_index) = {
+        fields: ["tags"]
+    };
+
+    string id = 1;
+    repeated string tags = 2;
+}
+
+// Versionstamp index: ordered by FDB commit versionstamp
+message Document {
+    option (annotations.primary_key) = "id";
+    option (annotations.secondary_index) = {
+        versionstamp: true
+    };
+
+    string id = 1;
+    string content = 2;
+}
 ```
 
 ### 2. Generate Code
@@ -141,8 +163,37 @@ type UserPaginatedResult struct {
 For each secondary index, the plugin generates a lookup method:
 
 ```go
+// Standard index — lookup by a single scalar field
 store.GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, email string) ([]*User, error)
 ```
+
+#### Fan-Out Indexes
+
+When a secondary index references a `repeated` field, the plugin generates a **fan-out index**.
+One index entry is written per element in the repeated field, enabling efficient lookups by any single value:
+
+```go
+// Fan-out index — lookup posts by any one of their tags
+store.GetPostByTags(tr fdb.ReadTransaction, dir directory.DirectorySubspace, tag string) ([]*Post, error)
+```
+
+On `Set` and `Delete`, all old fan-out entries are automatically cleared and re-written.
+
+#### Versionstamp Indexes
+
+When a secondary index has `versionstamp: true`, the plugin writes an index key that includes the FDB commit versionstamp, enabling retrieval in commit order:
+
+```go
+// Versionstamp index — retrieve documents ordered by insertion/update time
+store.GetDocumentByVersionstamp(
+    tr fdb.ReadTransaction,
+    dir directory.DirectorySubspace,
+    beginVersionstamp []byte, // nil for start
+    endVersionstamp []byte,   // nil for end
+) ([]*Document, error)
+```
+
+> **Note:** Versionstamp index entries cannot be cleared on update or delete because the old versionstamp value is not stored. Successive updates will accumulate additional index entries pointing to the same record.
 
 ## Example Usage
 
