@@ -14,12 +14,14 @@ func TestFanOutIndex(t *testing.T) {
 	ctx := context.Background()
 	recordStore, tr, dir, kv := tests.SyncAndSetup()
 
+	postRepo := store.NewPostRepository(recordStore)
+
 	post := &store.Post{
 		Id:   "post1",
 		Tags: []string{"tag1", "tag2", "tag3"},
 	}
 
-	err := recordStore.CreatePost(ctx, tr, dir, post)
+	err := postRepo.Create(ctx, tr, dir, post)
 	if err != nil {
 		t.Fatal(err)
 	}

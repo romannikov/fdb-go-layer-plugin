@@ -13,7 +13,7 @@ import (
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
-	"github.com/romannikov/fdb-go-layer-plugin/tests/store"
+	fdblayer "github.com/romannikov/fdb-go-layer-plugin/fdb-layer"
 )
 
 // MockKV – in-memory sorted key-value store backing all mock FDB operations.
@@ -292,12 +292,12 @@ func (m *MockDirectorySubspace) FDBRangeKeySelectors() (fdb.Selectable, fdb.Sele
 
 // SyncAndSetup creates a RecordStore, syncs metadata, and
 // returns everything needed for CRUD tests.
-func SyncAndSetup() (*store.RecordStore, *MockTransaction, *MockDirectorySubspace, *MockKV) {
+func SyncAndSetup() (*fdblayer.RecordStore, *MockTransaction, *MockDirectorySubspace, *MockKV) {
 	kv := NewMockKV()
 	tr := NewMockTransaction(kv)
 	dir := &MockDirectorySubspace{}
-	recordStore := store.NewRecordStore()
-	_ = recordStore.SyncMetadata(context.Background(), tr, dir)
+	recordStore := fdblayer.NewRecordStore()
+	_ = recordStore.SyncMetadata(context.Background(), tr, dir, []string{"User", "Product", "Post"})
 	return recordStore, tr, dir, kv
 }
 
