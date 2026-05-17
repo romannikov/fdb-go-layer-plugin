@@ -7,9 +7,6 @@
 ### Complex Indexing (Function Indexes)
 **Improvement:** Support for versionstamp indexes (using FDB’s atomic versionstamps to track when a record was last modified).
 
-### Atomic Operations
-**Improvement:** Add support for FDB atomic mutations (like `ADD`, `MAX`, `MIN`) directly via Proto annotations. This would allow updating specific fields without a full read-modify-write cycle.
-
 ## 2. API Ergonomics & Go Idioms
 
 ### Context Support

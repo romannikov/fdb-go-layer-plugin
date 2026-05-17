@@ -16,3 +16,15 @@ extend google.protobuf.MessageOptions {
 message SecondaryIndex {
   repeated string fields = 1;
 }
+
+enum MutationType {
+  MUTATION_NONE = 0;
+  MUTATION_ADD = 1;
+  MUTATION_MAX = 2;
+  MUTATION_MIN = 3;
+}
+
+extend google.protobuf.FieldOptions {
+  MutationType mutation = 50003;
+}
+

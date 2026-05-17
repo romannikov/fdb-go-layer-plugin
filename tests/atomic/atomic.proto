@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package tests.atomic;
+
+option go_package = "github.com/romannikov/fdb-go-layer-plugin/tests/atomic;atomic";
+
+import "fdb-layer/annotations.proto";
+
+message Counter {
+    option (annotations.primary_key) = "id";
+    string id = 1;
+    int64 value = 2 [(annotations.mutation) = MUTATION_ADD];
+    int64 max_value = 3 [(annotations.mutation) = MUTATION_MAX];
+    int64 min_value = 4 [(annotations.mutation) = MUTATION_MIN];
+}
