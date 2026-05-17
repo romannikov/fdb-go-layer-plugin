@@ -263,7 +263,7 @@ func (s *RecordStore) AddCounterValue(tr Transaction, dir directory.DirectorySub
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val))
 
-	tr.AtomicOp(key, fdb.MutationTypeAdd, buf)
+	tr.AtomicOp(key, 2, buf)
 	return nil
 }
 
@@ -278,7 +278,7 @@ func (s *RecordStore) MaxCounterMaxValue(tr Transaction, dir directory.Directory
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val))
 
-	tr.AtomicOp(key, fdb.MutationTypeMax, buf)
+	tr.AtomicOp(key, 12, buf)
 	return nil
 }
 
@@ -293,7 +293,7 @@ func (s *RecordStore) MinCounterMinValue(tr Transaction, dir directory.Directory
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val))
 
-	tr.AtomicOp(key, fdb.MutationTypeMin, buf)
+	tr.AtomicOp(key, 13, buf)
 	return nil
 }
 

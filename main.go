@@ -20,6 +20,7 @@ type Field struct {
 	IsRepeated      bool
 	Mutation        annotationspb.MutationType
 	MutationFDBType string
+	MutationValue   int
 	Number          int32
 }
 
@@ -131,6 +132,7 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 		fieldOptions := field.Desc.Options()
 		var mutation annotationspb.MutationType
 		var mutationFDBType string
+		var mutationValue int
 		if proto.HasExtension(fieldOptions, annotationspb.E_Mutation) {
 			m := proto.GetExtension(fieldOptions, annotationspb.E_Mutation)
 			if m != nil {
@@ -138,10 +140,13 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 				switch mutation {
 				case annotationspb.MutationType_MUTATION_ADD:
 					mutationFDBType = "fdb.MutationTypeAdd"
+					mutationValue = 2
 				case annotationspb.MutationType_MUTATION_MAX:
 					mutationFDBType = "fdb.MutationTypeMax"
+					mutationValue = 12
 				case annotationspb.MutationType_MUTATION_MIN:
 					mutationFDBType = "fdb.MutationTypeMin"
+					mutationValue = 13
 				}
 			}
 		}
@@ -152,6 +157,7 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 			IsRepeated:      field.Desc.IsList(),
 			Mutation:        mutation,
 			MutationFDBType: mutationFDBType,
+			MutationValue:   mutationValue,
 			Number:          int32(field.Desc.Number()),
 		})
 	}
@@ -307,7 +313,7 @@ type Transaction interface {
 	fdb.ReadTransaction
 	Set(key fdb.KeyConvertible, value []byte)
 	Clear(key fdb.KeyConvertible)
-	AtomicOp(key fdb.KeyConvertible, mutationType fdb.MutationType, param []byte)
+	AtomicOp(key fdb.KeyConvertible, mutationType interface{}, param []byte)
 }
 
 // RecordStore holds metadata mapping between message names and their integer type IDs.
@@ -682,9 +688,9 @@ func (s *RecordStore) Delete{{.Name}}(tr Transaction, dir directory.DirectorySub
 }
 
 {{range .Fields}}
-{{if .MutationFDBType}}
-// {{if eq .MutationFDBType "fdb.MutationTypeAdd"}}Add{{else if eq .MutationFDBType "fdb.MutationTypeMax"}}Max{{else if eq .MutationFDBType "fdb.MutationTypeMin"}}Min{{end}}{{$.Name}}{{.Name}} applies an atomic mutation to the {{.Name}} field of {{$.Name}}.
-func (s *RecordStore) {{if eq .MutationFDBType "fdb.MutationTypeAdd"}}Add{{else if eq .MutationFDBType "fdb.MutationTypeMax"}}Max{{else if eq .MutationFDBType "fdb.MutationTypeMin"}}Min{{end}}{{$.Name}}{{.Name}}(tr Transaction, dir directory.DirectorySubspace, {{range $.PrimaryKeyFields}}{{.Name}} {{.Type}}, {{end}} val {{.Type}}) error {
+{{if .MutationValue}}
+// {{if eq .MutationValue 2}}Add{{else if eq .MutationValue 12}}Max{{else if eq .MutationValue 13}}Min{{end}}{{$.Name}}{{.Name}} applies an atomic mutation to the {{.Name}} field of {{$.Name}}.
+func (s *RecordStore) {{if eq .MutationValue 2}}Add{{else if eq .MutationValue 12}}Max{{else if eq .MutationValue 13}}Min{{end}}{{$.Name}}{{.Name}}(tr Transaction, dir directory.DirectorySubspace, {{range $.PrimaryKeyFields}}{{.Name}} {{.Type}}, {{end}} val {{.Type}}) error {
 	typeID, err := s.get{{$.Name}}TypeID()
 	if err != nil {
 		return err
@@ -694,7 +700,7 @@ func (s *RecordStore) {{if eq .MutationFDBType "fdb.MutationTypeAdd"}}Add{{else 
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val))
 	
-	tr.AtomicOp(key, {{.MutationFDBType}}, buf)
+	tr.AtomicOp(key, {{.MutationValue}}, buf)
 	return nil
 }
 {{end}}

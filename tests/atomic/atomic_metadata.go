@@ -14,7 +14,7 @@ type Transaction interface {
 	fdb.ReadTransaction
 	Set(key fdb.KeyConvertible, value []byte)
 	Clear(key fdb.KeyConvertible)
-	AtomicOp(key fdb.KeyConvertible, mutationType fdb.MutationType, param []byte)
+	AtomicOp(key fdb.KeyConvertible, mutationType interface{}, param []byte)
 }
 
 // RecordStore holds metadata mapping between message names and their integer type IDs.

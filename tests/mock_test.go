@@ -171,15 +171,23 @@ func (m *MockTransaction) Clear(key fdb.KeyConvertible) {
 	m.kv.clear(key.FDBKey())
 }
 
-func (m *MockTransaction) AtomicOp(key fdb.KeyConvertible, mutationType fdb.MutationType, param []byte) {
+func (m *MockTransaction) AtomicOp(key fdb.KeyConvertible, mutationType interface{}, param []byte) {
 	k := key.FDBKey()
 	m.kv.mu.Lock()
 	defer m.kv.mu.Unlock()
 
 	current := m.kv.data[string(k)]
 
-	switch mutationType {
-	case fdb.MutationTypeAdd:
+	var mt int
+	switch v := mutationType.(type) {
+	case int:
+		mt = v
+	default:
+		return
+	}
+
+	switch mt {
+	case 2: // fdb.MutationTypeAdd
 		var currentVal uint64
 		if len(current) >= 8 {
 			currentVal = binary.LittleEndian.Uint64(current)
@@ -190,7 +198,7 @@ func (m *MockTransaction) AtomicOp(key fdb.KeyConvertible, mutationType fdb.Muta
 		binary.LittleEndian.PutUint64(buf, newVal)
 		m.kv.data[string(k)] = buf
 
-	case fdb.MutationTypeMax:
+	case 12: // fdb.MutationTypeMax
 		var currentVal uint64
 		if len(current) >= 8 {
 			currentVal = binary.LittleEndian.Uint64(current)
@@ -200,7 +208,7 @@ func (m *MockTransaction) AtomicOp(key fdb.KeyConvertible, mutationType fdb.Muta
 			m.kv.data[string(k)] = param
 		}
 
-	case fdb.MutationTypeMin:
+	case 13: // fdb.MutationTypeMin
 		var currentVal uint64
 		if len(current) >= 8 {
 			currentVal = binary.LittleEndian.Uint64(current)
