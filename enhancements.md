@@ -29,7 +29,5 @@
 ## 4. Technical Debt & Robustness
 
 ### Directory Layer Caching
-**Improvement:** Resolving `directory.DirectorySubspace` on every call is expensive. Implement an internal cache within the generated client to store resolved subspaces.
-
 ### Tuple Packing Optimization
 **Improvement:** Ensure that the generated code uses efficient `tuple.Tuple` packing, especially for primary keys, to minimize key size and improve performance.
