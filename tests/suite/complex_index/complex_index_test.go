@@ -1,7 +1,6 @@
 package complex_index_test
 
 import (
-	"bytes"
 	"context"
 	"testing"
 
@@ -55,7 +54,7 @@ func TestVersionstampedPrimaryKey(t *testing.T) {
 		Payload:   []byte("send email"),
 	}
 
-	err := taskRepo.Create(ctx, tr, dir, task)
+	err := taskRepo.Enqueue(ctx, tr, dir, task)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,20 +71,5 @@ func TestVersionstampedPrimaryKey(t *testing.T) {
 
 	if !kv.HasKey(expectedKey) {
 		t.Fatalf("Expected key not found in mock store: %v", expectedKey)
-	}
-
-	// Retrieve the task by its primary key
-	pk := store.TaskMessagePrimaryKey{
-		QueueName:    "email_queue",
-		ShardId:      1,
-		Versionstamp: dummyVS,
-	}
-	fetched, err := taskRepo.Get(ctx, tr, dir, pk)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if fetched.QueueName != "email_queue" || fetched.ShardId != 1 || !bytes.Equal(fetched.Payload, []byte("send email")) {
-		t.Errorf("Unexpected fetched task: %+v", fetched)
 	}
 }

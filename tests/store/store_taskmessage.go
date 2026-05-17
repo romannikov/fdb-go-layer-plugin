@@ -6,8 +6,6 @@ package store
 import (
 	"context"
 
-	"fmt"
-
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
@@ -15,34 +13,10 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// TaskMessagePaginationOptions represents options for paginated queries
-type TaskMessagePaginationOptions struct {
-	Begin tuple.Tuple
-	Limit int
-}
-
-// TaskMessagePaginatedResult represents a paginated result set
-type TaskMessagePaginatedResult struct {
-	Items   []*TaskMessage
-	NextKey tuple.Tuple
-	HasMore bool
-}
-
-// TaskMessagePrimaryKey represents the compound primary key for TaskMessage.
-type TaskMessagePrimaryKey struct {
-	QueueName string
-
-	ShardId int32
-
-	Versionstamp interface{}
-}
-
-// TaskMessageRepository defines the repository interface for TaskMessage.
+// TaskMessageRepository defines the repository interface for the TaskMessage queue.
 type TaskMessageRepository interface {
-	fdblayer.GenericRepository[*TaskMessage, TaskMessagePrimaryKey]
-
-	BatchGetTaskMessage(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*TaskMessage, error)
-	ListTaskMessage(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts TaskMessagePaginationOptions) (*TaskMessagePaginatedResult, error)
+	Enqueue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, msg *TaskMessage) error
+	Dequeue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string) (*TaskMessage, error)
 }
 
 type taskmessageRepository struct {
@@ -54,8 +28,8 @@ func NewTaskMessageRepository(store *fdblayer.RecordStore) TaskMessageRepository
 	return &taskmessageRepository{store: store}
 }
 
-// Create creates a new TaskMessage entity in the database.
-func (r *taskmessageRepository) Create(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *TaskMessage) error {
+// Enqueue adds a TaskMessage to the queue.
+func (r *taskmessageRepository) Enqueue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *TaskMessage) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -69,24 +43,18 @@ func (r *taskmessageRepository) Create(ctx context.Context, tr fdblayer.Transact
 		return err
 	}
 
-	// Save atomic fields and zero them out for marshaling
-
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
 
-	// Restore atomic fields
-
 	tr.SetVersionstampedKey(key, value)
-
-	// Store atomic fields in separate keys
 
 	return nil
 }
 
-// Get retrieves a TaskMessage entity by its primary key.
-func (r *taskmessageRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk TaskMessagePrimaryKey) (*TaskMessage, error) {
+// Dequeue reads and removes the single oldest message from the queue.
+func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string) (*TaskMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -95,207 +63,30 @@ func (r *taskmessageRepository) Get(ctx context.Context, tr fdb.ReadTransaction,
 		return nil, err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, pk.QueueName, int64(pk.ShardId), pk.Versionstamp})
-	value := tr.Get(key).MustGet()
-	if value == nil {
-		return nil, fmt.Errorf("taskmessage not found")
-	}
-	entity := &TaskMessage{}
-	err = proto.Unmarshal(value, entity)
+	prefixTuple := tuple.Tuple{typeID, queuename}
+	prefixRange, err := fdb.PrefixRange(dir.Pack(prefixTuple))
 	if err != nil {
 		return nil, err
 	}
 
-	// Read atomic fields
+	options := fdb.RangeOptions{Limit: 1}
+	rows := tr.GetRange(prefixRange, options).GetSliceOrPanic()
+
+	if len(rows) == 0 {
+		return nil, nil
+	}
+
+	firstItem := rows[0]
+	keyToDelete := firstItem.Key
+	payload := firstItem.Value
+
+	tr.Clear(keyToDelete)
+
+	entity := &TaskMessage{}
+	err = proto.Unmarshal(payload, entity)
+	if err != nil {
+		return nil, err
+	}
 
 	return entity, nil
-}
-
-// Set updates an existing TaskMessage entity in the database.
-func (r *taskmessageRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *TaskMessage) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	typeID, err := r.store.GetTypeID("TaskMessage")
-	if err != nil {
-		return err
-	}
-
-	// If the entity already has a versionstamp, delete the old versionstamped record.
-	// (Since the primary key contains the versionstamp, an update changes the key itself).
-	hasOldVS := false
-	for _, b := range entity.Versionstamp {
-		if b != 0 {
-			hasOldVS = true
-			break
-		}
-	}
-	if hasOldVS {
-		oldKey := dir.Pack(tuple.Tuple{typeID, entity.QueueName, int64(entity.ShardId), entity.Versionstamp})
-		tr.Clear(oldKey)
-	}
-
-	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, entity.QueueName, int64(entity.ShardId), tuple.IncompleteVersionstamp(0)})
-	if err != nil {
-		return err
-	}
-
-	// Save atomic fields and zero them out for marshaling
-
-	value, err := proto.Marshal(entity)
-	if err != nil {
-		return err
-	}
-
-	// Restore atomic fields
-
-	tr.SetVersionstampedKey(key, value)
-
-	// Store atomic fields in separate keys
-
-	return nil
-}
-
-// Delete removes a TaskMessage entity from the database.
-func (r *taskmessageRepository) Delete(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk TaskMessagePrimaryKey) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	typeID, err := r.store.GetTypeID("TaskMessage")
-	if err != nil {
-		return err
-	}
-
-	key := dir.Pack(tuple.Tuple{typeID, pk.QueueName, int64(pk.ShardId), pk.Versionstamp})
-	value := tr.Get(key).MustGet()
-	if value != nil {
-		entity := &TaskMessage{}
-		err := proto.Unmarshal(value, entity)
-		if err == nil {
-
-		}
-	}
-	tr.Clear(key)
-	// Clear atomic fields
-
-	return nil
-}
-
-// BatchGetTaskMessage retrieves multiple TaskMessage entities by their primary keys.
-func (r *taskmessageRepository) BatchGetTaskMessage(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*TaskMessage, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	typeID, err := r.store.GetTypeID("TaskMessage")
-	if err != nil {
-		return nil, err
-	}
-
-	result := make(map[string]*TaskMessage)
-	futures := make([]fdb.FutureByteSlice, len(ids))
-
-	for i, id := range ids {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		keyTpl := append(tuple.Tuple{typeID}, id...)
-		key := dir.Pack(keyTpl)
-		futures[i] = tr.Get(key)
-	}
-
-	for i, future := range futures {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		value := future.MustGet()
-		if value == nil {
-			continue
-		}
-		entity := &TaskMessage{}
-		err := proto.Unmarshal(value, entity)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
-		}
-		result[ids[i].String()] = entity
-	}
-
-	return result, nil
-}
-
-// ListTaskMessage retrieves a list of TaskMessage entities starting from the given key.
-func (r *taskmessageRepository) ListTaskMessage(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts TaskMessagePaginationOptions) (*TaskMessagePaginatedResult, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	typeID, err := r.store.GetTypeID("TaskMessage")
-	if err != nil {
-		return nil, err
-	}
-
-	result := &TaskMessagePaginatedResult{
-		Items: make([]*TaskMessage, 0),
-	}
-
-	beginTpl := append(tuple.Tuple{typeID}, opts.Begin...)
-	begin := dir.Pack(beginTpl)
-
-	// Scan all keys under typeID. We request extra rows to account for
-	// index entries that will be filtered out.
-	typePrefix := dir.Pack(tuple.Tuple{typeID})
-	typePrefixRange, err := fdb.PrefixRange(typePrefix)
-	if err != nil {
-		return nil, err
-	}
-
-	iter := tr.GetRange(fdb.KeyRange{
-		Begin: begin,
-		End:   typePrefixRange.End,
-	}, fdb.RangeOptions{
-		Reverse: false,
-	}).Iterator()
-
-	var nextKey fdb.Key
-	for iter.Advance() {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		kv := iter.MustGet()
-
-		// Skip index entries: their second tuple element is the string "index".
-		tpl, err := dir.Unpack(kv.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unpack key: %w", err)
-		}
-		if len(tpl) >= 2 {
-			if s, ok := tpl[1].(string); ok && s == "index" {
-				continue
-			}
-		}
-
-		entity := &TaskMessage{}
-		err = proto.Unmarshal(kv.Value, entity)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)
-		}
-		result.Items = append(result.Items, entity)
-		nextKey = kv.Key
-
-		// Stop once we have enough items for pagination check
-		if len(result.Items) > opts.Limit {
-			break
-		}
-	}
-
-	result.HasMore = len(result.Items) > opts.Limit
-	if result.HasMore {
-		tpl, err := dir.Unpack(nextKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unpack next key: %w", err)
-		}
-		// Remove typeID to return just the PK tuple
-		result.NextKey = tpl[1:]
-		result.Items = result.Items[:opts.Limit]
-	}
-
-	return result, nil
 }

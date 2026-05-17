@@ -11,6 +11,8 @@ extend google.protobuf.MessageOptions {
   repeated string primary_key = 50001;
   // List of composite secondary indexes
   repeated SecondaryIndex secondary_index = 50002;
+  // Is this message a queue?
+  bool is_queue = 50005;
 }
 
 message SecondaryIndex {
