@@ -14,7 +14,17 @@ type Transaction interface {
 	fdb.ReadTransaction
 	Set(key fdb.KeyConvertible, value []byte)
 	Clear(key fdb.KeyConvertible)
-	AtomicOp(key fdb.KeyConvertible, mutationType interface{}, param []byte)
+	Add(key fdb.KeyConvertible, param []byte)
+	Max(key fdb.KeyConvertible, param []byte)
+	Min(key fdb.KeyConvertible, param []byte)
+}
+
+// GenericRepository is a generic data access interface for entity T with primary key PK.
+type GenericRepository[T any, PK any] interface {
+	Create(tr Transaction, dir directory.DirectorySubspace, entity T) error
+	Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk PK) (T, error)
+	Set(tr Transaction, dir directory.DirectorySubspace, entity T) error
+	Delete(tr Transaction, dir directory.DirectorySubspace, pk PK) error
 }
 
 // RecordStore holds metadata mapping between message names and their integer type IDs.

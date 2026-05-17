@@ -86,4 +86,18 @@ func TestAtomicMutations(t *testing.T) {
 	if retrieved.MinValue != 2 {
 		t.Fatalf("expected min_value 2, got %d", retrieved.MinValue)
 	}
+
+	// Verify that the generated CounterRepository can be instantiated and used
+	var counterRepo atomic.CounterRepository = atomic.NewCounterRepository(recordStore)
+	var genCounterRepo atomic.GenericRepository[*atomic.Counter, string] = counterRepo
+
+	// Test Get via GenericRepository interface
+	genRetrieved, err := genCounterRepo.Get(tr, dir, "c1")
+	if err != nil {
+		t.Fatalf("generic counter Get failed: %v", err)
+	}
+	if genRetrieved.MinValue != 2 {
+		t.Fatalf("unexpected min_value retrieved: %d", genRetrieved.MinValue)
+	}
 }
+

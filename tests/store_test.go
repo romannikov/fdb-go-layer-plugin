@@ -470,3 +470,63 @@ func TestCreateProduct_MultipleInSameCategory(t *testing.T) {
 		t.Fatalf("expected 2 index entries for 'tools', got %d", len(kvs))
 	}
 }
+
+func TestGenericRepository_User(t *testing.T) {
+	store, tr, dir, kv := syncAndSetup()
+
+	// Instantiate the specific repository wrapper
+	var repo UserRepository = NewUserRepository(store)
+
+	// Verify it also implements the GenericRepository interface
+	var genRepo GenericRepository[*User, string] = repo
+
+	// 1. Create
+	user := &User{Id: "gen-1", Name: "Generic User", Email: "gen@example.com"}
+	if err := genRepo.Create(tr, dir, user); err != nil {
+		t.Fatalf("generic Create failed: %v", err)
+	}
+
+	typeID := store.Metadata()["User"]
+	pk := tuple.Tuple{typeID, "gen-1"}.Pack()
+	if !kv.HasKey(pk) {
+		t.Fatal("generic Create did not write primary key")
+	}
+
+	// 2. Get
+	got, err := genRepo.Get(tr, dir, "gen-1")
+	if err != nil {
+		t.Fatalf("generic Get failed: %v", err)
+	}
+	if got.Name != "Generic User" || got.Email != "gen@example.com" {
+		t.Fatalf("generic Get returned unexpected user: %+v", got)
+	}
+
+	// 3. Set (Update)
+	got.Name = "Updated Generic Name"
+	if err := genRepo.Set(tr, dir, got); err != nil {
+		t.Fatalf("generic Set failed: %v", err)
+	}
+
+	updated, err := genRepo.Get(tr, dir, "gen-1")
+	if err != nil {
+		t.Fatalf("generic Get after Set failed: %v", err)
+	}
+	if updated.Name != "Updated Generic Name" {
+		t.Fatalf("generic Set did not update name: %s", updated.Name)
+	}
+
+	// 4. Delete
+	if err := genRepo.Delete(tr, dir, "gen-1"); err != nil {
+		t.Fatalf("generic Delete failed: %v", err)
+	}
+
+	if kv.HasKey(pk) {
+		t.Fatal("generic Delete did not clear primary key")
+	}
+
+	_, err = genRepo.Get(tr, dir, "gen-1")
+	if err == nil {
+		t.Fatal("expected error getting deleted user")
+	}
+}
+

@@ -44,11 +44,19 @@ func (s *RecordStore) CreateUser(tr Transaction, dir directory.DirectorySubspace
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, entity.Id})
+
+	// Save atomic fields and zero them out for marshaling
+
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
+
+	// Restore atomic fields
+
 	tr.Set(key, value)
+
+	// Store atomic fields in separate keys
 
 	{
 
@@ -81,6 +89,9 @@ func (s *RecordStore) GetUser(tr fdb.ReadTransaction, dir directory.DirectorySub
 	if err != nil {
 		return nil, err
 	}
+
+	// Read atomic fields
+
 	return entity, nil
 }
 
@@ -113,11 +124,18 @@ func (s *RecordStore) SetUser(tr Transaction, dir directory.DirectorySubspace, e
 		}
 	}
 
+	// Save atomic fields and zero them out for marshaling
+
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
+
+	// Restore atomic fields
+
 	tr.Set(key, value)
+
+	// Store atomic fields in separate keys
 
 	{
 
@@ -161,6 +179,8 @@ func (s *RecordStore) DeleteUser(tr Transaction, dir directory.DirectorySubspace
 		}
 	}
 	tr.Clear(key)
+	// Clear atomic fields
+
 	return nil
 }
 
@@ -303,4 +323,51 @@ func (s *RecordStore) ListUser(tr fdb.ReadTransaction, dir directory.DirectorySu
 	}
 
 	return result, nil
+}
+
+// UserRepository defines the repository interface for User.
+type UserRepository interface {
+	GenericRepository[*User, string]
+
+	BatchGetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error)
+	ListUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
+
+	GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error)
+}
+
+type userRepository struct {
+	store *RecordStore
+}
+
+// NewUserRepository creates a new UserRepository instance.
+func NewUserRepository(store *RecordStore) UserRepository {
+	return &userRepository{store: store}
+}
+
+func (r *userRepository) Create(tr Transaction, dir directory.DirectorySubspace, entity *User) error {
+	return r.store.CreateUser(tr, dir, entity)
+}
+
+func (r *userRepository) Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk string) (*User, error) {
+	return r.store.GetUser(tr, dir, pk)
+}
+
+func (r *userRepository) Set(tr Transaction, dir directory.DirectorySubspace, entity *User) error {
+	return r.store.SetUser(tr, dir, entity)
+}
+
+func (r *userRepository) Delete(tr Transaction, dir directory.DirectorySubspace, pk string) error {
+	return r.store.DeleteUser(tr, dir, pk)
+}
+
+func (r *userRepository) BatchGetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error) {
+	return r.store.BatchGetUser(tr, dir, ids)
+}
+
+func (r *userRepository) ListUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error) {
+	return r.store.ListUser(tr, dir, opts)
+}
+
+func (r *userRepository) GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error) {
+	return r.store.GetUserByEmail(tr, dir, Email)
 }

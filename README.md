@@ -96,7 +96,17 @@ type Transaction interface {
     fdb.ReadTransaction
     Set(key fdb.KeyConvertible, value []byte)
     Clear(key fdb.KeyConvertible)
-    AtomicOp(key fdb.KeyConvertible, mutationType interface{}, param []byte)
+    Add(key fdb.KeyConvertible, param []byte)
+    Max(key fdb.KeyConvertible, param []byte)
+    Min(key fdb.KeyConvertible, param []byte)
+}
+
+// GenericRepository is a generic data access interface for entity T with primary key PK.
+type GenericRepository[T any, PK any] interface {
+    Create(tr Transaction, dir directory.DirectorySubspace, entity T) error
+    Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk PK) (T, error)
+    Set(tr Transaction, dir directory.DirectorySubspace, entity T) error
+    Delete(tr Transaction, dir directory.DirectorySubspace, pk PK) error
 }
 
 // RecordStore holds metadata mapping between message names and their integer type IDs.
@@ -111,6 +121,29 @@ func (s *RecordStore) SyncMetadata(tr Transaction, metaDir directory.DirectorySu
 // Metadata returns a read-only copy of the metadata mapping.
 func (s *RecordStore) Metadata() map[string]int64
 ```
+
+### Specific Repositories & Wrapper Pattern
+
+For each message type, the plugin generates a type-safe specific repository interface extending `GenericRepository` and encapsulating all custom database methods (indexes, batch, pagination, atomic mutations).
+
+For example, for the `User` message:
+
+```go
+// UserRepository defines the repository interface for User.
+type UserRepository interface {
+    GenericRepository[*User, string]
+
+    BatchGetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error)
+    ListUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
+    GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error)
+}
+
+// NewUserRepository creates a new UserRepository instance wrapping the RecordStore.
+func NewUserRepository(store *RecordStore) UserRepository
+```
+
+This makes it extremely simple to inject mock repositories in unit tests and wrap the generated repository interfaces to add custom business logic.
+
 
 ### CRUD Operations (methods on `*RecordStore`)
 
