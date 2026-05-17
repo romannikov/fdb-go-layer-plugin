@@ -4,6 +4,8 @@
 package atomic
 
 import (
+	"context"
+
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
@@ -21,10 +23,10 @@ type Transaction interface {
 
 // GenericRepository is a generic data access interface for entity T with primary key PK.
 type GenericRepository[T any, PK any] interface {
-	Create(tr Transaction, dir directory.DirectorySubspace, entity T) error
-	Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk PK) (T, error)
-	Set(tr Transaction, dir directory.DirectorySubspace, entity T) error
-	Delete(tr Transaction, dir directory.DirectorySubspace, pk PK) error
+	Create(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity T) error
+	Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk PK) (T, error)
+	Set(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity T) error
+	Delete(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, pk PK) error
 }
 
 // RecordStore holds metadata mapping between message names and their integer type IDs.
@@ -49,11 +51,17 @@ func (s *RecordStore) Metadata() map[string]int64 {
 }
 
 // SyncMetadata reads the existing metadata from FDB and assigns new IDs to any unmapped messages.
-func (s *RecordStore) SyncMetadata(tr Transaction, metaDir directory.DirectorySubspace) error {
+func (s *RecordStore) SyncMetadata(ctx context.Context, tr Transaction, metaDir directory.DirectorySubspace) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	kvs := tr.GetRange(metaDir, fdb.RangeOptions{}).GetSliceOrPanic()
 
 	maxID := int64(0)
 	for _, kv := range kvs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		tpl, err := metaDir.Unpack(kv.Key)
 		if err != nil {
 			return err
@@ -75,6 +83,9 @@ func (s *RecordStore) SyncMetadata(tr Transaction, metaDir directory.DirectorySu
 	}
 
 	for _, msg := range messages {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if _, exists := s.metadata[msg]; !exists {
 			maxID++
 			s.metadata[msg] = maxID

@@ -2,6 +2,7 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"sort"
@@ -296,7 +297,7 @@ func SyncAndSetup() (*store.RecordStore, *MockTransaction, *MockDirectorySubspac
 	tr := NewMockTransaction(kv)
 	dir := &MockDirectorySubspace{}
 	recordStore := store.NewRecordStore()
-	_ = recordStore.SyncMetadata(tr, dir)
+	_ = recordStore.SyncMetadata(context.Background(), tr, dir)
 	return recordStore, tr, dir, kv
 }
 

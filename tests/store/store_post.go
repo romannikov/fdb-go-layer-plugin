@@ -4,6 +4,8 @@
 package store
 
 import (
+	"context"
+
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -37,7 +39,10 @@ func (s *RecordStore) getPostTypeID() (int64, error) {
 }
 
 // CreatePost creates a new Post entity in the database.
-func (s *RecordStore) CreatePost(tr Transaction, dir directory.DirectorySubspace, entity *Post) error {
+func (s *RecordStore) CreatePost(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *Post) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	typeID, err := s.getPostTypeID()
 	if err != nil {
 		return err
@@ -78,7 +83,10 @@ func (s *RecordStore) CreatePost(tr Transaction, dir directory.DirectorySubspace
 }
 
 // GetPost retrieves a Post entity by its primary key.
-func (s *RecordStore) GetPost(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Id string) (*Post, error) {
+func (s *RecordStore) GetPost(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Id string) (*Post, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	typeID, err := s.getPostTypeID()
 	if err != nil {
 		return nil, err
@@ -101,7 +109,10 @@ func (s *RecordStore) GetPost(tr fdb.ReadTransaction, dir directory.DirectorySub
 }
 
 // SetPost updates an existing Post entity in the database.
-func (s *RecordStore) SetPost(tr Transaction, dir directory.DirectorySubspace, entity *Post) error {
+func (s *RecordStore) SetPost(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *Post) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	typeID, err := s.getPostTypeID()
 	if err != nil {
 		return err
@@ -167,7 +178,10 @@ func (s *RecordStore) SetPost(tr Transaction, dir directory.DirectorySubspace, e
 }
 
 // DeletePost removes a Post entity from the database.
-func (s *RecordStore) DeletePost(tr Transaction, dir directory.DirectorySubspace, Id string) error {
+func (s *RecordStore) DeletePost(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, Id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	typeID, err := s.getPostTypeID()
 	if err != nil {
 		return err
@@ -205,7 +219,10 @@ func (s *RecordStore) DeletePost(tr Transaction, dir directory.DirectorySubspace
 }
 
 // GetPostByTags retrieves Post entities by their Tags index.
-func (s *RecordStore) GetPostByTags(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string) ([]*Post, error) {
+func (s *RecordStore) GetPostByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string) ([]*Post, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	typeID, err := s.getPostTypeID()
 	if err != nil {
 		return nil, err
@@ -219,6 +236,9 @@ func (s *RecordStore) GetPostByTags(tr fdb.ReadTransaction, dir directory.Direct
 	}
 	kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
 	for _, kv := range kvs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		tpl, err := dir.Unpack(kv.Key)
 		if err != nil {
 			return nil, err
@@ -242,7 +262,10 @@ func (s *RecordStore) GetPostByTags(tr fdb.ReadTransaction, dir directory.Direct
 }
 
 // BatchGetPost retrieves multiple Post entities by their primary keys.
-func (s *RecordStore) BatchGetPost(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Post, error) {
+func (s *RecordStore) BatchGetPost(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Post, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	typeID, err := s.getPostTypeID()
 	if err != nil {
 		return nil, err
@@ -252,12 +275,18 @@ func (s *RecordStore) BatchGetPost(tr fdb.ReadTransaction, dir directory.Directo
 	futures := make([]fdb.FutureByteSlice, len(ids))
 
 	for i, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		keyTpl := append(tuple.Tuple{typeID}, id...)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
 	}
 
 	for i, future := range futures {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		value := future.MustGet()
 		if value == nil {
 			continue
@@ -274,7 +303,10 @@ func (s *RecordStore) BatchGetPost(tr fdb.ReadTransaction, dir directory.Directo
 }
 
 // ListPost retrieves a list of Post entities starting from the given key.
-func (s *RecordStore) ListPost(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PostPaginationOptions) (*PostPaginatedResult, error) {
+func (s *RecordStore) ListPost(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PostPaginationOptions) (*PostPaginatedResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	typeID, err := s.getPostTypeID()
 	if err != nil {
 		return nil, err
@@ -304,6 +336,9 @@ func (s *RecordStore) ListPost(tr fdb.ReadTransaction, dir directory.DirectorySu
 
 	var nextKey fdb.Key
 	for iter.Advance() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		kv := iter.MustGet()
 
 		// Skip index entries: their second tuple element is the string "index".
@@ -349,10 +384,10 @@ func (s *RecordStore) ListPost(tr fdb.ReadTransaction, dir directory.DirectorySu
 type PostRepository interface {
 	GenericRepository[*Post, string]
 
-	BatchGetPost(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Post, error)
-	ListPost(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PostPaginationOptions) (*PostPaginatedResult, error)
+	BatchGetPost(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Post, error)
+	ListPost(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PostPaginationOptions) (*PostPaginatedResult, error)
 
-	GetPostByTags(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string) ([]*Post, error)
+	GetPostByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string) ([]*Post, error)
 }
 
 type postRepository struct {
@@ -364,30 +399,30 @@ func NewPostRepository(store *RecordStore) PostRepository {
 	return &postRepository{store: store}
 }
 
-func (r *postRepository) Create(tr Transaction, dir directory.DirectorySubspace, entity *Post) error {
-	return r.store.CreatePost(tr, dir, entity)
+func (r *postRepository) Create(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *Post) error {
+	return r.store.CreatePost(ctx, tr, dir, entity)
 }
 
-func (r *postRepository) Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk string) (*Post, error) {
-	return r.store.GetPost(tr, dir, pk)
+func (r *postRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk string) (*Post, error) {
+	return r.store.GetPost(ctx, tr, dir, pk)
 }
 
-func (r *postRepository) Set(tr Transaction, dir directory.DirectorySubspace, entity *Post) error {
-	return r.store.SetPost(tr, dir, entity)
+func (r *postRepository) Set(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *Post) error {
+	return r.store.SetPost(ctx, tr, dir, entity)
 }
 
-func (r *postRepository) Delete(tr Transaction, dir directory.DirectorySubspace, pk string) error {
-	return r.store.DeletePost(tr, dir, pk)
+func (r *postRepository) Delete(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, pk string) error {
+	return r.store.DeletePost(ctx, tr, dir, pk)
 }
 
-func (r *postRepository) BatchGetPost(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Post, error) {
-	return r.store.BatchGetPost(tr, dir, ids)
+func (r *postRepository) BatchGetPost(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Post, error) {
+	return r.store.BatchGetPost(ctx, tr, dir, ids)
 }
 
-func (r *postRepository) ListPost(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PostPaginationOptions) (*PostPaginatedResult, error) {
-	return r.store.ListPost(tr, dir, opts)
+func (r *postRepository) ListPost(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PostPaginationOptions) (*PostPaginatedResult, error) {
+	return r.store.ListPost(ctx, tr, dir, opts)
 }
 
-func (r *postRepository) GetPostByTags(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string) ([]*Post, error) {
-	return r.store.GetPostByTags(tr, dir, Tags)
+func (r *postRepository) GetPostByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string) ([]*Post, error) {
+	return r.store.GetPostByTags(ctx, tr, dir, Tags)
 }
