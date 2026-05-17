@@ -2,8 +2,6 @@
 
 ## 1. Functional Enhancements
 
-### Support for Multi-Type Record Stores
-
 ### Complex Indexing (Function Indexes)
 **Improvement:** Support for versionstamp indexes (using FDB’s atomic versionstamps to track when a record was last modified).
 
