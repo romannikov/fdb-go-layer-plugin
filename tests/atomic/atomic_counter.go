@@ -4,6 +4,7 @@
 package atomic
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 
@@ -38,7 +39,10 @@ func (s *RecordStore) getCounterTypeID() (int64, error) {
 }
 
 // CreateCounter creates a new Counter entity in the database.
-func (s *RecordStore) CreateCounter(tr Transaction, dir directory.DirectorySubspace, entity *Counter) error {
+func (s *RecordStore) CreateCounter(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *Counter) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	typeID, err := s.getCounterTypeID()
 	if err != nil {
 		return err
@@ -99,7 +103,10 @@ func (s *RecordStore) CreateCounter(tr Transaction, dir directory.DirectorySubsp
 }
 
 // GetCounter retrieves a Counter entity by its primary key.
-func (s *RecordStore) GetCounter(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Id string) (*Counter, error) {
+func (s *RecordStore) GetCounter(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Id string) (*Counter, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	typeID, err := s.getCounterTypeID()
 	if err != nil {
 		return nil, err
@@ -146,7 +153,10 @@ func (s *RecordStore) GetCounter(tr fdb.ReadTransaction, dir directory.Directory
 }
 
 // SetCounter updates an existing Counter entity in the database.
-func (s *RecordStore) SetCounter(tr Transaction, dir directory.DirectorySubspace, entity *Counter) error {
+func (s *RecordStore) SetCounter(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *Counter) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	typeID, err := s.getCounterTypeID()
 	if err != nil {
 		return err
@@ -216,7 +226,10 @@ func (s *RecordStore) SetCounter(tr Transaction, dir directory.DirectorySubspace
 }
 
 // DeleteCounter removes a Counter entity from the database.
-func (s *RecordStore) DeleteCounter(tr Transaction, dir directory.DirectorySubspace, Id string) error {
+func (s *RecordStore) DeleteCounter(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, Id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	typeID, err := s.getCounterTypeID()
 	if err != nil {
 		return err
@@ -253,7 +266,10 @@ func (s *RecordStore) DeleteCounter(tr Transaction, dir directory.DirectorySubsp
 }
 
 // AddCounterValue applies an atomic mutation to the Value field of Counter.
-func (s *RecordStore) AddCounterValue(tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+func (s *RecordStore) AddCounterValue(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	typeID, err := s.getCounterTypeID()
 	if err != nil {
 		return err
@@ -268,7 +284,10 @@ func (s *RecordStore) AddCounterValue(tr Transaction, dir directory.DirectorySub
 }
 
 // MaxCounterMaxValue applies an atomic mutation to the MaxValue field of Counter.
-func (s *RecordStore) MaxCounterMaxValue(tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+func (s *RecordStore) MaxCounterMaxValue(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	typeID, err := s.getCounterTypeID()
 	if err != nil {
 		return err
@@ -283,7 +302,10 @@ func (s *RecordStore) MaxCounterMaxValue(tr Transaction, dir directory.Directory
 }
 
 // MinCounterMinValue applies an atomic mutation to the MinValue field of Counter.
-func (s *RecordStore) MinCounterMinValue(tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+func (s *RecordStore) MinCounterMinValue(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	typeID, err := s.getCounterTypeID()
 	if err != nil {
 		return err
@@ -298,7 +320,10 @@ func (s *RecordStore) MinCounterMinValue(tr Transaction, dir directory.Directory
 }
 
 // BatchGetCounter retrieves multiple Counter entities by their primary keys.
-func (s *RecordStore) BatchGetCounter(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Counter, error) {
+func (s *RecordStore) BatchGetCounter(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Counter, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	typeID, err := s.getCounterTypeID()
 	if err != nil {
 		return nil, err
@@ -308,12 +333,18 @@ func (s *RecordStore) BatchGetCounter(tr fdb.ReadTransaction, dir directory.Dire
 	futures := make([]fdb.FutureByteSlice, len(ids))
 
 	for i, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		keyTpl := append(tuple.Tuple{typeID}, id...)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
 	}
 
 	for i, future := range futures {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		value := future.MustGet()
 		if value == nil {
 			continue
@@ -330,7 +361,10 @@ func (s *RecordStore) BatchGetCounter(tr fdb.ReadTransaction, dir directory.Dire
 }
 
 // ListCounter retrieves a list of Counter entities starting from the given key.
-func (s *RecordStore) ListCounter(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts CounterPaginationOptions) (*CounterPaginatedResult, error) {
+func (s *RecordStore) ListCounter(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts CounterPaginationOptions) (*CounterPaginatedResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	typeID, err := s.getCounterTypeID()
 	if err != nil {
 		return nil, err
@@ -360,6 +394,9 @@ func (s *RecordStore) ListCounter(tr fdb.ReadTransaction, dir directory.Director
 
 	var nextKey fdb.Key
 	for iter.Advance() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		kv := iter.MustGet()
 
 		// Skip index entries: their second tuple element is the string "index".
@@ -405,14 +442,14 @@ func (s *RecordStore) ListCounter(tr fdb.ReadTransaction, dir directory.Director
 type CounterRepository interface {
 	GenericRepository[*Counter, string]
 
-	BatchGetCounter(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Counter, error)
-	ListCounter(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts CounterPaginationOptions) (*CounterPaginatedResult, error)
+	BatchGetCounter(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Counter, error)
+	ListCounter(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts CounterPaginationOptions) (*CounterPaginatedResult, error)
 
-	AddCounterValue(tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error
+	AddCounterValue(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error
 
-	MaxCounterMaxValue(tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error
+	MaxCounterMaxValue(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error
 
-	MinCounterMinValue(tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error
+	MinCounterMinValue(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error
 }
 
 type counterRepository struct {
@@ -424,38 +461,38 @@ func NewCounterRepository(store *RecordStore) CounterRepository {
 	return &counterRepository{store: store}
 }
 
-func (r *counterRepository) Create(tr Transaction, dir directory.DirectorySubspace, entity *Counter) error {
-	return r.store.CreateCounter(tr, dir, entity)
+func (r *counterRepository) Create(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *Counter) error {
+	return r.store.CreateCounter(ctx, tr, dir, entity)
 }
 
-func (r *counterRepository) Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk string) (*Counter, error) {
-	return r.store.GetCounter(tr, dir, pk)
+func (r *counterRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk string) (*Counter, error) {
+	return r.store.GetCounter(ctx, tr, dir, pk)
 }
 
-func (r *counterRepository) Set(tr Transaction, dir directory.DirectorySubspace, entity *Counter) error {
-	return r.store.SetCounter(tr, dir, entity)
+func (r *counterRepository) Set(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *Counter) error {
+	return r.store.SetCounter(ctx, tr, dir, entity)
 }
 
-func (r *counterRepository) Delete(tr Transaction, dir directory.DirectorySubspace, pk string) error {
-	return r.store.DeleteCounter(tr, dir, pk)
+func (r *counterRepository) Delete(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, pk string) error {
+	return r.store.DeleteCounter(ctx, tr, dir, pk)
 }
 
-func (r *counterRepository) BatchGetCounter(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Counter, error) {
-	return r.store.BatchGetCounter(tr, dir, ids)
+func (r *counterRepository) BatchGetCounter(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Counter, error) {
+	return r.store.BatchGetCounter(ctx, tr, dir, ids)
 }
 
-func (r *counterRepository) ListCounter(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts CounterPaginationOptions) (*CounterPaginatedResult, error) {
-	return r.store.ListCounter(tr, dir, opts)
+func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts CounterPaginationOptions) (*CounterPaginatedResult, error) {
+	return r.store.ListCounter(ctx, tr, dir, opts)
 }
 
-func (r *counterRepository) AddCounterValue(tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
-	return r.store.AddCounterValue(tr, dir, Id, val)
+func (r *counterRepository) AddCounterValue(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+	return r.store.AddCounterValue(ctx, tr, dir, Id, val)
 }
 
-func (r *counterRepository) MaxCounterMaxValue(tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
-	return r.store.MaxCounterMaxValue(tr, dir, Id, val)
+func (r *counterRepository) MaxCounterMaxValue(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+	return r.store.MaxCounterMaxValue(ctx, tr, dir, Id, val)
 }
 
-func (r *counterRepository) MinCounterMinValue(tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
-	return r.store.MinCounterMinValue(tr, dir, Id, val)
+func (r *counterRepository) MinCounterMinValue(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+	return r.store.MinCounterMinValue(ctx, tr, dir, Id, val)
 }

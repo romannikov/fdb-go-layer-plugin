@@ -1,6 +1,7 @@
 package complex_index_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
@@ -10,6 +11,7 @@ import (
 )
 
 func TestFanOutIndex(t *testing.T) {
+	ctx := context.Background()
 	recordStore, tr, dir, kv := tests.SyncAndSetup()
 
 	post := &store.Post{
@@ -17,7 +19,7 @@ func TestFanOutIndex(t *testing.T) {
 		Tags: []string{"tag1", "tag2", "tag3"},
 	}
 
-	err := recordStore.CreatePost(tr, dir, post)
+	err := recordStore.CreatePost(ctx, tr, dir, post)
 	if err != nil {
 		t.Fatal(err)
 	}

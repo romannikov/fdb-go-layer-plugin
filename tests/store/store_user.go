@@ -4,6 +4,8 @@
 package store
 
 import (
+	"context"
+
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -37,7 +39,10 @@ func (s *RecordStore) getUserTypeID() (int64, error) {
 }
 
 // CreateUser creates a new User entity in the database.
-func (s *RecordStore) CreateUser(tr Transaction, dir directory.DirectorySubspace, entity *User) error {
+func (s *RecordStore) CreateUser(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *User) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	typeID, err := s.getUserTypeID()
 	if err != nil {
 		return err
@@ -73,7 +78,10 @@ func (s *RecordStore) CreateUser(tr Transaction, dir directory.DirectorySubspace
 }
 
 // GetUser retrieves a User entity by its primary key.
-func (s *RecordStore) GetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Id string) (*User, error) {
+func (s *RecordStore) GetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Id string) (*User, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	typeID, err := s.getUserTypeID()
 	if err != nil {
 		return nil, err
@@ -96,7 +104,10 @@ func (s *RecordStore) GetUser(tr fdb.ReadTransaction, dir directory.DirectorySub
 }
 
 // SetUser updates an existing User entity in the database.
-func (s *RecordStore) SetUser(tr Transaction, dir directory.DirectorySubspace, entity *User) error {
+func (s *RecordStore) SetUser(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *User) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	typeID, err := s.getUserTypeID()
 	if err != nil {
 		return err
@@ -152,7 +163,10 @@ func (s *RecordStore) SetUser(tr Transaction, dir directory.DirectorySubspace, e
 }
 
 // DeleteUser removes a User entity from the database.
-func (s *RecordStore) DeleteUser(tr Transaction, dir directory.DirectorySubspace, Id string) error {
+func (s *RecordStore) DeleteUser(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, Id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	typeID, err := s.getUserTypeID()
 	if err != nil {
 		return err
@@ -185,7 +199,10 @@ func (s *RecordStore) DeleteUser(tr Transaction, dir directory.DirectorySubspace
 }
 
 // GetUserByEmail retrieves User entities by their Email index.
-func (s *RecordStore) GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error) {
+func (s *RecordStore) GetUserByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	typeID, err := s.getUserTypeID()
 	if err != nil {
 		return nil, err
@@ -199,6 +216,9 @@ func (s *RecordStore) GetUserByEmail(tr fdb.ReadTransaction, dir directory.Direc
 	}
 	kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
 	for _, kv := range kvs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		tpl, err := dir.Unpack(kv.Key)
 		if err != nil {
 			return nil, err
@@ -222,7 +242,10 @@ func (s *RecordStore) GetUserByEmail(tr fdb.ReadTransaction, dir directory.Direc
 }
 
 // BatchGetUser retrieves multiple User entities by their primary keys.
-func (s *RecordStore) BatchGetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error) {
+func (s *RecordStore) BatchGetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	typeID, err := s.getUserTypeID()
 	if err != nil {
 		return nil, err
@@ -232,12 +255,18 @@ func (s *RecordStore) BatchGetUser(tr fdb.ReadTransaction, dir directory.Directo
 	futures := make([]fdb.FutureByteSlice, len(ids))
 
 	for i, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		keyTpl := append(tuple.Tuple{typeID}, id...)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
 	}
 
 	for i, future := range futures {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		value := future.MustGet()
 		if value == nil {
 			continue
@@ -254,7 +283,10 @@ func (s *RecordStore) BatchGetUser(tr fdb.ReadTransaction, dir directory.Directo
 }
 
 // ListUser retrieves a list of User entities starting from the given key.
-func (s *RecordStore) ListUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error) {
+func (s *RecordStore) ListUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	typeID, err := s.getUserTypeID()
 	if err != nil {
 		return nil, err
@@ -284,6 +316,9 @@ func (s *RecordStore) ListUser(tr fdb.ReadTransaction, dir directory.DirectorySu
 
 	var nextKey fdb.Key
 	for iter.Advance() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		kv := iter.MustGet()
 
 		// Skip index entries: their second tuple element is the string "index".
@@ -329,10 +364,10 @@ func (s *RecordStore) ListUser(tr fdb.ReadTransaction, dir directory.DirectorySu
 type UserRepository interface {
 	GenericRepository[*User, string]
 
-	BatchGetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error)
-	ListUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
+	BatchGetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error)
+	ListUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
 
-	GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error)
+	GetUserByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error)
 }
 
 type userRepository struct {
@@ -344,30 +379,30 @@ func NewUserRepository(store *RecordStore) UserRepository {
 	return &userRepository{store: store}
 }
 
-func (r *userRepository) Create(tr Transaction, dir directory.DirectorySubspace, entity *User) error {
-	return r.store.CreateUser(tr, dir, entity)
+func (r *userRepository) Create(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *User) error {
+	return r.store.CreateUser(ctx, tr, dir, entity)
 }
 
-func (r *userRepository) Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk string) (*User, error) {
-	return r.store.GetUser(tr, dir, pk)
+func (r *userRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk string) (*User, error) {
+	return r.store.GetUser(ctx, tr, dir, pk)
 }
 
-func (r *userRepository) Set(tr Transaction, dir directory.DirectorySubspace, entity *User) error {
-	return r.store.SetUser(tr, dir, entity)
+func (r *userRepository) Set(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *User) error {
+	return r.store.SetUser(ctx, tr, dir, entity)
 }
 
-func (r *userRepository) Delete(tr Transaction, dir directory.DirectorySubspace, pk string) error {
-	return r.store.DeleteUser(tr, dir, pk)
+func (r *userRepository) Delete(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, pk string) error {
+	return r.store.DeleteUser(ctx, tr, dir, pk)
 }
 
-func (r *userRepository) BatchGetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error) {
-	return r.store.BatchGetUser(tr, dir, ids)
+func (r *userRepository) BatchGetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error) {
+	return r.store.BatchGetUser(ctx, tr, dir, ids)
 }
 
-func (r *userRepository) ListUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error) {
-	return r.store.ListUser(tr, dir, opts)
+func (r *userRepository) ListUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error) {
+	return r.store.ListUser(ctx, tr, dir, opts)
 }
 
-func (r *userRepository) GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error) {
-	return r.store.GetUserByEmail(tr, dir, Email)
+func (r *userRepository) GetUserByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error) {
+	return r.store.GetUserByEmail(ctx, tr, dir, Email)
 }

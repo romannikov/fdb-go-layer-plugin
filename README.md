@@ -7,6 +7,7 @@ A protoc plugin that generates FoundationDB data access layer code for Proto mes
 - **Multi-Type Record Stores** — multiple Protobuf messages share the same subspace with automatic integer-based type IDs
 - **Runtime Metadata Registry** — stable type IDs are managed in an FDB meta-space via `SyncMetadata`
 - **RecordStore Pattern** — no global state; all operations are methods on a `RecordStore` struct
+- **Early Loop Cancellation** — explicit checks for `ctx.Err()` inside all pagination, index lookup, and batch operations to save FDB resources if a caller cancels their context
 - Supports primary key and secondary index annotations
 - Supports FDB atomic mutations (`ADD`, `MAX`, `MIN`) via field annotations
 - Provides CRUD, batch, and paginated list operations
@@ -103,10 +104,10 @@ type Transaction interface {
 
 // GenericRepository is a generic data access interface for entity T with primary key PK.
 type GenericRepository[T any, PK any] interface {
-    Create(tr Transaction, dir directory.DirectorySubspace, entity T) error
-    Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk PK) (T, error)
-    Set(tr Transaction, dir directory.DirectorySubspace, entity T) error
-    Delete(tr Transaction, dir directory.DirectorySubspace, pk PK) error
+    Create(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity T) error
+    Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk PK) (T, error)
+    Set(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity T) error
+    Delete(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, pk PK) error
 }
 
 // RecordStore holds metadata mapping between message names and their integer type IDs.
@@ -116,7 +117,7 @@ type RecordStore struct { /* unexported metadata field */ }
 func NewRecordStore() *RecordStore
 
 // SyncMetadata reads the existing metadata from FDB and assigns new IDs to any unmapped messages.
-func (s *RecordStore) SyncMetadata(tr Transaction, metaDir directory.DirectorySubspace) error
+func (s *RecordStore) SyncMetadata(ctx context.Context, tr Transaction, metaDir directory.DirectorySubspace) error
 
 // Metadata returns a read-only copy of the metadata mapping.
 func (s *RecordStore) Metadata() map[string]int64
@@ -133,9 +134,9 @@ For example, for the `User` message:
 type UserRepository interface {
     GenericRepository[*User, string]
 
-    BatchGetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error)
-    ListUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
-    GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error)
+    BatchGetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error)
+    ListUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
+    GetUserByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error)
 }
 
 // NewUserRepository creates a new UserRepository instance wrapping the RecordStore.
@@ -149,22 +150,22 @@ This makes it extremely simple to inject mock repositories in unit tests and wra
 
 ```go
 // Create a new entity
-store.CreateUser(tr Transaction, dir directory.DirectorySubspace, entity *User) error
+store.CreateUser(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *User) error
 
 // Get an entity by primary key
-store.GetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, id string) (*User, error)
+store.GetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, id string) (*User, error)
 
 // Update an existing entity
-store.SetUser(tr Transaction, dir directory.DirectorySubspace, entity *User) error
+store.SetUser(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *User) error
 
 // Delete an entity
-store.DeleteUser(tr Transaction, dir directory.DirectorySubspace, id string) error
+store.DeleteUser(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, id string) error
 
 // Batch get multiple entities by their primary keys
-store.BatchGetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error)
+store.BatchGetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error)
 
 // List entities with pagination
-store.ListUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
+store.ListUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
 ```
 
 ### Pagination
@@ -188,7 +189,7 @@ For each secondary index, the plugin generates a lookup method:
 
 ```go
 // Standard index — lookup by a single scalar field
-store.GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, email string) ([]*User, error)
+store.GetUserByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, email string) ([]*User, error)
 ```
 
 #### Fan-Out Indexes
@@ -198,7 +199,7 @@ One index entry is written per element in the repeated field, enabling efficient
 
 ```go
 // Fan-out index — lookup posts by any one of their tags
-store.GetPostByTags(tr fdb.ReadTransaction, dir directory.DirectorySubspace, tag string) ([]*Post, error)
+store.GetPostByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, tag string) ([]*Post, error)
 ```
 
 On `Set` and `Delete`, all old fan-out entries are automatically cleared and re-written.
@@ -209,13 +210,13 @@ For fields marked with mutation annotations, the plugin generates specific atomi
 
 ```go
 // Apply atomic ADD to a field
-store.AddCounterValue(tr Transaction, dir directory.DirectorySubspace, id string, val int64) error
+store.AddCounterValue(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, id string, val int64) error
 
 // Apply atomic MAX to a field
-store.MaxCounterMaxValue(tr Transaction, dir directory.DirectorySubspace, id string, val int64) error
+store.MaxCounterMaxValue(ctx context.Context, tr Transaction, id string, val int64) error
 
 // Apply atomic MIN to a field
-store.MinCounterMinValue(tr Transaction, dir directory.DirectorySubspace, id string, val int64) error
+store.MinCounterMinValue(ctx context.Context, tr Transaction, id string, val int64) error
 ```
 
 These operations do not require a read-modify-write cycle. Note that fields marked for atomic mutation are stored in separate keys and are excluded from the main serialized message blob.
@@ -226,6 +227,7 @@ These operations do not require a read-modify-write cycle. Note that fields mark
 package main
 
 import (
+    "context"
     "fmt"
     "github.com/apple/foundationdb/bindings/go/src/fdb"
     "github.com/apple/foundationdb/bindings/go/src/fdb/directory"
@@ -235,6 +237,7 @@ import (
 func main() {
     fdb.MustAPIVersion(730)
     fdbConn := fdb.MustOpenDefault()
+    ctx := context.Background()
 
     // Create directory subspaces for data and metadata
     dataDir, _ := directory.CreateOrOpen(fdbConn, []string{"app_data"}, nil)
@@ -243,7 +246,7 @@ func main() {
     // Initialize the RecordStore and sync metadata
     store := db.NewRecordStore()
     fdbConn.Transact(func(tr fdb.Transaction) (interface{}, error) {
-        return nil, store.SyncMetadata(tr, metaDir)
+        return nil, store.SyncMetadata(ctx, tr, metaDir)
     })
 
     // Create a new user
@@ -253,7 +256,7 @@ func main() {
             Email: "user@example.com",
             Name:  "John Doe",
         }
-        return nil, store.CreateUser(tr, dataDir, user)
+        return nil, store.CreateUser(ctx, tr, dataDir, user)
     })
 
     fmt.Println("User saved successfully")
