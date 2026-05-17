@@ -1,14 +1,18 @@
-package store
+package tests
 
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"sort"
 	"sync"
+	"testing"
+	"time"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
+	"github.com/romannikov/fdb-go-layer-plugin/tests/store"
 )
 
 // MockKV – in-memory sorted key-value store backing all mock FDB operations.
@@ -21,7 +25,7 @@ func NewMockKV() *MockKV {
 	return &MockKV{data: make(map[string][]byte)}
 }
 
-func (m *MockKV) set(key, value []byte) {
+func (m *MockKV) Set(key, value []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	v := make([]byte, len(value))
@@ -29,7 +33,7 @@ func (m *MockKV) set(key, value []byte) {
 	m.data[string(key)] = v
 }
 
-func (m *MockKV) get(key []byte) []byte {
+func (m *MockKV) Get(key []byte) []byte {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	v, ok := m.data[string(key)]
@@ -41,14 +45,14 @@ func (m *MockKV) get(key []byte) []byte {
 	return out
 }
 
-func (m *MockKV) clear(key []byte) {
+func (m *MockKV) Clear(key []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.data, string(key))
 }
 
-// rangeSlice returns all KVs whose keys are in [begin, end).
-func (m *MockKV) rangeSlice(begin, end []byte, opts fdb.RangeOptions) []fdb.KeyValue {
+// RangeSlice returns all KVs whose keys are in [begin, end).
+func (m *MockKV) RangeSlice(begin, end []byte, opts fdb.RangeOptions) []fdb.KeyValue {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -164,11 +168,11 @@ func NewMockTransaction(kv *MockKV) *MockTransaction {
 }
 
 func (m *MockTransaction) Set(key fdb.KeyConvertible, value []byte) {
-	m.kv.set(key.FDBKey(), value)
+	m.kv.Set(key.FDBKey(), value)
 }
 
 func (m *MockTransaction) Clear(key fdb.KeyConvertible) {
-	m.kv.clear(key.FDBKey())
+	m.kv.Clear(key.FDBKey())
 }
 
 func (m *MockTransaction) Add(key fdb.KeyConvertible, param []byte) {
@@ -223,10 +227,8 @@ func (m *MockTransaction) Min(key fdb.KeyConvertible, param []byte) {
 }
 
 func (m *MockTransaction) Get(key fdb.KeyConvertible) fdb.FutureByteSlice {
-	return &MockFutureByteSlice{value: m.kv.get(key.FDBKey())}
+	return &MockFutureByteSlice{value: m.kv.Get(key.FDBKey())}
 }
-
-
 
 // GetRange returns a zero-value fdb.RangeResult. This means GetSliceOrPanic()
 // returns an empty slice, and Iterator() produces no results.
@@ -244,7 +246,7 @@ func (m *MockTransaction) GetRangeSlice(r fdb.Range, options fdb.RangeOptions) [
 	begin, end := r.FDBRangeKeySelectors()
 	beginKey := begin.FDBKeySelector().Key.FDBKey()
 	endKey := end.FDBKeySelector().Key.FDBKey()
-	return m.kv.rangeSlice(beginKey, endKey, options)
+	return m.kv.RangeSlice(beginKey, endKey, options)
 }
 
 // Stubs for the remaining fdb.ReadTransaction interface methods.
@@ -287,13 +289,39 @@ func (m *MockDirectorySubspace) FDBRangeKeySelectors() (fdb.Selectable, fdb.Sele
 	return fdb.FirstGreaterOrEqual(begin), fdb.FirstGreaterOrEqual(end)
 }
 
-// Test helper: syncAndSetup creates a RecordStore, syncs metadata, and
+// SyncAndSetup creates a RecordStore, syncs metadata, and
 // returns everything needed for CRUD tests.
-func syncAndSetup() (*RecordStore, *MockTransaction, *MockDirectorySubspace, *MockKV) {
+func SyncAndSetup() (*store.RecordStore, *MockTransaction, *MockDirectorySubspace, *MockKV) {
 	kv := NewMockKV()
 	tr := NewMockTransaction(kv)
 	dir := &MockDirectorySubspace{}
-	store := NewRecordStore()
-	_ = store.SyncMetadata(tr, dir)
-	return store, tr, dir, kv
+	recordStore := store.NewRecordStore()
+	_ = recordStore.SyncMetadata(tr, dir)
+	return recordStore, tr, dir, kv
+}
+
+// TestDir creates a unique directory subspace for test isolation and returns
+// a cleanup function that removes it.
+func TestDir(t *testing.T, db fdb.Database) (directory.DirectorySubspace, func()) {
+	t.Helper()
+	path := []string{"test", fmt.Sprintf("%s_%d", t.Name(), time.Now().UnixNano())}
+	dir, err := directory.CreateOrOpen(db, path, nil)
+	if err != nil {
+		t.Fatalf("failed to create test directory: %v", err)
+	}
+	cleanup := func() {
+		_, _ = directory.Root().Remove(db, path)
+	}
+	return dir, cleanup
+}
+
+// WithTx runs a read-write transaction and fails the test on error.
+func WithTx(t *testing.T, db fdb.Database, fn func(tr fdb.Transaction) error) {
+	t.Helper()
+	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+		return nil, fn(tr)
+	})
+	if err != nil {
+		t.Fatalf("transaction failed: %v", err)
+	}
 }

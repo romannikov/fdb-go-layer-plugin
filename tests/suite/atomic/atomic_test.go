@@ -1,15 +1,16 @@
-package store
+package atomic_test
 
 import (
 	"testing"
 
+	"github.com/romannikov/fdb-go-layer-plugin/tests"
 	"github.com/romannikov/fdb-go-layer-plugin/tests/atomic"
 )
 
 func TestAtomicMutations(t *testing.T) {
-	kv := NewMockKV()
-	tr := NewMockTransaction(kv)
-	dir := &MockDirectorySubspace{}
+	kv := tests.NewMockKV()
+	tr := tests.NewMockTransaction(kv)
+	dir := &tests.MockDirectorySubspace{}
 	recordStore := atomic.NewRecordStore()
 	err := recordStore.SyncMetadata(tr, dir)
 	if err != nil {
@@ -100,4 +101,3 @@ func TestAtomicMutations(t *testing.T) {
 		t.Fatalf("unexpected min_value retrieved: %d", genRetrieved.MinValue)
 	}
 }
-

@@ -1,26 +1,29 @@
-package store
+package complex_index_test
 
 import (
 	"testing"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
+
+	"github.com/romannikov/fdb-go-layer-plugin/tests"
+	"github.com/romannikov/fdb-go-layer-plugin/tests/store"
 )
 
 func TestFanOutIndex(t *testing.T) {
-	store, tr, dir, kv := syncAndSetup()
+	recordStore, tr, dir, kv := tests.SyncAndSetup()
 
-	post := &Post{
+	post := &store.Post{
 		Id:   "post1",
 		Tags: []string{"tag1", "tag2", "tag3"},
 	}
 
-	err := store.CreatePost(tr, dir, post)
+	err := recordStore.CreatePost(tr, dir, post)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Verify index entries in MockKV
-	typeID, _ := store.getPostTypeID()
+	// Verify index entries in MockKV using the public metadata lookup
+	typeID := recordStore.Metadata()["Post"]
 
 	for _, tag := range post.Tags {
 		indexKey := dir.Pack(tuple.Tuple{typeID, "index", "Tags", tag, post.Id})
