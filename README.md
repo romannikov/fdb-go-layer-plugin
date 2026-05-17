@@ -135,38 +135,40 @@ userRepo := db.NewUserRepository(store)
 // Now you can use userRepo.Create, userRepo.Get, etc.
 ```
 
-### CRUD Operations (methods on `*RecordStore`)
+### CRUD Operations (methods on `*UserRepository`)
 
 ```go
 // Create a new entity
-store.CreateUser(tr Transaction, dir directory.DirectorySubspace, entity *User) error
+userRepo.Create(tr Transaction, dir directory.DirectorySubspace, entity *User) error
 
 // Get an entity by primary key
-store.GetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, id string) (*User, error)
+userRepo.Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, key tuple.Tuple) (*User, error)
 
 // Update an existing entity
-store.SetUser(tr Transaction, dir directory.DirectorySubspace, entity *User) error
+userRepo.Set(tr Transaction, dir directory.DirectorySubspace, entity *User) error
 
 // Delete an entity
-store.DeleteUser(tr Transaction, dir directory.DirectorySubspace, id string) error
+userRepo.Delete(tr Transaction, dir directory.DirectorySubspace, key tuple.Tuple) error
 
 // Batch get multiple entities by their primary keys
-store.BatchGetUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error)
+userRepo.BatchGet(tr fdb.ReadTransaction, dir directory.DirectorySubspace, keys []tuple.Tuple) (map[string]*User, error)
 
 // List entities with pagination
-store.ListUser(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
+userRepo.List(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PaginationOptions) (*PaginatedResult[User], error)
 ```
 
 ### Pagination
 
+The generic repository uses common pagination types defined in `metadata.go`:
+
 ```go
-type UserPaginationOptions struct {
+type PaginationOptions struct {
     Begin tuple.Tuple  // Starting key for the query
     Limit int          // Maximum number of items to return
 }
 
-type UserPaginatedResult struct {
-    Items   []*User     // List of items
+type PaginatedResult[T any] struct {
+    Items   []*T        // List of items
     NextKey tuple.Tuple // Key for the next page
     HasMore bool        // Whether there are more items
 }
@@ -178,7 +180,7 @@ For each secondary index, the plugin generates a lookup method:
 
 ```go
 // Standard index — lookup by a single scalar field
-store.GetUserByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, email string) ([]*User, error)
+userRepo.GetByEmail(tr fdb.ReadTransaction, dir directory.DirectorySubspace, email string) ([]*User, error)
 ```
 
 #### Fan-Out Indexes
@@ -188,7 +190,7 @@ One index entry is written per element in the repeated field, enabling efficient
 
 ```go
 // Fan-out index — lookup posts by any one of their tags
-store.GetPostByTags(tr fdb.ReadTransaction, dir directory.DirectorySubspace, tag string) ([]*Post, error)
+postRepo.GetByTags(tr fdb.ReadTransaction, dir directory.DirectorySubspace, tag string) ([]*Post, error)
 ```
 
 On `Set` and `Delete`, all old fan-out entries are automatically cleared and re-written.
@@ -199,13 +201,13 @@ For fields marked with mutation annotations, the plugin generates specific atomi
 
 ```go
 // Apply atomic ADD to a field
-store.AddCounterValue(tr Transaction, dir directory.DirectorySubspace, id string, val int64) error
+counterRepo.AddValue(tr Transaction, dir directory.DirectorySubspace, id string, val int64) error
 
 // Apply atomic MAX to a field
-store.MaxCounterMaxValue(tr Transaction, dir directory.DirectorySubspace, id string, val int64) error
+counterRepo.MaxMaxValue(tr Transaction, dir directory.DirectorySubspace, id string, val int64) error
 
 // Apply atomic MIN to a field
-store.MinCounterMinValue(tr Transaction, dir directory.DirectorySubspace, id string, val int64) error
+counterRepo.MinMinValue(tr Transaction, dir directory.DirectorySubspace, id string, val int64) error
 ```
 
 These operations do not require a read-modify-write cycle. Note that fields marked for atomic mutation are stored in separate keys and are excluded from the main serialized message blob.
