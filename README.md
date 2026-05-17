@@ -8,6 +8,7 @@ A protoc plugin that generates FoundationDB data access layer code for Proto mes
 - **Runtime Metadata Registry** — stable type IDs are managed in an FDB meta-space via `SyncMetadata`
 - **RecordStore Pattern** — no global state; all operations are methods on a `RecordStore` struct
 - Supports primary key and secondary index annotations
+- Supports FDB atomic mutations (`ADD`, `MAX`, `MIN`) via field annotations
 - Provides CRUD, batch, and paginated list operations
 - Thread-safe operations using FoundationDB transactions
 - Supports pagination for list operations
@@ -95,6 +96,7 @@ type Transaction interface {
     fdb.ReadTransaction
     Set(key fdb.KeyConvertible, value []byte)
     Clear(key fdb.KeyConvertible)
+    AtomicOp(key fdb.KeyConvertible, mutationType interface{}, param []byte)
 }
 
 // RecordStore holds metadata mapping between message names and their integer type IDs.
@@ -167,6 +169,23 @@ store.GetPostByTags(tr fdb.ReadTransaction, dir directory.DirectorySubspace, tag
 ```
 
 On `Set` and `Delete`, all old fan-out entries are automatically cleared and re-written.
+
+### Atomic Mutations
+
+For fields marked with mutation annotations, the plugin generates specific atomic operation methods:
+
+```go
+// Apply atomic ADD to a field
+store.AddCounterValue(tr Transaction, dir directory.DirectorySubspace, id string, val int64) error
+
+// Apply atomic MAX to a field
+store.MaxCounterMaxValue(tr Transaction, dir directory.DirectorySubspace, id string, val int64) error
+
+// Apply atomic MIN to a field
+store.MinCounterMinValue(tr Transaction, dir directory.DirectorySubspace, id string, val int64) error
+```
+
+These operations do not require a read-modify-write cycle. Note that fields marked for atomic mutation are stored in separate keys and are excluded from the main serialized message blob.
 
 ## Example Usage
 
