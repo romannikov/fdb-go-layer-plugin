@@ -26,5 +26,6 @@ enum MutationType {
 
 extend google.protobuf.FieldOptions {
   MutationType mutation = 50003;
+  bool is_versionstamp = 50004;
 }
 

@@ -202,6 +202,74 @@ func (x *Post) GetTags() []string {
 	return nil
 }
 
+type TaskMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	QueueName     string                 `protobuf:"bytes,1,opt,name=queue_name,json=queueName,proto3" json:"queue_name,omitempty"`
+	ShardId       uint32                 `protobuf:"varint,2,opt,name=shard_id,json=shardId,proto3" json:"shard_id,omitempty"`
+	Versionstamp  []byte                 `protobuf:"bytes,3,opt,name=versionstamp,proto3" json:"versionstamp,omitempty"`
+	Payload       []byte                 `protobuf:"bytes,4,opt,name=payload,proto3" json:"payload,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TaskMessage) Reset() {
+	*x = TaskMessage{}
+	mi := &file_tests_store_store_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TaskMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TaskMessage) ProtoMessage() {}
+
+func (x *TaskMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_tests_store_store_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TaskMessage.ProtoReflect.Descriptor instead.
+func (*TaskMessage) Descriptor() ([]byte, []int) {
+	return file_tests_store_store_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *TaskMessage) GetQueueName() string {
+	if x != nil {
+		return x.QueueName
+	}
+	return ""
+}
+
+func (x *TaskMessage) GetShardId() uint32 {
+	if x != nil {
+		return x.ShardId
+	}
+	return 0
+}
+
+func (x *TaskMessage) GetVersionstamp() []byte {
+	if x != nil {
+		return x.Versionstamp
+	}
+	return nil
+}
+
+func (x *TaskMessage) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
 var File_tests_store_store_proto protoreflect.FileDescriptor
 
 const file_tests_store_store_proto_rawDesc = "" +
@@ -222,7 +290,14 @@ const file_tests_store_store_proto_rawDesc = "" +
 	"\x04Post\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04tags\x18\x02 \x03(\tR\x04tags:\x10\x8a\xb5\x18\x02id\x92\xb5\x18\x06\n" +
-	"\x04tagsB=Z;github.com/romannikov/fdb-go-layer-plugin/tests/store;storeb\x06proto3"
+	"\x04tags\"\xb7\x01\n" +
+	"\vTaskMessage\x12\x1d\n" +
+	"\n" +
+	"queue_name\x18\x01 \x01(\tR\tqueueName\x12\x19\n" +
+	"\bshard_id\x18\x02 \x01(\rR\ashardId\x12(\n" +
+	"\fversionstamp\x18\x03 \x01(\fB\x04\xa0\xb5\x18\x01R\fversionstamp\x12\x18\n" +
+	"\apayload\x18\x04 \x01(\fR\apayload:*\x8a\xb5\x18\n" +
+	"queue_name\x8a\xb5\x18\bshard_id\x8a\xb5\x18\fversionstampB=Z;github.com/romannikov/fdb-go-layer-plugin/tests/store;storeb\x06proto3"
 
 var (
 	file_tests_store_store_proto_rawDescOnce sync.Once
@@ -236,11 +311,12 @@ func file_tests_store_store_proto_rawDescGZIP() []byte {
 	return file_tests_store_store_proto_rawDescData
 }
 
-var file_tests_store_store_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_tests_store_store_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_tests_store_store_proto_goTypes = []any{
-	(*User)(nil),    // 0: tests.store.User
-	(*Product)(nil), // 1: tests.store.Product
-	(*Post)(nil),    // 2: tests.store.Post
+	(*User)(nil),        // 0: tests.store.User
+	(*Product)(nil),     // 1: tests.store.Product
+	(*Post)(nil),        // 2: tests.store.Post
+	(*TaskMessage)(nil), // 3: tests.store.TaskMessage
 }
 var file_tests_store_store_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for method output_type
@@ -261,7 +337,7 @@ func file_tests_store_store_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tests_store_store_proto_rawDesc), len(file_tests_store_store_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   3,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

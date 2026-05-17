@@ -454,3 +454,70 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 		t.Fatalf("expected 1 post in list, got %d", len(postResult.Items))
 	}
 }
+
+func TestIntegration_VersionstampedPrimaryKey(t *testing.T) {
+	ctx := context.Background()
+	db := fdb.MustOpenDefault()
+	dir, cleanup := tests.TestDir(t, db)
+	defer cleanup()
+
+	recordStore := fdblayer.NewRecordStore()
+	taskRepo := store.NewTaskMessageRepository(recordStore)
+
+	task := &store.TaskMessage{
+		QueueName: "email_queue",
+		ShardId:   1,
+		Payload:   []byte("send email"),
+	}
+
+	// 1. Create a versionstamped task message
+	var commitVer fdb.FutureKey
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"TaskMessage"}); err != nil {
+			return err
+		}
+		if err := taskRepo.Create(ctx, tr, dir, task); err != nil {
+			return err
+		}
+		commitVer = tr.GetVersionstamp()
+		return nil
+	})
+
+	// Wait for transaction commit to complete and get the transaction versionstamp
+	vsBytes, err := commitVer.Get()
+	if err != nil {
+		t.Fatalf("failed to get commit versionstamp: %v", err)
+	}
+
+	// In FDB, the returned transaction versionstamp is 10 bytes long.
+	// We wrap it in a tuple.Versionstamp to retrieve the record.
+	var vs tuple.Versionstamp
+	copy(vs.TransactionVersion[:], vsBytes)
+	vs.UserVersion = 0
+
+	// 2. Fetch the entity using the committed versionstamp
+	var fetched *store.TaskMessage
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		pk := store.TaskMessagePrimaryKey{
+			QueueName:    "email_queue",
+			ShardId:      1,
+			Versionstamp: vs,
+		}
+		fetched, err = taskRepo.Get(ctx, tr, dir, pk)
+		return err
+	})
+
+	if fetched == nil {
+		t.Fatalf("expected to fetch task message but got nil")
+	}
+	if fetched.QueueName != "email_queue" {
+		t.Errorf("expected queue name email_queue, got %s", fetched.QueueName)
+	}
+	if fetched.ShardId != 1 {
+		t.Errorf("expected shard id 1, got %d", fetched.ShardId)
+	}
+	if string(fetched.Payload) != "send email" {
+		t.Errorf("expected payload 'send email', got %s", fetched.Payload)
+	}
+}
