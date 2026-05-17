@@ -527,3 +527,73 @@ func TestIntegration_QueueEnqueueDequeue(t *testing.T) {
 		t.Fatalf("expected nil for empty queue Dequeue, got %+v", emptyResult)
 	}
 }
+
+func TestIntegration_MultipleQueues(t *testing.T) {
+	ctx := context.Background()
+	db := fdb.MustOpenDefault()
+	dir, cleanup := tests.TestDir(t, db)
+	defer cleanup()
+
+	recordStore := fdblayer.NewRecordStore()
+	taskRepo := store.NewTaskMessageRepository(recordStore)
+
+	// Sync metadata
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"TaskMessage"})
+	})
+
+	// 1. Enqueue task A to queue_A
+	taskA := &store.TaskMessage{QueueName: "queue_A", ShardId: 1, Payload: []byte("task A")}
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return taskRepo.Enqueue(ctx, tr, dir, taskA)
+	})
+
+	// 2. Enqueue task B to queue_B
+	taskB := &store.TaskMessage{QueueName: "queue_B", ShardId: 1, Payload: []byte("task B")}
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return taskRepo.Enqueue(ctx, tr, dir, taskB)
+	})
+
+	// 3. Dequeue from queue_A and verify it is task A
+	var dequeuedA *store.TaskMessage
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		dequeuedA, err = taskRepo.Dequeue(ctx, tr, dir, "queue_A")
+		return err
+	})
+	if dequeuedA == nil || string(dequeuedA.Payload) != "task A" {
+		t.Fatalf("expected 'task A' from queue_A, got %+v", dequeuedA)
+	}
+
+	// 4. Dequeue from queue_B and verify it is task B
+	var dequeuedB *store.TaskMessage
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		dequeuedB, err = taskRepo.Dequeue(ctx, tr, dir, "queue_B")
+		return err
+	})
+	if dequeuedB == nil || string(dequeuedB.Payload) != "task B" {
+		t.Fatalf("expected 'task B' from queue_B, got %+v", dequeuedB)
+	}
+
+	// 5. Verify both are now empty
+	var emptyA *store.TaskMessage
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		emptyA, err = taskRepo.Dequeue(ctx, tr, dir, "queue_A")
+		return err
+	})
+	if emptyA != nil {
+		t.Fatalf("expected queue_A to be empty, got %+v", emptyA)
+	}
+
+	var emptyB *store.TaskMessage
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		emptyB, err = taskRepo.Dequeue(ctx, tr, dir, "queue_B")
+		return err
+	})
+	if emptyB != nil {
+		t.Fatalf("expected queue_B to be empty, got %+v", emptyB)
+	}
+}
