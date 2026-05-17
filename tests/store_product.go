@@ -4,6 +4,7 @@
 package store
 
 import (
+	"encoding/binary"
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -11,6 +12,8 @@ import (
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	"google.golang.org/protobuf/proto"
 )
+
+var _ = binary.LittleEndian
 
 // ProductPaginationOptions represents options for paginated queries
 type ProductPaginationOptions struct {
@@ -44,11 +47,19 @@ func (s *RecordStore) CreateProduct(tr Transaction, dir directory.DirectorySubsp
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, entity.Id})
+
+	// Save atomic fields and zero them out for marshaling
+
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
+
+	// Restore atomic fields
+
 	tr.Set(key, value)
+
+	// Store atomic fields in separate keys
 
 	{
 
@@ -81,6 +92,9 @@ func (s *RecordStore) GetProduct(tr fdb.ReadTransaction, dir directory.Directory
 	if err != nil {
 		return nil, err
 	}
+
+	// Read atomic fields
+
 	return entity, nil
 }
 
@@ -113,11 +127,18 @@ func (s *RecordStore) SetProduct(tr Transaction, dir directory.DirectorySubspace
 		}
 	}
 
+	// Save atomic fields and zero them out for marshaling
+
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
+
+	// Restore atomic fields
+
 	tr.Set(key, value)
+
+	// Store atomic fields in separate keys
 
 	{
 
@@ -161,6 +182,8 @@ func (s *RecordStore) DeleteProduct(tr Transaction, dir directory.DirectorySubsp
 		}
 	}
 	tr.Clear(key)
+	// Clear atomic fields
+
 	return nil
 }
 
@@ -303,4 +326,41 @@ func (s *RecordStore) ListProduct(tr fdb.ReadTransaction, dir directory.Director
 	}
 
 	return result, nil
+}
+
+type ProductRepository struct {
+	store *RecordStore
+}
+
+func NewProductRepository(store *RecordStore) *ProductRepository {
+	return &ProductRepository{store: store}
+}
+
+func (r *ProductRepository) Create(tr Transaction, dir directory.DirectorySubspace, entity *Product) error {
+	return r.store.CreateProduct(tr, dir, entity)
+}
+
+func (r *ProductRepository) Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, key tuple.Tuple) (*Product, error) {
+	return r.store.GetProduct(tr, dir, key[0].(string))
+}
+
+func (r *ProductRepository) Set(tr Transaction, dir directory.DirectorySubspace, entity *Product) error {
+	return r.store.SetProduct(tr, dir, entity)
+}
+
+func (r *ProductRepository) Delete(tr Transaction, dir directory.DirectorySubspace, key tuple.Tuple) error {
+	return r.store.DeleteProduct(tr, dir, key[0].(string))
+}
+
+func (r *ProductRepository) BatchGet(tr fdb.ReadTransaction, dir directory.DirectorySubspace, keys []tuple.Tuple) (map[string]*Product, error) {
+	return r.store.BatchGetProduct(tr, dir, keys)
+}
+
+func (r *ProductRepository) List(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PaginationOptions) (*PaginatedResult[Product], error) {
+	specificOpts := ProductPaginationOptions{Begin: opts.Begin, Limit: opts.Limit}
+	res, err := r.store.ListProduct(tr, dir, specificOpts)
+	if err != nil {
+		return nil, err
+	}
+	return &PaginatedResult[Product]{Items: res.Items, NextKey: res.NextKey, HasMore: res.HasMore}, nil
 }

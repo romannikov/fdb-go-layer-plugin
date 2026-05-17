@@ -13,6 +13,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+var _ = binary.LittleEndian
+
 // CounterPaginationOptions represents options for paginated queries
 type CounterPaginationOptions struct {
 	Begin tuple.Tuple
@@ -399,4 +401,41 @@ func (s *RecordStore) ListCounter(tr fdb.ReadTransaction, dir directory.Director
 	}
 
 	return result, nil
+}
+
+type CounterRepository struct {
+	store *RecordStore
+}
+
+func NewCounterRepository(store *RecordStore) *CounterRepository {
+	return &CounterRepository{store: store}
+}
+
+func (r *CounterRepository) Create(tr Transaction, dir directory.DirectorySubspace, entity *Counter) error {
+	return r.store.CreateCounter(tr, dir, entity)
+}
+
+func (r *CounterRepository) Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, key tuple.Tuple) (*Counter, error) {
+	return r.store.GetCounter(tr, dir, key[0].(string))
+}
+
+func (r *CounterRepository) Set(tr Transaction, dir directory.DirectorySubspace, entity *Counter) error {
+	return r.store.SetCounter(tr, dir, entity)
+}
+
+func (r *CounterRepository) Delete(tr Transaction, dir directory.DirectorySubspace, key tuple.Tuple) error {
+	return r.store.DeleteCounter(tr, dir, key[0].(string))
+}
+
+func (r *CounterRepository) BatchGet(tr fdb.ReadTransaction, dir directory.DirectorySubspace, keys []tuple.Tuple) (map[string]*Counter, error) {
+	return r.store.BatchGetCounter(tr, dir, keys)
+}
+
+func (r *CounterRepository) List(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PaginationOptions) (*PaginatedResult[Counter], error) {
+	specificOpts := CounterPaginationOptions{Begin: opts.Begin, Limit: opts.Limit}
+	res, err := r.store.ListCounter(tr, dir, specificOpts)
+	if err != nil {
+		return nil, err
+	}
+	return &PaginatedResult[Counter]{Items: res.Items, NextKey: res.NextKey, HasMore: res.HasMore}, nil
 }

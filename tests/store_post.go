@@ -4,6 +4,7 @@
 package store
 
 import (
+	"encoding/binary"
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -11,6 +12,8 @@ import (
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	"google.golang.org/protobuf/proto"
 )
+
+var _ = binary.LittleEndian
 
 // PostPaginationOptions represents options for paginated queries
 type PostPaginationOptions struct {
@@ -44,11 +47,19 @@ func (s *RecordStore) CreatePost(tr Transaction, dir directory.DirectorySubspace
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, entity.Id})
+
+	// Save atomic fields and zero them out for marshaling
+
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
+
+	// Restore atomic fields
+
 	tr.Set(key, value)
+
+	// Store atomic fields in separate keys
 
 	{
 
@@ -86,6 +97,9 @@ func (s *RecordStore) GetPost(tr fdb.ReadTransaction, dir directory.DirectorySub
 	if err != nil {
 		return nil, err
 	}
+
+	// Read atomic fields
+
 	return entity, nil
 }
 
@@ -123,11 +137,18 @@ func (s *RecordStore) SetPost(tr Transaction, dir directory.DirectorySubspace, e
 		}
 	}
 
+	// Save atomic fields and zero them out for marshaling
+
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
+
+	// Restore atomic fields
+
 	tr.Set(key, value)
+
+	// Store atomic fields in separate keys
 
 	{
 
@@ -181,6 +202,8 @@ func (s *RecordStore) DeletePost(tr Transaction, dir directory.DirectorySubspace
 		}
 	}
 	tr.Clear(key)
+	// Clear atomic fields
+
 	return nil
 }
 
@@ -323,4 +346,41 @@ func (s *RecordStore) ListPost(tr fdb.ReadTransaction, dir directory.DirectorySu
 	}
 
 	return result, nil
+}
+
+type PostRepository struct {
+	store *RecordStore
+}
+
+func NewPostRepository(store *RecordStore) *PostRepository {
+	return &PostRepository{store: store}
+}
+
+func (r *PostRepository) Create(tr Transaction, dir directory.DirectorySubspace, entity *Post) error {
+	return r.store.CreatePost(tr, dir, entity)
+}
+
+func (r *PostRepository) Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, key tuple.Tuple) (*Post, error) {
+	return r.store.GetPost(tr, dir, key[0].(string))
+}
+
+func (r *PostRepository) Set(tr Transaction, dir directory.DirectorySubspace, entity *Post) error {
+	return r.store.SetPost(tr, dir, entity)
+}
+
+func (r *PostRepository) Delete(tr Transaction, dir directory.DirectorySubspace, key tuple.Tuple) error {
+	return r.store.DeletePost(tr, dir, key[0].(string))
+}
+
+func (r *PostRepository) BatchGet(tr fdb.ReadTransaction, dir directory.DirectorySubspace, keys []tuple.Tuple) (map[string]*Post, error) {
+	return r.store.BatchGetPost(tr, dir, keys)
+}
+
+func (r *PostRepository) List(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PaginationOptions) (*PaginatedResult[Post], error) {
+	specificOpts := PostPaginationOptions{Begin: opts.Begin, Limit: opts.Limit}
+	res, err := r.store.ListPost(tr, dir, specificOpts)
+	if err != nil {
+		return nil, err
+	}
+	return &PaginatedResult[Post]{Items: res.Items, NextKey: res.NextKey, HasMore: res.HasMore}, nil
 }

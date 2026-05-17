@@ -14,6 +14,7 @@ type Transaction interface {
 	fdb.ReadTransaction
 	Set(key fdb.KeyConvertible, value []byte)
 	Clear(key fdb.KeyConvertible)
+	AtomicOp(key fdb.KeyConvertible, mutationType interface{}, param []byte)
 }
 
 // RecordStore holds metadata mapping between message names and their integer type IDs.
@@ -75,4 +76,27 @@ func (s *RecordStore) SyncMetadata(tr Transaction, metaDir directory.DirectorySu
 		}
 	}
 	return nil
+}
+
+// PaginationOptions represents options for paginated queries.
+type PaginationOptions struct {
+	Begin tuple.Tuple
+	Limit int
+}
+
+// PaginatedResult represents a paginated result set.
+type PaginatedResult[T any] struct {
+	Items   []*T
+	NextKey tuple.Tuple
+	HasMore bool
+}
+
+// Repository defines a generic interface for CRUD operations.
+type Repository[T any] interface {
+	Create(tr Transaction, dir directory.DirectorySubspace, entity *T) error
+	Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, key tuple.Tuple) (*T, error)
+	Set(tr Transaction, dir directory.DirectorySubspace, entity *T) error
+	Delete(tr Transaction, dir directory.DirectorySubspace, key tuple.Tuple) error
+	BatchGet(tr fdb.ReadTransaction, dir directory.DirectorySubspace, keys []tuple.Tuple) (map[string]*T, error)
+	List(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PaginationOptions) (*PaginatedResult[T], error)
 }

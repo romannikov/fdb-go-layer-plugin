@@ -112,6 +112,29 @@ func (s *RecordStore) SyncMetadata(tr Transaction, metaDir directory.DirectorySu
 func (s *RecordStore) Metadata() map[string]int64
 ```
 
+### Generic Repository Interface (Go 1.18+)
+
+With Go 1.18+, the plugin generates a generic `Repository[T]` interface and a specific implementation for each message (e.g., `UserRepository`). This helps reduce boilerplate when you want to wrap the generated code in custom logic.
+
+```go
+// Repository defines a generic interface for CRUD operations.
+type Repository[T any] interface {
+	Create(tr Transaction, dir directory.DirectorySubspace, entity *T) error
+	Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, key tuple.Tuple) (*T, error)
+	Set(tr Transaction, dir directory.DirectorySubspace, entity *T) error
+	Delete(tr Transaction, dir directory.DirectorySubspace, key tuple.Tuple) error
+	BatchGet(tr fdb.ReadTransaction, dir directory.DirectorySubspace, keys []tuple.Tuple) (map[string]*T, error)
+	List(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PaginationOptions) (*PaginatedResult[T], error)
+}
+```
+
+To use it:
+
+```go
+userRepo := db.NewUserRepository(store)
+// Now you can use userRepo.Create, userRepo.Get, etc.
+```
+
 ### CRUD Operations (methods on `*RecordStore`)
 
 ```go
@@ -213,6 +236,9 @@ func main() {
         return nil, store.SyncMetadata(tr, metaDir)
     })
 
+    // Create a repository for User
+    userRepo := db.NewUserRepository(store)
+
     // Create a new user
     fdbConn.Transact(func(tr fdb.Transaction) (interface{}, error) {
         user := &db.User{
@@ -220,7 +246,7 @@ func main() {
             Email: "user@example.com",
             Name:  "John Doe",
         }
-        return nil, store.CreateUser(tr, dataDir, user)
+        return nil, userRepo.Create(tr, dataDir, user)
     })
 
     fmt.Println("User saved successfully")

@@ -4,6 +4,7 @@
 package store
 
 import (
+	"encoding/binary"
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -11,6 +12,8 @@ import (
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	"google.golang.org/protobuf/proto"
 )
+
+var _ = binary.LittleEndian
 
 // UserPaginationOptions represents options for paginated queries
 type UserPaginationOptions struct {
@@ -44,11 +47,19 @@ func (s *RecordStore) CreateUser(tr Transaction, dir directory.DirectorySubspace
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, entity.Id})
+
+	// Save atomic fields and zero them out for marshaling
+
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
+
+	// Restore atomic fields
+
 	tr.Set(key, value)
+
+	// Store atomic fields in separate keys
 
 	{
 
@@ -81,6 +92,9 @@ func (s *RecordStore) GetUser(tr fdb.ReadTransaction, dir directory.DirectorySub
 	if err != nil {
 		return nil, err
 	}
+
+	// Read atomic fields
+
 	return entity, nil
 }
 
@@ -113,11 +127,18 @@ func (s *RecordStore) SetUser(tr Transaction, dir directory.DirectorySubspace, e
 		}
 	}
 
+	// Save atomic fields and zero them out for marshaling
+
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
+
+	// Restore atomic fields
+
 	tr.Set(key, value)
+
+	// Store atomic fields in separate keys
 
 	{
 
@@ -161,6 +182,8 @@ func (s *RecordStore) DeleteUser(tr Transaction, dir directory.DirectorySubspace
 		}
 	}
 	tr.Clear(key)
+	// Clear atomic fields
+
 	return nil
 }
 
@@ -303,4 +326,41 @@ func (s *RecordStore) ListUser(tr fdb.ReadTransaction, dir directory.DirectorySu
 	}
 
 	return result, nil
+}
+
+type UserRepository struct {
+	store *RecordStore
+}
+
+func NewUserRepository(store *RecordStore) *UserRepository {
+	return &UserRepository{store: store}
+}
+
+func (r *UserRepository) Create(tr Transaction, dir directory.DirectorySubspace, entity *User) error {
+	return r.store.CreateUser(tr, dir, entity)
+}
+
+func (r *UserRepository) Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, key tuple.Tuple) (*User, error) {
+	return r.store.GetUser(tr, dir, key[0].(string))
+}
+
+func (r *UserRepository) Set(tr Transaction, dir directory.DirectorySubspace, entity *User) error {
+	return r.store.SetUser(tr, dir, entity)
+}
+
+func (r *UserRepository) Delete(tr Transaction, dir directory.DirectorySubspace, key tuple.Tuple) error {
+	return r.store.DeleteUser(tr, dir, key[0].(string))
+}
+
+func (r *UserRepository) BatchGet(tr fdb.ReadTransaction, dir directory.DirectorySubspace, keys []tuple.Tuple) (map[string]*User, error) {
+	return r.store.BatchGetUser(tr, dir, keys)
+}
+
+func (r *UserRepository) List(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PaginationOptions) (*PaginatedResult[User], error) {
+	specificOpts := UserPaginationOptions{Begin: opts.Begin, Limit: opts.Limit}
+	res, err := r.store.ListUser(tr, dir, specificOpts)
+	if err != nil {
+		return nil, err
+	}
+	return &PaginatedResult[User]{Items: res.Items, NextKey: res.NextKey, HasMore: res.HasMore}, nil
 }

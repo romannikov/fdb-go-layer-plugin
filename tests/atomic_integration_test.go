@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
+	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	"github.com/romannikov/fdb-go-layer-plugin/tests/atomic"
 )
 
@@ -19,6 +20,8 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 		return recordStore.SyncMetadata(tr, dir)
 	})
 
+	counterRepo := atomic.NewCounterRepository(recordStore)
+
 	// 1. Create a counter
 	withTx(t, db, func(tr fdb.Transaction) error {
 		c := &atomic.Counter{
@@ -27,14 +30,14 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 			MaxValue: 100,
 			MinValue: 5,
 		}
-		return recordStore.CreateCounter(tr, dir, c)
+		return counterRepo.Create(tr, dir, c)
 	})
 
 	// Verify initial state
 	var retrieved *atomic.Counter
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = recordStore.GetCounter(tr, dir, "c1")
+		retrieved, err = counterRepo.Get(tr, dir, tuple.Tuple{"c1"})
 		return err
 	})
 	if retrieved.Value != 10 || retrieved.MaxValue != 100 || retrieved.MinValue != 5 {
@@ -48,7 +51,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = recordStore.GetCounter(tr, dir, "c1")
+		retrieved, err = counterRepo.Get(tr, dir, tuple.Tuple{"c1"})
 		return err
 	})
 	if retrieved.Value != 15 {
@@ -61,7 +64,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	})
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = recordStore.GetCounter(tr, dir, "c1")
+		retrieved, err = counterRepo.Get(tr, dir, tuple.Tuple{"c1"})
 		return err
 	})
 	if retrieved.MaxValue != 100 {
@@ -73,7 +76,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	})
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = recordStore.GetCounter(tr, dir, "c1")
+		retrieved, err = counterRepo.Get(tr, dir, tuple.Tuple{"c1"})
 		return err
 	})
 	if retrieved.MaxValue != 150 {
@@ -86,7 +89,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	})
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = recordStore.GetCounter(tr, dir, "c1")
+		retrieved, err = counterRepo.Get(tr, dir, tuple.Tuple{"c1"})
 		return err
 	})
 	if retrieved.MinValue != 5 {
@@ -98,7 +101,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	})
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = recordStore.GetCounter(tr, dir, "c1")
+		retrieved, err = counterRepo.Get(tr, dir, tuple.Tuple{"c1"})
 		return err
 	})
 	if retrieved.MinValue != 2 {
