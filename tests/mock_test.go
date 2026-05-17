@@ -171,54 +171,54 @@ func (m *MockTransaction) Clear(key fdb.KeyConvertible) {
 	m.kv.clear(key.FDBKey())
 }
 
-func (m *MockTransaction) AtomicOp(key fdb.KeyConvertible, mutationType interface{}, param []byte) {
+func (m *MockTransaction) Add(key fdb.KeyConvertible, param []byte) {
 	k := key.FDBKey()
 	m.kv.mu.Lock()
 	defer m.kv.mu.Unlock()
 
 	current := m.kv.data[string(k)]
-
-	var mt int
-	switch v := mutationType.(type) {
-	case int:
-		mt = v
-	default:
-		return
+	var currentVal uint64
+	if len(current) >= 8 {
+		currentVal = binary.LittleEndian.Uint64(current)
 	}
+	delta := binary.LittleEndian.Uint64(param)
+	newVal := currentVal + delta
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, newVal)
+	m.kv.data[string(k)] = buf
+}
 
-	switch mt {
-	case 2: // fdb.MutationTypeAdd
-		var currentVal uint64
-		if len(current) >= 8 {
-			currentVal = binary.LittleEndian.Uint64(current)
-		}
-		delta := binary.LittleEndian.Uint64(param)
-		newVal := currentVal + delta
-		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, newVal)
-		m.kv.data[string(k)] = buf
+func (m *MockTransaction) Max(key fdb.KeyConvertible, param []byte) {
+	k := key.FDBKey()
+	m.kv.mu.Lock()
+	defer m.kv.mu.Unlock()
 
-	case 12: // fdb.MutationTypeMax
-		var currentVal uint64
-		if len(current) >= 8 {
-			currentVal = binary.LittleEndian.Uint64(current)
-		}
-		val := binary.LittleEndian.Uint64(param)
-		if val > currentVal {
-			m.kv.data[string(k)] = param
-		}
+	current := m.kv.data[string(k)]
+	var currentVal uint64
+	if len(current) >= 8 {
+		currentVal = binary.LittleEndian.Uint64(current)
+	}
+	val := binary.LittleEndian.Uint64(param)
+	if val > currentVal {
+		m.kv.data[string(k)] = param
+	}
+}
 
-	case 13: // fdb.MutationTypeMin
-		var currentVal uint64
-		if len(current) >= 8 {
-			currentVal = binary.LittleEndian.Uint64(current)
-		} else {
-			currentVal = ^uint64(0)
-		}
-		val := binary.LittleEndian.Uint64(param)
-		if val < currentVal {
-			m.kv.data[string(k)] = param
-		}
+func (m *MockTransaction) Min(key fdb.KeyConvertible, param []byte) {
+	k := key.FDBKey()
+	m.kv.mu.Lock()
+	defer m.kv.mu.Unlock()
+
+	current := m.kv.data[string(k)]
+	var currentVal uint64
+	if len(current) >= 8 {
+		currentVal = binary.LittleEndian.Uint64(current)
+	} else {
+		currentVal = ^uint64(0)
+	}
+	val := binary.LittleEndian.Uint64(param)
+	if val < currentVal {
+		m.kv.data[string(k)] = param
 	}
 }
 

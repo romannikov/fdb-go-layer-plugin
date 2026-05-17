@@ -15,9 +15,6 @@
 
 *Example:* `repo.ListUsers(ctx, tr, dir, fdb.WithLimit(10), fdb.WithReverse())`
 
-### Generic Repository Interface
-**Improvement:** With Go 1.18+, the plugin could generate a generic repository interface to reduce boilerplate when the user wants to wrap the generated code in custom logic.
-
 ## 3. Developer Experience (DX)
 
 ### Validation Logic

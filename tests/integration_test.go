@@ -984,3 +984,64 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 		t.Fatalf("expected 1 post in list, got %d", len(postResult.Items))
 	}
 }
+
+func TestIntegration_GenericRepository(t *testing.T) {
+	db := fdb.MustOpenDefault()
+	dir, cleanup := testDir(t, db)
+	defer cleanup()
+
+	store := NewRecordStore()
+	withTx(t, db, func(tr fdb.Transaction) error {
+		return store.SyncMetadata(tr, dir)
+	})
+
+	// Wrap store in the generated UserRepository
+	var repo UserRepository = NewUserRepository(store)
+	var genRepo GenericRepository[*User, string] = repo
+
+	// 1. Create via generic repository using real FDB transaction
+	withTx(t, db, func(tr fdb.Transaction) error {
+		return genRepo.Create(tr, dir, &User{Id: "g1", Name: "Generic Alice", Email: "g-alice@test.com"})
+	})
+
+	// 2. Get via generic repository
+	var got *User
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		got, err = genRepo.Get(tr, dir, "g1")
+		return err
+	})
+	if got == nil || got.Name != "Generic Alice" {
+		t.Fatalf("unexpected user: %+v", got)
+	}
+
+	// 3. Set via generic repository
+	got.Name = "Updated Generic Alice"
+	withTx(t, db, func(tr fdb.Transaction) error {
+		return genRepo.Set(tr, dir, got)
+	})
+
+	// Verify update
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		got, err = genRepo.Get(tr, dir, "g1")
+		return err
+	})
+	if got == nil || got.Name != "Updated Generic Alice" {
+		t.Fatalf("update not applied: %+v", got)
+	}
+
+	// 4. Delete via generic repository
+	withTx(t, db, func(tr fdb.Transaction) error {
+		return genRepo.Delete(tr, dir, "g1")
+	})
+
+	// Verify deletion
+	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+		return genRepo.Get(tr, dir, "g1")
+	})
+	if err == nil {
+		t.Fatal("expected not found after delete")
+	}
+}
+
