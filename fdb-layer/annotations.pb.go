@@ -136,6 +136,14 @@ var file_fdb_layer_annotations_proto_extTypes = []protoimpl.ExtensionInfo{
 		Filename:      "fdb-layer/annotations.proto",
 	},
 	{
+		ExtendedType:  (*descriptorpb.MessageOptions)(nil),
+		ExtensionType: (*bool)(nil),
+		Field:         50005,
+		Name:          "annotations.is_queue",
+		Tag:           "varint,50005,opt,name=is_queue",
+		Filename:      "fdb-layer/annotations.proto",
+	},
+	{
 		ExtendedType:  (*descriptorpb.FieldOptions)(nil),
 		ExtensionType: (*MutationType)(nil),
 		Field:         50003,
@@ -163,14 +171,18 @@ var (
 	//
 	// repeated annotations.SecondaryIndex secondary_index = 50002;
 	E_SecondaryIndex = &file_fdb_layer_annotations_proto_extTypes[1]
+	// Is this message a queue?
+	//
+	// optional bool is_queue = 50005;
+	E_IsQueue = &file_fdb_layer_annotations_proto_extTypes[2]
 )
 
 // Extension fields to descriptorpb.FieldOptions.
 var (
 	// optional annotations.MutationType mutation = 50003;
-	E_Mutation = &file_fdb_layer_annotations_proto_extTypes[2]
+	E_Mutation = &file_fdb_layer_annotations_proto_extTypes[3]
 	// optional bool is_versionstamp = 50004;
-	E_IsVersionstamp = &file_fdb_layer_annotations_proto_extTypes[3]
+	E_IsVersionstamp = &file_fdb_layer_annotations_proto_extTypes[4]
 )
 
 var File_fdb_layer_annotations_proto protoreflect.FileDescriptor
@@ -187,7 +199,8 @@ const file_fdb_layer_annotations_proto_rawDesc = "" +
 	"\fMUTATION_MIN\x10\x03:B\n" +
 	"\vprimary_key\x12\x1f.google.protobuf.MessageOptions\x18ц\x03 \x03(\tR\n" +
 	"primaryKey:g\n" +
-	"\x0fsecondary_index\x12\x1f.google.protobuf.MessageOptions\x18҆\x03 \x03(\v2\x1b.annotations.SecondaryIndexR\x0esecondaryIndex:V\n" +
+	"\x0fsecondary_index\x12\x1f.google.protobuf.MessageOptions\x18҆\x03 \x03(\v2\x1b.annotations.SecondaryIndexR\x0esecondaryIndex:<\n" +
+	"\bis_queue\x12\x1f.google.protobuf.MessageOptions\x18Ն\x03 \x01(\bR\aisQueue:V\n" +
 	"\bmutation\x12\x1d.google.protobuf.FieldOptions\x18ӆ\x03 \x01(\x0e2\x19.annotations.MutationTypeR\bmutation:H\n" +
 	"\x0fis_versionstamp\x12\x1d.google.protobuf.FieldOptions\x18Ԇ\x03 \x01(\bR\x0eisVersionstampB>Z<github.com/romannikov/fdb-go-layer-plugin/fdb-layer;fdblayerb\x06proto3"
 
@@ -214,14 +227,15 @@ var file_fdb_layer_annotations_proto_goTypes = []any{
 var file_fdb_layer_annotations_proto_depIdxs = []int32{
 	2, // 0: annotations.primary_key:extendee -> google.protobuf.MessageOptions
 	2, // 1: annotations.secondary_index:extendee -> google.protobuf.MessageOptions
-	3, // 2: annotations.mutation:extendee -> google.protobuf.FieldOptions
-	3, // 3: annotations.is_versionstamp:extendee -> google.protobuf.FieldOptions
-	1, // 4: annotations.secondary_index:type_name -> annotations.SecondaryIndex
-	0, // 5: annotations.mutation:type_name -> annotations.MutationType
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	4, // [4:6] is the sub-list for extension type_name
-	0, // [0:4] is the sub-list for extension extendee
+	2, // 2: annotations.is_queue:extendee -> google.protobuf.MessageOptions
+	3, // 3: annotations.mutation:extendee -> google.protobuf.FieldOptions
+	3, // 4: annotations.is_versionstamp:extendee -> google.protobuf.FieldOptions
+	1, // 5: annotations.secondary_index:type_name -> annotations.SecondaryIndex
+	0, // 6: annotations.mutation:type_name -> annotations.MutationType
+	7, // [7:7] is the sub-list for method output_type
+	7, // [7:7] is the sub-list for method input_type
+	5, // [5:7] is the sub-list for extension type_name
+	0, // [0:5] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
 }
 
@@ -237,7 +251,7 @@ func file_fdb_layer_annotations_proto_init() {
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fdb_layer_annotations_proto_rawDesc), len(file_fdb_layer_annotations_proto_rawDesc)),
 			NumEnums:      1,
 			NumMessages:   1,
-			NumExtensions: 4,
+			NumExtensions: 5,
 			NumServices:   0,
 		},
 		GoTypes:           file_fdb_layer_annotations_proto_goTypes,

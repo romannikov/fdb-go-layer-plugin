@@ -455,7 +455,7 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 	}
 }
 
-func TestIntegration_VersionstampedPrimaryKey(t *testing.T) {
+func TestIntegration_QueueEnqueueDequeue(t *testing.T) {
 	ctx := context.Background()
 	db := fdb.MustOpenDefault()
 	dir, cleanup := tests.TestDir(t, db)
@@ -464,60 +464,66 @@ func TestIntegration_VersionstampedPrimaryKey(t *testing.T) {
 	recordStore := fdblayer.NewRecordStore()
 	taskRepo := store.NewTaskMessageRepository(recordStore)
 
-	task := &store.TaskMessage{
-		QueueName: "email_queue",
-		ShardId:   1,
-		Payload:   []byte("send email"),
-	}
-
-	// 1. Create a versionstamped task message
-	var commitVer fdb.FutureKey
+	// Sync metadata
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"TaskMessage"}); err != nil {
-			return err
-		}
-		if err := taskRepo.Create(ctx, tr, dir, task); err != nil {
-			return err
-		}
-		commitVer = tr.GetVersionstamp()
-		return nil
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"TaskMessage"})
 	})
 
-	// Wait for transaction commit to complete and get the transaction versionstamp
-	vsBytes, err := commitVer.Get()
-	if err != nil {
-		t.Fatalf("failed to get commit versionstamp: %v", err)
-	}
+	// 1. Enqueue three tasks sequentially in separate transactions to ensure distinct versionstamps
+	task1 := &store.TaskMessage{QueueName: "test_queue", ShardId: 1, Payload: []byte("task 1")}
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return taskRepo.Enqueue(ctx, tr, dir, task1)
+	})
 
-	// In FDB, the returned transaction versionstamp is 10 bytes long.
-	// We wrap it in a tuple.Versionstamp to retrieve the record.
-	var vs tuple.Versionstamp
-	copy(vs.TransactionVersion[:], vsBytes)
-	vs.UserVersion = 0
+	task2 := &store.TaskMessage{QueueName: "test_queue", ShardId: 2, Payload: []byte("task 2")}
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return taskRepo.Enqueue(ctx, tr, dir, task2)
+	})
 
-	// 2. Fetch the entity using the committed versionstamp
-	var fetched *store.TaskMessage
+	task3 := &store.TaskMessage{QueueName: "test_queue", ShardId: 3, Payload: []byte("task 3")}
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return taskRepo.Enqueue(ctx, tr, dir, task3)
+	})
+
+	// 2. Dequeue tasks and verify FIFO order
+	var dequeued1 *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		pk := store.TaskMessagePrimaryKey{
-			QueueName:    "email_queue",
-			ShardId:      1,
-			Versionstamp: vs,
-		}
-		fetched, err = taskRepo.Get(ctx, tr, dir, pk)
+		dequeued1, err = taskRepo.Dequeue(ctx, tr, dir, "test_queue")
 		return err
 	})
+	if dequeued1 == nil || string(dequeued1.Payload) != "task 1" {
+		t.Fatalf("expected 'task 1', got %+v", dequeued1)
+	}
 
-	if fetched == nil {
-		t.Fatalf("expected to fetch task message but got nil")
+	var dequeued2 *store.TaskMessage
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		dequeued2, err = taskRepo.Dequeue(ctx, tr, dir, "test_queue")
+		return err
+	})
+	if dequeued2 == nil || string(dequeued2.Payload) != "task 2" {
+		t.Fatalf("expected 'task 2', got %+v", dequeued2)
 	}
-	if fetched.QueueName != "email_queue" {
-		t.Errorf("expected queue name email_queue, got %s", fetched.QueueName)
+
+	var dequeued3 *store.TaskMessage
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		dequeued3, err = taskRepo.Dequeue(ctx, tr, dir, "test_queue")
+		return err
+	})
+	if dequeued3 == nil || string(dequeued3.Payload) != "task 3" {
+		t.Fatalf("expected 'task 3', got %+v", dequeued3)
 	}
-	if fetched.ShardId != 1 {
-		t.Errorf("expected shard id 1, got %d", fetched.ShardId)
-	}
-	if string(fetched.Payload) != "send email" {
-		t.Errorf("expected payload 'send email', got %s", fetched.Payload)
+
+	// 3. Dequeue on empty queue should return nil, nil
+	var emptyResult *store.TaskMessage
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		emptyResult, err = taskRepo.Dequeue(ctx, tr, dir, "test_queue")
+		return err
+	})
+	if emptyResult != nil {
+		t.Fatalf("expected nil for empty queue Dequeue, got %+v", emptyResult)
 	}
 }

@@ -290,14 +290,14 @@ const file_tests_store_store_proto_rawDesc = "" +
 	"\x04Post\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04tags\x18\x02 \x03(\tR\x04tags:\x10\x8a\xb5\x18\x02id\x92\xb5\x18\x06\n" +
-	"\x04tags\"\xb7\x01\n" +
+	"\x04tags\"\xbb\x01\n" +
 	"\vTaskMessage\x12\x1d\n" +
 	"\n" +
 	"queue_name\x18\x01 \x01(\tR\tqueueName\x12\x19\n" +
 	"\bshard_id\x18\x02 \x01(\rR\ashardId\x12(\n" +
 	"\fversionstamp\x18\x03 \x01(\fB\x04\xa0\xb5\x18\x01R\fversionstamp\x12\x18\n" +
-	"\apayload\x18\x04 \x01(\fR\apayload:*\x8a\xb5\x18\n" +
-	"queue_name\x8a\xb5\x18\bshard_id\x8a\xb5\x18\fversionstampB=Z;github.com/romannikov/fdb-go-layer-plugin/tests/store;storeb\x06proto3"
+	"\apayload\x18\x04 \x01(\fR\apayload:.\x8a\xb5\x18\n" +
+	"queue_name\x8a\xb5\x18\bshard_id\x8a\xb5\x18\fversionstamp\xa8\xb5\x18\x01B=Z;github.com/romannikov/fdb-go-layer-plugin/tests/store;storeb\x06proto3"
 
 var (
 	file_tests_store_store_proto_rawDescOnce sync.Once

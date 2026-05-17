@@ -40,6 +40,7 @@ message Post {
 }
 
 message TaskMessage {
+    option (annotations.is_queue) = true;
     option (annotations.primary_key) = "queue_name";
     option (annotations.primary_key) = "shard_id";
     option (annotations.primary_key) = "versionstamp";

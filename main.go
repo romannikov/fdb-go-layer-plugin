@@ -40,6 +40,7 @@ type Message struct {
 	GoPackagePath    string
 	GoPackageName    string
 	FilePrefix       string
+	IsQueue          bool
 }
 
 func main() {
@@ -264,11 +265,20 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 		}
 	}
 
+	var isQueue bool
+	if proto.HasExtension(msgOptions, annotationspb.E_IsQueue) {
+		val := proto.GetExtension(msgOptions, annotationspb.E_IsQueue)
+		if val != nil {
+			isQueue = val.(bool)
+		}
+	}
+
 	return &Message{
 		Name:             msgName,
 		Fields:           fields,
 		PrimaryKeyFields: primaryKeyFields,
 		SecondaryIndexes: secondaryIndexes,
+		IsQueue:          isQueue,
 	}
 }
 
@@ -336,7 +346,7 @@ package {{.GoPackageName}}
 import (
 	"context"
 	{{if hasBinaryImports .}}"encoding/binary"{{end}}
-	"fmt"
+	{{if not .IsQueue}}"fmt"{{end}}
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
@@ -345,6 +355,93 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+{{if .IsQueue}}
+// {{.Name}}Repository defines the repository interface for the {{.Name}} queue.
+type {{.Name}}Repository interface {
+	Enqueue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, msg *{{.Name}}) error
+	Dequeue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, {{(index .PrimaryKeyFields 0).Name | lower}} {{(index .PrimaryKeyFields 0).Type}}) (*{{.Name}}, error)
+}
+
+type {{.Name | lower}}Repository struct {
+	store *fdblayer.RecordStore
+}
+
+// New{{.Name}}Repository creates a new {{.Name}}Repository instance.
+func New{{.Name}}Repository(store *fdblayer.RecordStore) {{.Name}}Repository {
+	return &{{.Name | lower}}Repository{store: store}
+}
+
+// Enqueue adds a {{.Name}} to the queue.
+func (r *{{.Name | lower}}Repository) Enqueue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *{{.Name}}) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	typeID, err := r.store.GetTypeID("{{.Name}}")
+	if err != nil {
+		return err
+	}
+
+	{{if msgHasVersionstampPK .}}
+	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, {{range .PrimaryKeyFields}}{{if .IsVersionstamp}}tuple.IncompleteVersionstamp(0){{else}}{{packField (printf "entity.%s" .Name) .}}{{end}}, {{end}}})
+	if err != nil {
+		return err
+	}
+	{{else}}
+	key := dir.Pack(tuple.Tuple{typeID, {{range .PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}})
+	{{end}}
+
+	value, err := proto.Marshal(entity)
+	if err != nil {
+		return err
+	}
+
+	{{if msgHasVersionstampPK .}}
+	tr.SetVersionstampedKey(key, value)
+	{{else}}
+	tr.Set(key, value)
+	{{end}}
+
+	return nil
+}
+
+// Dequeue reads and removes the single oldest message from the queue.
+func (r *{{.Name | lower}}Repository) Dequeue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, {{(index .PrimaryKeyFields 0).Name | lower}} {{(index .PrimaryKeyFields 0).Type}}) (*{{.Name}}, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	typeID, err := r.store.GetTypeID("{{.Name}}")
+	if err != nil {
+		return nil, err
+	}
+
+	prefixTuple := tuple.Tuple{typeID, {{(index .PrimaryKeyFields 0).Name | lower}}}
+	prefixRange, err := fdb.PrefixRange(dir.Pack(prefixTuple))
+	if err != nil {
+		return nil, err
+	}
+
+	options := fdb.RangeOptions{Limit: 1}
+	rows := tr.GetRange(prefixRange, options).GetSliceOrPanic()
+
+	if len(rows) == 0 {
+		return nil, nil
+	}
+
+	firstItem := rows[0]
+	keyToDelete := firstItem.Key
+	payload := firstItem.Value
+
+	tr.Clear(keyToDelete)
+
+	entity := &{{.Name}}{}
+	err = proto.Unmarshal(payload, entity)
+	if err != nil {
+		return nil, err
+	}
+
+	return entity, nil
+}
+{{else}}
 // {{.Name}}PaginationOptions represents options for paginated queries
 type {{.Name}}PaginationOptions struct {
 	Begin tuple.Tuple
@@ -894,6 +991,7 @@ func (r *{{$.Name | lower}}Repository) {{if eq .MutationValue 2}}Add{{else if eq
 	{{if eq .MutationValue 2}}tr.Add(key, buf){{else if eq .MutationValue 12}}tr.Max(key, buf){{else if eq .MutationValue 13}}tr.Min(key, buf){{end}}
 	return nil
 }
+{{end}}
 {{end}}
 {{end}}
 `
