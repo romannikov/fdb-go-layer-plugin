@@ -8,6 +8,7 @@ import (
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 
+	fdblayer "github.com/romannikov/fdb-go-layer-plugin/fdb-layer"
 	"github.com/romannikov/fdb-go-layer-plugin/tests"
 	"github.com/romannikov/fdb-go-layer-plugin/tests/atomic"
 )
@@ -22,9 +23,11 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := atomic.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	counterRepo := atomic.NewCounterRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir)
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"})
 	})
 
 	// 1. Create a counter
@@ -35,14 +38,14 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 			MaxValue: 100,
 			MinValue: 5,
 		}
-		return recordStore.CreateCounter(ctx, tr, dir, c)
+		return counterRepo.Create(ctx, tr, dir, c)
 	})
 
 	// Verify initial state
 	var retrieved *atomic.Counter
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = recordStore.GetCounter(ctx, tr, dir, "c1")
+		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
 		return err
 	})
 	if retrieved.Value != 10 || retrieved.MaxValue != 100 || retrieved.MinValue != 5 {
@@ -51,12 +54,12 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 2. Test Add
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.AddCounterValue(ctx, tr, dir, "c1", 5)
+		return counterRepo.AddCounterValue(ctx, tr, dir, "c1", 5)
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = recordStore.GetCounter(ctx, tr, dir, "c1")
+		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
 		return err
 	})
 	if retrieved.Value != 15 {
@@ -65,11 +68,11 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 3. Test Max
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.MaxCounterMaxValue(ctx, tr, dir, "c1", 50) // should not change
+		return counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c1", 50) // should not change
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = recordStore.GetCounter(ctx, tr, dir, "c1")
+		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
 		return err
 	})
 	if retrieved.MaxValue != 100 {
@@ -77,11 +80,11 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	}
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.MaxCounterMaxValue(ctx, tr, dir, "c1", 150) // should change
+		return counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c1", 150) // should change
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = recordStore.GetCounter(ctx, tr, dir, "c1")
+		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
 		return err
 	})
 	if retrieved.MaxValue != 150 {
@@ -90,11 +93,11 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 4. Test Min
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.MinCounterMinValue(ctx, tr, dir, "c1", 10) // should not change
+		return counterRepo.MinCounterMinValue(ctx, tr, dir, "c1", 10) // should not change
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = recordStore.GetCounter(ctx, tr, dir, "c1")
+		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
 		return err
 	})
 	if retrieved.MinValue != 5 {
@@ -102,11 +105,11 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	}
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.MinCounterMinValue(ctx, tr, dir, "c1", 2) // should change
+		return counterRepo.MinCounterMinValue(ctx, tr, dir, "c1", 2) // should change
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = recordStore.GetCounter(ctx, tr, dir, "c1")
+		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
 		return err
 	})
 	if retrieved.MinValue != 2 {

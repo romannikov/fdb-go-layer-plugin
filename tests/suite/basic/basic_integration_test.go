@@ -10,6 +10,7 @@ import (
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 
+	fdblayer "github.com/romannikov/fdb-go-layer-plugin/fdb-layer"
 	"github.com/romannikov/fdb-go-layer-plugin/tests"
 	"github.com/romannikov/fdb-go-layer-plugin/tests/store"
 )
@@ -25,9 +26,9 @@ func TestIntegration_SyncMetadata(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir)
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"})
 	})
 
 	meta := recordStore.Metadata()
@@ -45,15 +46,15 @@ func TestIntegration_SyncMetadata_Idempotent(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir)
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"})
 	})
 	first := recordStore.Metadata()
 
 	// Second sync should produce identical IDs
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir)
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"})
 	})
 	second := recordStore.Metadata()
 
@@ -69,18 +70,20 @@ func TestIntegration_CreateAndGetUser(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	userRepo := store.NewUserRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir); err != nil {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
 			return err
 		}
-		return recordStore.CreateUser(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
+		return userRepo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
 	})
 
 	var user *store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		user, err = recordStore.GetUser(ctx, tr, dir, "u1")
+		user, err = userRepo.Get(ctx, tr, dir, "u1")
 		return err
 	})
 	if user.Name != "Alice" || user.Email != "alice@test.com" {
@@ -94,18 +97,20 @@ func TestIntegration_CreateAndGetProduct(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	productRepo := store.NewProductRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir); err != nil {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
 			return err
 		}
-		return recordStore.CreateProduct(ctx, tr, dir, &store.Product{Id: "p1", Name: "Widget", Category: "tools", Price: 42})
+		return productRepo.Create(ctx, tr, dir, &store.Product{Id: "p1", Name: "Widget", Category: "tools", Price: 42})
 	})
 
 	var product *store.Product
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		product, err = recordStore.GetProduct(ctx, tr, dir, "p1")
+		product, err = productRepo.Get(ctx, tr, dir, "p1")
 		return err
 	})
 	if product.Name != "Widget" || product.Price != 42 {
@@ -119,13 +124,15 @@ func TestIntegration_GetUser_NotFound(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	userRepo := store.NewUserRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir)
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"})
 	})
 
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		return recordStore.GetUser(ctx, tr, dir, "nonexistent")
+		return userRepo.Get(ctx, tr, dir, "nonexistent")
 	})
 	if err == nil {
 		t.Fatal("expected not found error")
@@ -139,22 +146,24 @@ func TestIntegration_SetUser_UpdateFields(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	userRepo := store.NewUserRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir); err != nil {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
 			return err
 		}
-		return recordStore.CreateUser(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
+		return userRepo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SetUser(ctx, tr, dir, &store.User{Id: "u1", Name: "Bob", Email: "b@test.com"})
+		return userRepo.Set(ctx, tr, dir, &store.User{Id: "u1", Name: "Bob", Email: "b@test.com"})
 	})
 
 	var user *store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		user, err = recordStore.GetUser(ctx, tr, dir, "u1")
+		user, err = userRepo.Get(ctx, tr, dir, "u1")
 		return err
 	})
 	if user.Name != "Bob" || user.Email != "b@test.com" {
@@ -169,20 +178,22 @@ func TestIntegration_DeleteUser(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	userRepo := store.NewUserRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir); err != nil {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
 			return err
 		}
-		return recordStore.CreateUser(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
+		return userRepo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.DeleteUser(ctx, tr, dir, "u1")
+		return userRepo.Delete(ctx, tr, dir, "u1")
 	})
 
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		return recordStore.GetUser(ctx, tr, dir, "u1")
+		return userRepo.Get(ctx, tr, dir, "u1")
 	})
 	if err == nil {
 		t.Fatal("expected not found after delete")
@@ -196,25 +207,27 @@ func TestIntegration_GetUserByEmail(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	userRepo := store.NewUserRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir); err != nil {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
 			return err
 		}
-		if err := recordStore.CreateUser(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"}); err != nil {
+		if err := userRepo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"}); err != nil {
 			return err
 		}
-		if err := recordStore.CreateUser(ctx, tr, dir, &store.User{Id: "u2", Name: "Bob", Email: "bob@test.com"}); err != nil {
+		if err := userRepo.Create(ctx, tr, dir, &store.User{Id: "u2", Name: "Bob", Email: "bob@test.com"}); err != nil {
 			return err
 		}
-		return recordStore.CreateUser(ctx, tr, dir, &store.User{Id: "u3", Name: "Charlie", Email: "alice@test.com"})
+		return userRepo.Create(ctx, tr, dir, &store.User{Id: "u3", Name: "Charlie", Email: "alice@test.com"})
 	})
 
 	// Should find two users with email "alice@test.com"
 	var users []*store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = recordStore.GetUserByEmail(ctx, tr, dir, "alice@test.com")
+		users, err = userRepo.GetUserByEmail(ctx, tr, dir, "alice@test.com")
 		return err
 	})
 	if len(users) != 2 {
@@ -224,7 +237,7 @@ func TestIntegration_GetUserByEmail(t *testing.T) {
 	// Should find one user with email "bob@test.com"
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = recordStore.GetUserByEmail(ctx, tr, dir, "bob@test.com")
+		users, err = userRepo.GetUserByEmail(ctx, tr, dir, "bob@test.com")
 		return err
 	})
 	if len(users) != 1 || users[0].Name != "Bob" {
@@ -234,7 +247,7 @@ func TestIntegration_GetUserByEmail(t *testing.T) {
 	// Should find zero for nonexistent email
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = recordStore.GetUserByEmail(ctx, tr, dir, "nobody@test.com")
+		users, err = userRepo.GetUserByEmail(ctx, tr, dir, "nobody@test.com")
 		return err
 	})
 	if len(users) != 0 {
@@ -248,24 +261,26 @@ func TestIntegration_GetProductByCategory(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	productRepo := store.NewProductRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir); err != nil {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
 			return err
 		}
-		if err := recordStore.CreateProduct(ctx, tr, dir, &store.Product{Id: "p1", Name: "Hammer", Category: "tools", Price: 15}); err != nil {
+		if err := productRepo.Create(ctx, tr, dir, &store.Product{Id: "p1", Name: "Hammer", Category: "tools", Price: 15}); err != nil {
 			return err
 		}
-		if err := recordStore.CreateProduct(ctx, tr, dir, &store.Product{Id: "p2", Name: "Drill", Category: "tools", Price: 80}); err != nil {
+		if err := productRepo.Create(ctx, tr, dir, &store.Product{Id: "p2", Name: "Drill", Category: "tools", Price: 80}); err != nil {
 			return err
 		}
-		return recordStore.CreateProduct(ctx, tr, dir, &store.Product{Id: "p3", Name: "Laptop", Category: "electronics", Price: 999})
+		return productRepo.Create(ctx, tr, dir, &store.Product{Id: "p3", Name: "Laptop", Category: "electronics", Price: 999})
 	})
 
 	var products []*store.Product
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		products, err = recordStore.GetProductByCategory(ctx, tr, dir, "tools")
+		products, err = productRepo.GetProductByCategory(ctx, tr, dir, "tools")
 		return err
 	})
 	if len(products) != 2 {
@@ -274,7 +289,7 @@ func TestIntegration_GetProductByCategory(t *testing.T) {
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		products, err = recordStore.GetProductByCategory(ctx, tr, dir, "electronics")
+		products, err = productRepo.GetProductByCategory(ctx, tr, dir, "electronics")
 		return err
 	})
 	if len(products) != 1 || products[0].Name != "Laptop" {
@@ -288,24 +303,26 @@ func TestIntegration_SetUser_IndexUpdated(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	userRepo := store.NewUserRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir); err != nil {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
 			return err
 		}
-		return recordStore.CreateUser(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "old@test.com"})
+		return userRepo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "old@test.com"})
 	})
 
 	// Update email
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SetUser(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "new@test.com"})
+		return userRepo.Set(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "new@test.com"})
 	})
 
 	// Old email should return empty
 	var users []*store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = recordStore.GetUserByEmail(ctx, tr, dir, "old@test.com")
+		users, err = userRepo.GetUserByEmail(ctx, tr, dir, "old@test.com")
 		return err
 	})
 	if len(users) != 0 {
@@ -315,7 +332,7 @@ func TestIntegration_SetUser_IndexUpdated(t *testing.T) {
 	// New email should return the user
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = recordStore.GetUserByEmail(ctx, tr, dir, "new@test.com")
+		users, err = userRepo.GetUserByEmail(ctx, tr, dir, "new@test.com")
 		return err
 	})
 	if len(users) != 1 || users[0].Name != "Alice" {
@@ -329,22 +346,24 @@ func TestIntegration_DeleteUser_ClearsIndex(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	userRepo := store.NewUserRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir); err != nil {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
 			return err
 		}
-		return recordStore.CreateUser(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
+		return userRepo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.DeleteUser(ctx, tr, dir, "u1")
+		return userRepo.Delete(ctx, tr, dir, "u1")
 	})
 
 	var users []*store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = recordStore.GetUserByEmail(ctx, tr, dir, "alice@test.com")
+		users, err = userRepo.GetUserByEmail(ctx, tr, dir, "alice@test.com")
 		return err
 	})
 	if len(users) != 0 {
@@ -359,14 +378,16 @@ func TestIntegration_ListUser_Basic(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	userRepo := store.NewUserRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir); err != nil {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
 			return err
 		}
 		for i := 0; i < 5; i++ {
 			id := fmt.Sprintf("u%d", i)
-			if err := recordStore.CreateUser(ctx, tr, dir, &store.User{
+			if err := userRepo.Create(ctx, tr, dir, &store.User{
 				Id: id, Name: fmt.Sprintf("User%d", i), Email: fmt.Sprintf("u%d@test.com", i),
 			}); err != nil {
 				return err
@@ -378,7 +399,7 @@ func TestIntegration_ListUser_Basic(t *testing.T) {
 	var result *store.UserPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = recordStore.ListUser(ctx, tr, dir, store.UserPaginationOptions{Limit: 10})
+		result, err = userRepo.ListUser(ctx, tr, dir, store.UserPaginationOptions{Limit: 10})
 		return err
 	})
 	if len(result.Items) != 5 {
@@ -395,14 +416,16 @@ func TestIntegration_ListUser_Pagination(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	userRepo := store.NewUserRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir); err != nil {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
 			return err
 		}
 		for i := 0; i < 5; i++ {
 			id := fmt.Sprintf("u%d", i)
-			if err := recordStore.CreateUser(ctx, tr, dir, &store.User{
+			if err := userRepo.Create(ctx, tr, dir, &store.User{
 				Id: id, Name: fmt.Sprintf("User%d", i), Email: fmt.Sprintf("u%d@test.com", i),
 			}); err != nil {
 				return err
@@ -415,7 +438,7 @@ func TestIntegration_ListUser_Pagination(t *testing.T) {
 	var page1 *store.UserPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = recordStore.ListUser(ctx, tr, dir, store.UserPaginationOptions{Limit: 2})
+		page1, err = userRepo.ListUser(ctx, tr, dir, store.UserPaginationOptions{Limit: 2})
 		return err
 	})
 	if len(page1.Items) != 2 {
@@ -432,7 +455,7 @@ func TestIntegration_ListUser_Pagination(t *testing.T) {
 	var page2 *store.UserPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page2, err = recordStore.ListUser(ctx, tr, dir, store.UserPaginationOptions{Begin: page1.NextKey, Limit: 2})
+		page2, err = userRepo.ListUser(ctx, tr, dir, store.UserPaginationOptions{Begin: page1.NextKey, Limit: 2})
 		return err
 	})
 	if len(page2.Items) != 2 {
@@ -446,7 +469,7 @@ func TestIntegration_ListUser_Pagination(t *testing.T) {
 	var page3 *store.UserPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page3, err = recordStore.ListUser(ctx, tr, dir, store.UserPaginationOptions{Begin: page2.NextKey, Limit: 2})
+		page3, err = userRepo.ListUser(ctx, tr, dir, store.UserPaginationOptions{Begin: page2.NextKey, Limit: 2})
 		return err
 	})
 	if len(page3.Items) != 1 {
@@ -463,13 +486,15 @@ func TestIntegration_ListProduct_Pagination(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	productRepo := store.NewProductRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir); err != nil {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
 			return err
 		}
 		for i := 0; i < 7; i++ {
-			if err := recordStore.CreateProduct(ctx, tr, dir, &store.Product{
+			if err := productRepo.Create(ctx, tr, dir, &store.Product{
 				Id: fmt.Sprintf("p%d", i), Name: fmt.Sprintf("Product%d", i),
 				Category: "cat", Price: int32(i * 10),
 			}); err != nil {
@@ -483,7 +508,7 @@ func TestIntegration_ListProduct_Pagination(t *testing.T) {
 	var page1 *store.ProductPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = recordStore.ListProduct(ctx, tr, dir, store.ProductPaginationOptions{Limit: 3})
+		page1, err = productRepo.ListProduct(ctx, tr, dir, store.ProductPaginationOptions{Limit: 3})
 		return err
 	})
 	if len(page1.Items) != 3 {
@@ -496,7 +521,7 @@ func TestIntegration_ListProduct_Pagination(t *testing.T) {
 	var page2 *store.ProductPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page2, err = recordStore.ListProduct(ctx, tr, dir, store.ProductPaginationOptions{Begin: page1.NextKey, Limit: 3})
+		page2, err = productRepo.ListProduct(ctx, tr, dir, store.ProductPaginationOptions{Begin: page1.NextKey, Limit: 3})
 		return err
 	})
 	if len(page2.Items) != 3 {
@@ -506,7 +531,7 @@ func TestIntegration_ListProduct_Pagination(t *testing.T) {
 	var page3 *store.ProductPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page3, err = recordStore.ListProduct(ctx, tr, dir, store.ProductPaginationOptions{Begin: page2.NextKey, Limit: 3})
+		page3, err = productRepo.ListProduct(ctx, tr, dir, store.ProductPaginationOptions{Begin: page2.NextKey, Limit: 3})
 		return err
 	})
 	if len(page3.Items) != 1 {
@@ -523,15 +548,17 @@ func TestIntegration_ListUser_Empty(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	userRepo := store.NewUserRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir)
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"})
 	})
 
 	var result *store.UserPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = recordStore.ListUser(ctx, tr, dir, store.UserPaginationOptions{Limit: 10})
+		result, err = userRepo.ListUser(ctx, tr, dir, store.UserPaginationOptions{Limit: 10})
 		return err
 	})
 	if len(result.Items) != 0 {
@@ -546,13 +573,15 @@ func TestIntegration_BatchGetUser(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
+	userRepo := store.NewUserRepository(recordStore)
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir); err != nil {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
 			return err
 		}
 		for _, id := range []string{"u1", "u2", "u3"} {
-			if err := recordStore.CreateUser(ctx, tr, dir, &store.User{Id: id, Name: "Name" + id, Email: id + "@test.com"}); err != nil {
+			if err := userRepo.Create(ctx, tr, dir, &store.User{Id: id, Name: "Name" + id, Email: id + "@test.com"}); err != nil {
 				return err
 			}
 		}
@@ -562,7 +591,7 @@ func TestIntegration_BatchGetUser(t *testing.T) {
 	var result map[string]*store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = recordStore.BatchGetUser(ctx, tr, dir, []tuple.Tuple{{"u1"}, {"u2"}, {"u3"}})
+		result, err = userRepo.BatchGetUser(ctx, tr, dir, []tuple.Tuple{{"u1"}, {"u2"}, {"u3"}})
 		return err
 	})
 	if len(result) != 3 {
@@ -576,14 +605,14 @@ func TestIntegration_GenericRepository(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := store.NewRecordStore()
+	recordStore := fdblayer.NewRecordStore()
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir)
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"})
 	})
 
 	// Wrap store in the generated UserRepository
 	var repo store.UserRepository = store.NewUserRepository(recordStore)
-	var genRepo store.GenericRepository[*store.User, string] = repo
+	var genRepo fdblayer.GenericRepository[*store.User, string] = repo
 
 	// 1. Create via generic repository using real FDB transaction
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {

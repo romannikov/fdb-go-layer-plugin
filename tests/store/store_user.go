@@ -11,6 +11,7 @@ import (
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
+	fdblayer "github.com/romannikov/fdb-go-layer-plugin/fdb-layer"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -27,23 +28,31 @@ type UserPaginatedResult struct {
 	HasMore bool
 }
 
-func (s *RecordStore) getUserTypeID() (int64, error) {
-	if s.metadata == nil {
-		return 0, fmt.Errorf("metadata not initialized, call SyncMetadata first")
-	}
-	typeID, ok := s.metadata["User"]
-	if !ok {
-		return 0, fmt.Errorf("type User not found in metadata")
-	}
-	return typeID, nil
+// UserRepository defines the repository interface for User.
+type UserRepository interface {
+	fdblayer.GenericRepository[*User, string]
+
+	BatchGetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error)
+	ListUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
+
+	GetUserByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error)
 }
 
-// CreateUser creates a new User entity in the database.
-func (s *RecordStore) CreateUser(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *User) error {
+type userRepository struct {
+	store *fdblayer.RecordStore
+}
+
+// NewUserRepository creates a new UserRepository instance.
+func NewUserRepository(store *fdblayer.RecordStore) UserRepository {
+	return &userRepository{store: store}
+}
+
+// Create creates a new User entity in the database.
+func (r *userRepository) Create(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *User) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	typeID, err := s.getUserTypeID()
+	typeID, err := r.store.GetTypeID("User")
 	if err != nil {
 		return err
 	}
@@ -77,17 +86,17 @@ func (s *RecordStore) CreateUser(ctx context.Context, tr Transaction, dir direct
 	return nil
 }
 
-// GetUser retrieves a User entity by its primary key.
-func (s *RecordStore) GetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Id string) (*User, error) {
+// Get retrieves a User entity by its primary key.
+func (r *userRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk string) (*User, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	typeID, err := s.getUserTypeID()
+	typeID, err := r.store.GetTypeID("User")
 	if err != nil {
 		return nil, err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, Id})
+	key := dir.Pack(tuple.Tuple{typeID, pk})
 	value := tr.Get(key).MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("user not found")
@@ -103,12 +112,12 @@ func (s *RecordStore) GetUser(ctx context.Context, tr fdb.ReadTransaction, dir d
 	return entity, nil
 }
 
-// SetUser updates an existing User entity in the database.
-func (s *RecordStore) SetUser(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *User) error {
+// Set updates an existing User entity in the database.
+func (r *userRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *User) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	typeID, err := s.getUserTypeID()
+	typeID, err := r.store.GetTypeID("User")
 	if err != nil {
 		return err
 	}
@@ -162,17 +171,17 @@ func (s *RecordStore) SetUser(ctx context.Context, tr Transaction, dir directory
 	return nil
 }
 
-// DeleteUser removes a User entity from the database.
-func (s *RecordStore) DeleteUser(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, Id string) error {
+// Delete removes a User entity from the database.
+func (r *userRepository) Delete(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	typeID, err := s.getUserTypeID()
+	typeID, err := r.store.GetTypeID("User")
 	if err != nil {
 		return err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, Id})
+	key := dir.Pack(tuple.Tuple{typeID, pk})
 	value := tr.Get(key).MustGet()
 	if value != nil {
 		entity := &User{}
@@ -198,55 +207,12 @@ func (s *RecordStore) DeleteUser(ctx context.Context, tr Transaction, dir direct
 	return nil
 }
 
-// GetUserByEmail retrieves User entities by their Email index.
-func (s *RecordStore) GetUserByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	typeID, err := s.getUserTypeID()
-	if err != nil {
-		return nil, err
-	}
-
-	entities := []*User{}
-	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, "index", "Email", Email})
-	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
-	if err != nil {
-		return nil, err
-	}
-	kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
-	for _, kv := range kvs {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		tpl, err := dir.Unpack(kv.Key)
-		if err != nil {
-			return nil, err
-		}
-		pkIndexStart := 3 + 1
-		pkTuple := tpl[pkIndexStart:]
-		keyTpl := append(tuple.Tuple{typeID}, pkTuple...)
-		key := dir.Pack(keyTpl)
-		value := tr.Get(key).MustGet()
-		if value == nil {
-			continue
-		}
-		entity := &User{}
-		err = proto.Unmarshal(value, entity)
-		if err != nil {
-			return nil, err
-		}
-		entities = append(entities, entity)
-	}
-	return entities, nil
-}
-
 // BatchGetUser retrieves multiple User entities by their primary keys.
-func (s *RecordStore) BatchGetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error) {
+func (r *userRepository) BatchGetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	typeID, err := s.getUserTypeID()
+	typeID, err := r.store.GetTypeID("User")
 	if err != nil {
 		return nil, err
 	}
@@ -283,11 +249,11 @@ func (s *RecordStore) BatchGetUser(ctx context.Context, tr fdb.ReadTransaction, 
 }
 
 // ListUser retrieves a list of User entities starting from the given key.
-func (s *RecordStore) ListUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error) {
+func (r *userRepository) ListUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	typeID, err := s.getUserTypeID()
+	typeID, err := r.store.GetTypeID("User")
 	if err != nil {
 		return nil, err
 	}
@@ -360,49 +326,45 @@ func (s *RecordStore) ListUser(ctx context.Context, tr fdb.ReadTransaction, dir 
 	return result, nil
 }
 
-// UserRepository defines the repository interface for User.
-type UserRepository interface {
-	GenericRepository[*User, string]
-
-	BatchGetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error)
-	ListUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
-
-	GetUserByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error)
-}
-
-type userRepository struct {
-	store *RecordStore
-}
-
-// NewUserRepository creates a new UserRepository instance.
-func NewUserRepository(store *RecordStore) UserRepository {
-	return &userRepository{store: store}
-}
-
-func (r *userRepository) Create(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *User) error {
-	return r.store.CreateUser(ctx, tr, dir, entity)
-}
-
-func (r *userRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk string) (*User, error) {
-	return r.store.GetUser(ctx, tr, dir, pk)
-}
-
-func (r *userRepository) Set(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity *User) error {
-	return r.store.SetUser(ctx, tr, dir, entity)
-}
-
-func (r *userRepository) Delete(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, pk string) error {
-	return r.store.DeleteUser(ctx, tr, dir, pk)
-}
-
-func (r *userRepository) BatchGetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error) {
-	return r.store.BatchGetUser(ctx, tr, dir, ids)
-}
-
-func (r *userRepository) ListUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error) {
-	return r.store.ListUser(ctx, tr, dir, opts)
-}
-
+// GetUserByEmail retrieves User entities by their Email index.
 func (r *userRepository) GetUserByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error) {
-	return r.store.GetUserByEmail(ctx, tr, dir, Email)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	typeID, err := r.store.GetTypeID("User")
+	if err != nil {
+		return nil, err
+	}
+
+	entities := []*User{}
+	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, "index", "Email", Email})
+	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
+	if err != nil {
+		return nil, err
+	}
+	kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
+	for _, kv := range kvs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		tpl, err := dir.Unpack(kv.Key)
+		if err != nil {
+			return nil, err
+		}
+		pkIndexStart := 3 + 1
+		pkTuple := tpl[pkIndexStart:]
+		keyTpl := append(tuple.Tuple{typeID}, pkTuple...)
+		key := dir.Pack(keyTpl)
+		value := tr.Get(key).MustGet()
+		if value == nil {
+			continue
+		}
+		entity := &User{}
+		err = proto.Unmarshal(value, entity)
+		if err != nil {
+			return nil, err
+		}
+		entities = append(entities, entity)
+	}
+	return entities, nil
 }
