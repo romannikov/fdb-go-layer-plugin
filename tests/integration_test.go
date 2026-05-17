@@ -91,17 +91,18 @@ func TestIntegration_CreateAndGetUser(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	userRepo := NewUserRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
-		return store.CreateUser(tr, dir, &User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
+		return userRepo.Create(tr, dir, &User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
 	})
 
 	var user *User
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		user, err = store.GetUser(tr, dir, "u1")
+		user, err = userRepo.Get(tr, dir, tuple.Tuple{"u1"})
 		return err
 	})
 	if user.Name != "Alice" || user.Email != "alice@test.com" {
@@ -115,17 +116,18 @@ func TestIntegration_CreateAndGetProduct(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	productRepo := NewProductRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
-		return store.CreateProduct(tr, dir, &Product{Id: "p1", Name: "Widget", Category: "tools", Price: 42})
+		return productRepo.Create(tr, dir, &Product{Id: "p1", Name: "Widget", Category: "tools", Price: 42})
 	})
 
 	var product *Product
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		product, err = store.GetProduct(tr, dir, "p1")
+		product, err = productRepo.Get(tr, dir, tuple.Tuple{"p1"})
 		return err
 	})
 	if product.Name != "Widget" || product.Price != 42 {
@@ -139,12 +141,13 @@ func TestIntegration_GetUser_NotFound(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	userRepo := NewUserRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		return store.SyncMetadata(tr, dir)
 	})
 
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		return store.GetUser(tr, dir, "nonexistent")
+		return userRepo.Get(tr, dir, tuple.Tuple{"nonexistent"})
 	})
 	if err == nil {
 		t.Fatal("expected not found error")
@@ -158,21 +161,22 @@ func TestIntegration_SetUser_UpdateFields(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	userRepo := NewUserRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
-		return store.CreateUser(tr, dir, &User{Id: "u1", Name: "Alice", Email: "a@test.com"})
+		return userRepo.Create(tr, dir, &User{Id: "u1", Name: "Alice", Email: "a@test.com"})
 	})
 
 	withTx(t, db, func(tr fdb.Transaction) error {
-		return store.SetUser(tr, dir, &User{Id: "u1", Name: "Bob", Email: "b@test.com"})
+		return userRepo.Set(tr, dir, &User{Id: "u1", Name: "Bob", Email: "b@test.com"})
 	})
 
 	var user *User
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		user, err = store.GetUser(tr, dir, "u1")
+		user, err = userRepo.Get(tr, dir, tuple.Tuple{"u1"})
 		return err
 	})
 	if user.Name != "Bob" || user.Email != "b@test.com" {
@@ -187,19 +191,20 @@ func TestIntegration_DeleteUser(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	userRepo := NewUserRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
-		return store.CreateUser(tr, dir, &User{Id: "u1", Name: "Alice", Email: "a@test.com"})
+		return userRepo.Create(tr, dir, &User{Id: "u1", Name: "Alice", Email: "a@test.com"})
 	})
 
 	withTx(t, db, func(tr fdb.Transaction) error {
-		return store.DeleteUser(tr, dir, "u1")
+		return userRepo.Delete(tr, dir, tuple.Tuple{"u1"})
 	})
 
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		return store.GetUser(tr, dir, "u1")
+		return userRepo.Get(tr, dir, tuple.Tuple{"u1"})
 	})
 	if err == nil {
 		t.Fatal("expected not found after delete")
@@ -213,24 +218,25 @@ func TestIntegration_GetUserByEmail(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	userRepo := NewUserRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
-		if err := store.CreateUser(tr, dir, &User{Id: "u1", Name: "Alice", Email: "alice@test.com"}); err != nil {
+		if err := userRepo.Create(tr, dir, &User{Id: "u1", Name: "Alice", Email: "alice@test.com"}); err != nil {
 			return err
 		}
-		if err := store.CreateUser(tr, dir, &User{Id: "u2", Name: "Bob", Email: "bob@test.com"}); err != nil {
+		if err := userRepo.Create(tr, dir, &User{Id: "u2", Name: "Bob", Email: "bob@test.com"}); err != nil {
 			return err
 		}
-		return store.CreateUser(tr, dir, &User{Id: "u3", Name: "Charlie", Email: "alice@test.com"})
+		return userRepo.Create(tr, dir, &User{Id: "u3", Name: "Charlie", Email: "alice@test.com"})
 	})
 
 	// Should find two users with email "alice@test.com"
 	var users []*User
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = store.GetUserByEmail(tr, dir, "alice@test.com")
+		users, err = userRepo.GetByEmail(tr, dir, "alice@test.com")
 		return err
 	})
 	if len(users) != 2 {
@@ -240,7 +246,7 @@ func TestIntegration_GetUserByEmail(t *testing.T) {
 	// Should find one user with email "bob@test.com"
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = store.GetUserByEmail(tr, dir, "bob@test.com")
+		users, err = userRepo.GetByEmail(tr, dir, "bob@test.com")
 		return err
 	})
 	if len(users) != 1 || users[0].Name != "Bob" {
@@ -250,7 +256,7 @@ func TestIntegration_GetUserByEmail(t *testing.T) {
 	// Should find zero for nonexistent email
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = store.GetUserByEmail(tr, dir, "nobody@test.com")
+		users, err = userRepo.GetByEmail(tr, dir, "nobody@test.com")
 		return err
 	})
 	if len(users) != 0 {
@@ -264,23 +270,24 @@ func TestIntegration_GetProductByCategory(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	productRepo := NewProductRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
-		if err := store.CreateProduct(tr, dir, &Product{Id: "p1", Name: "Hammer", Category: "tools", Price: 15}); err != nil {
+		if err := productRepo.Create(tr, dir, &Product{Id: "p1", Name: "Hammer", Category: "tools", Price: 15}); err != nil {
 			return err
 		}
-		if err := store.CreateProduct(tr, dir, &Product{Id: "p2", Name: "Drill", Category: "tools", Price: 80}); err != nil {
+		if err := productRepo.Create(tr, dir, &Product{Id: "p2", Name: "Drill", Category: "tools", Price: 80}); err != nil {
 			return err
 		}
-		return store.CreateProduct(tr, dir, &Product{Id: "p3", Name: "Laptop", Category: "electronics", Price: 999})
+		return productRepo.Create(tr, dir, &Product{Id: "p3", Name: "Laptop", Category: "electronics", Price: 999})
 	})
 
 	var products []*Product
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		products, err = store.GetProductByCategory(tr, dir, "tools")
+		products, err = productRepo.GetByCategory(tr, dir, "tools")
 		return err
 	})
 	if len(products) != 2 {
@@ -289,7 +296,7 @@ func TestIntegration_GetProductByCategory(t *testing.T) {
 
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		products, err = store.GetProductByCategory(tr, dir, "electronics")
+		products, err = productRepo.GetByCategory(tr, dir, "electronics")
 		return err
 	})
 	if len(products) != 1 || products[0].Name != "Laptop" {
@@ -303,23 +310,24 @@ func TestIntegration_SetUser_IndexUpdated(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	userRepo := NewUserRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
-		return store.CreateUser(tr, dir, &User{Id: "u1", Name: "Alice", Email: "old@test.com"})
+		return userRepo.Create(tr, dir, &User{Id: "u1", Name: "Alice", Email: "old@test.com"})
 	})
 
 	// Update email
 	withTx(t, db, func(tr fdb.Transaction) error {
-		return store.SetUser(tr, dir, &User{Id: "u1", Name: "Alice", Email: "new@test.com"})
+		return userRepo.Set(tr, dir, &User{Id: "u1", Name: "Alice", Email: "new@test.com"})
 	})
 
 	// Old email should return empty
 	var users []*User
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = store.GetUserByEmail(tr, dir, "old@test.com")
+		users, err = userRepo.GetByEmail(tr, dir, "old@test.com")
 		return err
 	})
 	if len(users) != 0 {
@@ -329,7 +337,7 @@ func TestIntegration_SetUser_IndexUpdated(t *testing.T) {
 	// New email should return the user
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = store.GetUserByEmail(tr, dir, "new@test.com")
+		users, err = userRepo.GetByEmail(tr, dir, "new@test.com")
 		return err
 	})
 	if len(users) != 1 || users[0].Name != "Alice" {
@@ -343,21 +351,22 @@ func TestIntegration_DeleteUser_ClearsIndex(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	userRepo := NewUserRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
-		return store.CreateUser(tr, dir, &User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
+		return userRepo.Create(tr, dir, &User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
 	})
 
 	withTx(t, db, func(tr fdb.Transaction) error {
-		return store.DeleteUser(tr, dir, "u1")
+		return userRepo.Delete(tr, dir, tuple.Tuple{"u1"})
 	})
 
 	var users []*User
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = store.GetUserByEmail(tr, dir, "alice@test.com")
+		users, err = userRepo.GetByEmail(tr, dir, "alice@test.com")
 		return err
 	})
 	if len(users) != 0 {
@@ -372,13 +381,14 @@ func TestIntegration_ListUser_Basic(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	userRepo := NewUserRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
 		for i := 0; i < 5; i++ {
 			id := fmt.Sprintf("u%d", i)
-			if err := store.CreateUser(tr, dir, &User{
+			if err := userRepo.Create(tr, dir, &User{
 				Id: id, Name: fmt.Sprintf("User%d", i), Email: fmt.Sprintf("u%d@test.com", i),
 			}); err != nil {
 				return err
@@ -387,10 +397,10 @@ func TestIntegration_ListUser_Basic(t *testing.T) {
 		return nil
 	})
 
-	var result *UserPaginatedResult
+	var result *PaginatedResult[User]
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = store.ListUser(tr, dir, UserPaginationOptions{Limit: 10})
+		result, err = userRepo.List(tr, dir, PaginationOptions{Limit: 10})
 		return err
 	})
 	if len(result.Items) != 5 {
@@ -407,13 +417,14 @@ func TestIntegration_ListUser_Pagination(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	userRepo := NewUserRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
 		for i := 0; i < 5; i++ {
 			id := fmt.Sprintf("u%d", i)
-			if err := store.CreateUser(tr, dir, &User{
+			if err := userRepo.Create(tr, dir, &User{
 				Id: id, Name: fmt.Sprintf("User%d", i), Email: fmt.Sprintf("u%d@test.com", i),
 			}); err != nil {
 				return err
@@ -423,10 +434,10 @@ func TestIntegration_ListUser_Pagination(t *testing.T) {
 	})
 
 	// First page: limit 2
-	var page1 *UserPaginatedResult
+	var page1 *PaginatedResult[User]
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = store.ListUser(tr, dir, UserPaginationOptions{Limit: 2})
+		page1, err = userRepo.List(tr, dir, PaginationOptions{Limit: 2})
 		return err
 	})
 	if len(page1.Items) != 2 {
@@ -440,10 +451,10 @@ func TestIntegration_ListUser_Pagination(t *testing.T) {
 	}
 
 	// Second page: use NextKey
-	var page2 *UserPaginatedResult
+	var page2 *PaginatedResult[User]
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page2, err = store.ListUser(tr, dir, UserPaginationOptions{Begin: page1.NextKey, Limit: 2})
+		page2, err = userRepo.List(tr, dir, PaginationOptions{Begin: page1.NextKey, Limit: 2})
 		return err
 	})
 	if len(page2.Items) != 2 {
@@ -454,10 +465,10 @@ func TestIntegration_ListUser_Pagination(t *testing.T) {
 	}
 
 	// Third page: should have 1 remaining
-	var page3 *UserPaginatedResult
+	var page3 *PaginatedResult[User]
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page3, err = store.ListUser(tr, dir, UserPaginationOptions{Begin: page2.NextKey, Limit: 2})
+		page3, err = userRepo.List(tr, dir, PaginationOptions{Begin: page2.NextKey, Limit: 2})
 		return err
 	})
 	if len(page3.Items) != 1 {
@@ -474,12 +485,13 @@ func TestIntegration_ListProduct_Pagination(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	productRepo := NewProductRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
 		for i := 0; i < 7; i++ {
-			if err := store.CreateProduct(tr, dir, &Product{
+			if err := productRepo.Create(tr, dir, &Product{
 				Id: fmt.Sprintf("p%d", i), Name: fmt.Sprintf("Product%d", i),
 				Category: "cat", Price: int32(i * 10),
 			}); err != nil {
@@ -490,10 +502,10 @@ func TestIntegration_ListProduct_Pagination(t *testing.T) {
 	})
 
 	// Page through with limit 3
-	var page1 *ProductPaginatedResult
+	var page1 *PaginatedResult[Product]
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = store.ListProduct(tr, dir, ProductPaginationOptions{Limit: 3})
+		page1, err = productRepo.List(tr, dir, PaginationOptions{Limit: 3})
 		return err
 	})
 	if len(page1.Items) != 3 {
@@ -503,20 +515,20 @@ func TestIntegration_ListProduct_Pagination(t *testing.T) {
 		t.Fatal("expected more pages")
 	}
 
-	var page2 *ProductPaginatedResult
+	var page2 *PaginatedResult[Product]
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page2, err = store.ListProduct(tr, dir, ProductPaginationOptions{Begin: page1.NextKey, Limit: 3})
+		page2, err = productRepo.List(tr, dir, PaginationOptions{Begin: page1.NextKey, Limit: 3})
 		return err
 	})
 	if len(page2.Items) != 3 {
 		t.Fatalf("expected 3, got %d", len(page2.Items))
 	}
 
-	var page3 *ProductPaginatedResult
+	var page3 *PaginatedResult[Product]
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page3, err = store.ListProduct(tr, dir, ProductPaginationOptions{Begin: page2.NextKey, Limit: 3})
+		page3, err = productRepo.List(tr, dir, PaginationOptions{Begin: page2.NextKey, Limit: 3})
 		return err
 	})
 	if len(page3.Items) != 1 {
@@ -533,14 +545,15 @@ func TestIntegration_ListUser_Empty(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	userRepo := NewUserRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		return store.SyncMetadata(tr, dir)
 	})
 
-	var result *UserPaginatedResult
+	var result *PaginatedResult[User]
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = store.ListUser(tr, dir, UserPaginationOptions{Limit: 10})
+		result, err = userRepo.List(tr, dir, PaginationOptions{Limit: 10})
 		return err
 	})
 	if len(result.Items) != 0 {
@@ -555,12 +568,13 @@ func TestIntegration_BatchGetUser(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	userRepo := NewUserRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
 		for _, id := range []string{"u1", "u2", "u3"} {
-			if err := store.CreateUser(tr, dir, &User{Id: id, Name: "Name" + id, Email: id + "@test.com"}); err != nil {
+			if err := userRepo.Create(tr, dir, &User{Id: id, Name: "Name" + id, Email: id + "@test.com"}); err != nil {
 				return err
 			}
 		}
@@ -570,7 +584,7 @@ func TestIntegration_BatchGetUser(t *testing.T) {
 	var result map[string]*User
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = store.BatchGetUser(tr, dir, []tuple.Tuple{{"u1"}, {"u2"}, {"u3"}})
+		result, err = userRepo.BatchGet(tr, dir, []tuple.Tuple{{"u1"}, {"u2"}, {"u3"}})
 		return err
 	})
 	if len(result) != 3 {
@@ -585,17 +599,18 @@ func TestIntegration_CreateAndGetPost(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	postRepo := NewPostRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
-		return store.CreatePost(tr, dir, &Post{Id: "p1", Tags: []string{"go", "fdb", "testing"}})
+		return postRepo.Create(tr, dir, &Post{Id: "p1", Tags: []string{"go", "fdb", "testing"}})
 	})
 
 	var post *Post
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		post, err = store.GetPost(tr, dir, "p1")
+		post, err = postRepo.Get(tr, dir, tuple.Tuple{"p1"})
 		return err
 	})
 	if post.Id != "p1" {
@@ -612,24 +627,25 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	postRepo := NewPostRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
-		if err := store.CreatePost(tr, dir, &Post{Id: "p1", Tags: []string{"go", "fdb"}}); err != nil {
+		if err := postRepo.Create(tr, dir, &Post{Id: "p1", Tags: []string{"go", "fdb"}}); err != nil {
 			return err
 		}
-		if err := store.CreatePost(tr, dir, &Post{Id: "p2", Tags: []string{"go", "rust"}}); err != nil {
+		if err := postRepo.Create(tr, dir, &Post{Id: "p2", Tags: []string{"go", "rust"}}); err != nil {
 			return err
 		}
-		return store.CreatePost(tr, dir, &Post{Id: "p3", Tags: []string{"rust", "wasm"}})
+		return postRepo.Create(tr, dir, &Post{Id: "p3", Tags: []string{"rust", "wasm"}})
 	})
 
 	// "go" should match p1 and p2
 	var posts []*Post
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		posts, err = store.GetPostByTags(tr, dir, "go")
+		posts, err = postRepo.GetByTags(tr, dir, "go")
 		return err
 	})
 	if len(posts) != 2 {
@@ -639,7 +655,7 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 	// "rust" should match p2 and p3
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		posts, err = store.GetPostByTags(tr, dir, "rust")
+		posts, err = postRepo.GetByTags(tr, dir, "rust")
 		return err
 	})
 	if len(posts) != 2 {
@@ -649,7 +665,7 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 	// "fdb" should match only p1
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		posts, err = store.GetPostByTags(tr, dir, "fdb")
+		posts, err = postRepo.GetByTags(tr, dir, "fdb")
 		return err
 	})
 	if len(posts) != 1 || posts[0].Id != "p1" {
@@ -659,7 +675,7 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 	// "wasm" should match only p3
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		posts, err = store.GetPostByTags(tr, dir, "wasm")
+		posts, err = postRepo.GetByTags(tr, dir, "wasm")
 		return err
 	})
 	if len(posts) != 1 || posts[0].Id != "p3" {
@@ -669,7 +685,7 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 	// Nonexistent tag
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		posts, err = store.GetPostByTags(tr, dir, "python")
+		posts, err = postRepo.GetByTags(tr, dir, "python")
 		return err
 	})
 	if len(posts) != 0 {
@@ -683,23 +699,24 @@ func TestIntegration_SetPost_FanOutIndexUpdated(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	postRepo := NewPostRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
-		return store.CreatePost(tr, dir, &Post{Id: "p1", Tags: []string{"alpha", "beta"}})
+		return postRepo.Create(tr, dir, &Post{Id: "p1", Tags: []string{"alpha", "beta"}})
 	})
 
 	// Update tags: remove "alpha", keep "beta", add "gamma"
 	withTx(t, db, func(tr fdb.Transaction) error {
-		return store.SetPost(tr, dir, &Post{Id: "p1", Tags: []string{"beta", "gamma"}})
+		return postRepo.Set(tr, dir, &Post{Id: "p1", Tags: []string{"beta", "gamma"}})
 	})
 
 	// "alpha" should no longer return any results (stale index cleared)
 	var posts []*Post
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		posts, err = store.GetPostByTags(tr, dir, "alpha")
+		posts, err = postRepo.GetByTags(tr, dir, "alpha")
 		return err
 	})
 	if len(posts) != 0 {
@@ -709,7 +726,7 @@ func TestIntegration_SetPost_FanOutIndexUpdated(t *testing.T) {
 	// "beta" should still find the post
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		posts, err = store.GetPostByTags(tr, dir, "beta")
+		posts, err = postRepo.GetByTags(tr, dir, "beta")
 		return err
 	})
 	if len(posts) != 1 || posts[0].Id != "p1" {
@@ -719,7 +736,7 @@ func TestIntegration_SetPost_FanOutIndexUpdated(t *testing.T) {
 	// "gamma" should find the post (new index entry)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		posts, err = store.GetPostByTags(tr, dir, "gamma")
+		posts, err = postRepo.GetByTags(tr, dir, "gamma")
 		return err
 	})
 	if len(posts) != 1 || posts[0].Id != "p1" {
@@ -733,15 +750,16 @@ func TestIntegration_DeletePost_ClearsFanOutIndex(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	postRepo := NewPostRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
-		return store.CreatePost(tr, dir, &Post{Id: "p1", Tags: []string{"x", "y", "z"}})
+		return postRepo.Create(tr, dir, &Post{Id: "p1", Tags: []string{"x", "y", "z"}})
 	})
 
 	withTx(t, db, func(tr fdb.Transaction) error {
-		return store.DeletePost(tr, dir, "p1")
+		return postRepo.Delete(tr, dir, tuple.Tuple{"p1"})
 	})
 
 	// All tag index entries should be cleared
@@ -749,7 +767,7 @@ func TestIntegration_DeletePost_ClearsFanOutIndex(t *testing.T) {
 		var posts []*Post
 		withTx(t, db, func(tr fdb.Transaction) error {
 			var err error
-			posts, err = store.GetPostByTags(tr, dir, tag)
+			posts, err = postRepo.GetByTags(tr, dir, tag)
 			return err
 		})
 		if len(posts) != 0 {
@@ -759,7 +777,7 @@ func TestIntegration_DeletePost_ClearsFanOutIndex(t *testing.T) {
 
 	// Get should fail
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		return store.GetPost(tr, dir, "p1")
+		return postRepo.Get(tr, dir, tuple.Tuple{"p1"})
 	})
 	if err == nil {
 		t.Fatal("expected not found after delete")
@@ -772,13 +790,14 @@ func TestIntegration_ListPost_WithFanOutIndex(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	postRepo := NewPostRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
 		// Create posts with multiple tags each — generates many index entries
 		for i := 0; i < 5; i++ {
-			if err := store.CreatePost(tr, dir, &Post{
+			if err := postRepo.Create(tr, dir, &Post{
 				Id:   fmt.Sprintf("p%d", i),
 				Tags: []string{"common", fmt.Sprintf("unique%d", i)},
 			}); err != nil {
@@ -789,10 +808,10 @@ func TestIntegration_ListPost_WithFanOutIndex(t *testing.T) {
 	})
 
 	// List should return all 5 posts, skipping index entries
-	var result *PostPaginatedResult
+	var result *PaginatedResult[Post]
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = store.ListPost(tr, dir, PostPaginationOptions{Limit: 10})
+		result, err = postRepo.List(tr, dir, PaginationOptions{Limit: 10})
 		return err
 	})
 	if len(result.Items) != 5 {
@@ -809,12 +828,13 @@ func TestIntegration_ListPost_Pagination(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	postRepo := NewPostRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
 		for i := 0; i < 5; i++ {
-			if err := store.CreatePost(tr, dir, &Post{
+			if err := postRepo.Create(tr, dir, &Post{
 				Id:   fmt.Sprintf("p%d", i),
 				Tags: []string{"t1", "t2", "t3"},
 			}); err != nil {
@@ -825,10 +845,10 @@ func TestIntegration_ListPost_Pagination(t *testing.T) {
 	})
 
 	// Page through with limit 2
-	var page1 *PostPaginatedResult
+	var page1 *PaginatedResult[Post]
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = store.ListPost(tr, dir, PostPaginationOptions{Limit: 2})
+		page1, err = postRepo.List(tr, dir, PaginationOptions{Limit: 2})
 		return err
 	})
 	if len(page1.Items) != 2 {
@@ -838,20 +858,20 @@ func TestIntegration_ListPost_Pagination(t *testing.T) {
 		t.Fatal("page1: expected HasMore=true")
 	}
 
-	var page2 *PostPaginatedResult
+	var page2 *PaginatedResult[Post]
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page2, err = store.ListPost(tr, dir, PostPaginationOptions{Begin: page1.NextKey, Limit: 2})
+		page2, err = postRepo.List(tr, dir, PaginationOptions{Begin: page1.NextKey, Limit: 2})
 		return err
 	})
 	if len(page2.Items) != 2 {
 		t.Fatalf("page2: expected 2 items, got %d", len(page2.Items))
 	}
 
-	var page3 *PostPaginatedResult
+	var page3 *PaginatedResult[Post]
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page3, err = store.ListPost(tr, dir, PostPaginationOptions{Begin: page2.NextKey, Limit: 2})
+		page3, err = postRepo.List(tr, dir, PaginationOptions{Begin: page2.NextKey, Limit: 2})
 		return err
 	})
 	if len(page3.Items) != 1 {
@@ -868,17 +888,18 @@ func TestIntegration_Post_EmptyTags(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	postRepo := NewPostRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
-		return store.CreatePost(tr, dir, &Post{Id: "p1", Tags: []string{}})
+		return postRepo.Create(tr, dir, &Post{Id: "p1", Tags: []string{}})
 	})
 
 	var post *Post
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		post, err = store.GetPost(tr, dir, "p1")
+		post, err = postRepo.Get(tr, dir, tuple.Tuple{"p1"})
 		return err
 	})
 	if post.Id != "p1" {
@@ -895,12 +916,13 @@ func TestIntegration_BatchGetPost(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	postRepo := NewPostRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
 		for _, id := range []string{"p1", "p2", "p3"} {
-			if err := store.CreatePost(tr, dir, &Post{Id: id, Tags: []string{"tag"}}); err != nil {
+			if err := postRepo.Create(tr, dir, &Post{Id: id, Tags: []string{"tag"}}); err != nil {
 				return err
 			}
 		}
@@ -910,7 +932,7 @@ func TestIntegration_BatchGetPost(t *testing.T) {
 	var result map[string]*Post
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = store.BatchGetPost(tr, dir, []tuple.Tuple{{"p1"}, {"p2"}, {"p3"}})
+		result, err = postRepo.BatchGet(tr, dir, []tuple.Tuple{{"p1"}, {"p2"}, {"p3"}})
 		return err
 	})
 	if len(result) != 3 {
@@ -928,25 +950,28 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 	defer cleanup()
 
 	store := NewRecordStore()
+	userRepo := NewUserRepository(store)
+	productRepo := NewProductRepository(store)
+	postRepo := NewPostRepository(store)
 	withTx(t, db, func(tr fdb.Transaction) error {
 		if err := store.SyncMetadata(tr, dir); err != nil {
 			return err
 		}
 		// Create entities of all types simultaneously
-		if err := store.CreateUser(tr, dir, &User{Id: "u1", Name: "Alice", Email: "a@test.com"}); err != nil {
+		if err := userRepo.Create(tr, dir, &User{Id: "u1", Name: "Alice", Email: "a@test.com"}); err != nil {
 			return err
 		}
-		if err := store.CreateProduct(tr, dir, &Product{Id: "pr1", Name: "Widget", Category: "tools", Price: 10}); err != nil {
+		if err := productRepo.Create(tr, dir, &Product{Id: "pr1", Name: "Widget", Category: "tools", Price: 10}); err != nil {
 			return err
 		}
-		return store.CreatePost(tr, dir, &Post{Id: "po1", Tags: []string{"go"}})
+		return postRepo.Create(tr, dir, &Post{Id: "po1", Tags: []string{"go"}})
 	})
 
 	// Each type's operations should be completely isolated
 	var users []*User
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = store.GetUserByEmail(tr, dir, "a@test.com")
+		users, err = userRepo.GetByEmail(tr, dir, "a@test.com")
 		return err
 	})
 	if len(users) != 1 {
@@ -956,7 +981,7 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 	var posts []*Post
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		posts, err = store.GetPostByTags(tr, dir, "go")
+		posts, err = postRepo.GetByTags(tr, dir, "go")
 		return err
 	})
 	if len(posts) != 1 {
@@ -964,20 +989,20 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 	}
 
 	// Verify listing each type returns exactly 1 entity
-	var userResult *UserPaginatedResult
+	var userResult *PaginatedResult[User]
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		userResult, err = store.ListUser(tr, dir, UserPaginationOptions{Limit: 10})
+		userResult, err = userRepo.List(tr, dir, PaginationOptions{Limit: 10})
 		return err
 	})
 	if len(userResult.Items) != 1 {
 		t.Fatalf("expected 1 user in list, got %d", len(userResult.Items))
 	}
 
-	var postResult *PostPaginatedResult
+	var postResult *PaginatedResult[Post]
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		postResult, err = store.ListPost(tr, dir, PostPaginationOptions{Limit: 10})
+		postResult, err = postRepo.List(tr, dir, PaginationOptions{Limit: 10})
 		return err
 	})
 	if len(postResult.Items) != 1 {

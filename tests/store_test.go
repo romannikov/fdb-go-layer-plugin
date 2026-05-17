@@ -64,9 +64,10 @@ func TestNewRecordStore_EmptyMetadata(t *testing.T) {
 // Create
 func TestCreateUser_Success(t *testing.T) {
 	store, tr, dir, kv := syncAndSetup()
+	userRepo := NewUserRepository(store)
 	user := &User{Id: "u1", Name: "Alice", Email: "alice@example.com"}
 
-	if err := store.CreateUser(tr, dir, user); err != nil {
+	if err := userRepo.Create(tr, dir, user); err != nil {
 		t.Fatalf("CreateUser failed: %v", err)
 	}
 
@@ -94,9 +95,10 @@ func TestCreateUser_Success(t *testing.T) {
 
 func TestCreateProduct_Success(t *testing.T) {
 	store, tr, dir, kv := syncAndSetup()
+	productRepo := NewProductRepository(store)
 	p := &Product{Id: "p1", Name: "Widget", Category: "tools", Price: 42}
 
-	if err := store.CreateProduct(tr, dir, p); err != nil {
+	if err := productRepo.Create(tr, dir, p); err != nil {
 		t.Fatalf("CreateProduct failed: %v", err)
 	}
 
@@ -124,8 +126,9 @@ func TestCreate_BeforeSync(t *testing.T) {
 	tr := NewMockTransaction(kv)
 	dir := &MockDirectorySubspace{}
 	store := NewRecordStore() // no SyncMetadata
+	userRepo := NewUserRepository(store)
 
-	err := store.CreateUser(tr, dir, &User{Id: "u1"})
+	err := userRepo.Create(tr, dir, &User{Id: "u1"})
 	if err == nil {
 		t.Fatal("expected error when metadata not synced")
 	}
@@ -137,10 +140,11 @@ func TestCreate_BeforeSync(t *testing.T) {
 // Get
 func TestGetUser_Success(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
+	userRepo := NewUserRepository(store)
 	user := &User{Id: "u1", Name: "Alice", Email: "alice@example.com"}
-	_ = store.CreateUser(tr, dir, user)
+	_ = userRepo.Create(tr, dir, user)
 
-	got, err := store.GetUser(tr, dir, "u1")
+	got, err := userRepo.Get(tr, dir, tuple.Tuple{"u1"})
 	if err != nil {
 		t.Fatalf("GetUser failed: %v", err)
 	}
@@ -151,8 +155,9 @@ func TestGetUser_Success(t *testing.T) {
 
 func TestGetUser_NotFound(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
+	userRepo := NewUserRepository(store)
 
-	_, err := store.GetUser(tr, dir, "nonexistent")
+	_, err := userRepo.Get(tr, dir, tuple.Tuple{"nonexistent"})
 	if err == nil {
 		t.Fatal("expected not found error")
 	}
@@ -163,9 +168,10 @@ func TestGetUser_NotFound(t *testing.T) {
 
 func TestGetProduct_Success(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
-	_ = store.CreateProduct(tr, dir, &Product{Id: "p1", Name: "Gizmo", Category: "tech", Price: 99})
+	productRepo := NewProductRepository(store)
+	_ = productRepo.Create(tr, dir, &Product{Id: "p1", Name: "Gizmo", Category: "tech", Price: 99})
 
-	got, err := store.GetProduct(tr, dir, "p1")
+	got, err := productRepo.Get(tr, dir, tuple.Tuple{"p1"})
 	if err != nil {
 		t.Fatalf("GetProduct failed: %v", err)
 	}
@@ -179,8 +185,9 @@ func TestGet_BeforeSync(t *testing.T) {
 	kv := NewMockKV()
 	tr := NewMockTransaction(kv)
 	dir := &MockDirectorySubspace{}
+	userRepo := NewUserRepository(store)
 
-	_, err := store.GetUser(tr, dir, "u1")
+	_, err := userRepo.Get(tr, dir, tuple.Tuple{"u1"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -189,14 +196,15 @@ func TestGet_BeforeSync(t *testing.T) {
 // Set (Update)
 func TestSetUser_UpdateFields(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
-	_ = store.CreateUser(tr, dir, &User{Id: "u1", Name: "Alice", Email: "a@test.com"})
+	userRepo := NewUserRepository(store)
+	_ = userRepo.Create(tr, dir, &User{Id: "u1", Name: "Alice", Email: "a@test.com"})
 
 	updated := &User{Id: "u1", Name: "Bob", Email: "b@test.com"}
-	if err := store.SetUser(tr, dir, updated); err != nil {
+	if err := userRepo.Set(tr, dir, updated); err != nil {
 		t.Fatalf("SetUser failed: %v", err)
 	}
 
-	got, _ := store.GetUser(tr, dir, "u1")
+	got, _ := userRepo.Get(tr, dir, tuple.Tuple{"u1"})
 	if got.Name != "Bob" || got.Email != "b@test.com" {
 		t.Fatalf("update not applied: %+v", got)
 	}
@@ -204,16 +212,17 @@ func TestSetUser_UpdateFields(t *testing.T) {
 
 func TestSetUser_IndexUpdated(t *testing.T) {
 	store, tr, dir, kv := syncAndSetup()
+	userRepo := NewUserRepository(store)
 	typeID := store.Metadata()["User"]
 
-	_ = store.CreateUser(tr, dir, &User{Id: "u1", Name: "Alice", Email: "old@test.com"})
+	_ = userRepo.Create(tr, dir, &User{Id: "u1", Name: "Alice", Email: "old@test.com"})
 	oldIdx := tuple.Tuple{typeID, "index", "Email", "old@test.com", "u1"}.Pack()
 	if !kv.HasKey(oldIdx) {
 		t.Fatal("old index should exist after create")
 	}
 
 	// Update email
-	_ = store.SetUser(tr, dir, &User{Id: "u1", Name: "Alice", Email: "new@test.com"})
+	_ = userRepo.Set(tr, dir, &User{Id: "u1", Name: "Alice", Email: "new@test.com"})
 
 	// Old index should be cleared
 	if kv.HasKey(oldIdx) {
@@ -228,10 +237,11 @@ func TestSetUser_IndexUpdated(t *testing.T) {
 
 func TestSetProduct_UpdatePrice(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
-	_ = store.CreateProduct(tr, dir, &Product{Id: "p1", Name: "X", Category: "a", Price: 10})
+	productRepo := NewProductRepository(store)
+	_ = productRepo.Create(tr, dir, &Product{Id: "p1", Name: "X", Category: "a", Price: 10})
 
-	_ = store.SetProduct(tr, dir, &Product{Id: "p1", Name: "X", Category: "a", Price: 50})
-	got, _ := store.GetProduct(tr, dir, "p1")
+	_ = productRepo.Set(tr, dir, &Product{Id: "p1", Name: "X", Category: "a", Price: 50})
+	got, _ := productRepo.Get(tr, dir, tuple.Tuple{"p1"})
 	if got.Price != 50 {
 		t.Fatalf("expected price 50, got %d", got.Price)
 	}
@@ -239,15 +249,16 @@ func TestSetProduct_UpdatePrice(t *testing.T) {
 
 func TestSetProduct_IndexUpdated(t *testing.T) {
 	store, tr, dir, kv := syncAndSetup()
+	productRepo := NewProductRepository(store)
 	typeID := store.Metadata()["Product"]
 
-	_ = store.CreateProduct(tr, dir, &Product{Id: "p1", Name: "X", Category: "old_cat", Price: 1})
+	_ = productRepo.Create(tr, dir, &Product{Id: "p1", Name: "X", Category: "old_cat", Price: 1})
 	oldIdx := tuple.Tuple{typeID, "index", "Category", "old_cat", "p1"}.Pack()
 	if !kv.HasKey(oldIdx) {
 		t.Fatal("old index should exist after create")
 	}
 
-	_ = store.SetProduct(tr, dir, &Product{Id: "p1", Name: "X", Category: "new_cat", Price: 1})
+	_ = productRepo.Set(tr, dir, &Product{Id: "p1", Name: "X", Category: "new_cat", Price: 1})
 	if kv.HasKey(oldIdx) {
 		t.Fatal("stale old index was NOT cleared")
 	}
@@ -260,10 +271,11 @@ func TestSetProduct_IndexUpdated(t *testing.T) {
 // Delete
 func TestDeleteUser_Success(t *testing.T) {
 	store, tr, dir, kv := syncAndSetup()
+	userRepo := NewUserRepository(store)
 	typeID := store.Metadata()["User"]
-	_ = store.CreateUser(tr, dir, &User{Id: "u1", Name: "Alice", Email: "a@test.com"})
+	_ = userRepo.Create(tr, dir, &User{Id: "u1", Name: "Alice", Email: "a@test.com"})
 
-	if err := store.DeleteUser(tr, dir, "u1"); err != nil {
+	if err := userRepo.Delete(tr, dir, tuple.Tuple{"u1"}); err != nil {
 		t.Fatalf("DeleteUser failed: %v", err)
 	}
 
@@ -276,7 +288,7 @@ func TestDeleteUser_Success(t *testing.T) {
 		t.Fatal("index key not cleared")
 	}
 	// Get should fail
-	_, err := store.GetUser(tr, dir, "u1")
+	_, err := userRepo.Get(tr, dir, tuple.Tuple{"u1"})
 	if err == nil {
 		t.Fatal("expected not found after delete")
 	}
@@ -284,18 +296,20 @@ func TestDeleteUser_Success(t *testing.T) {
 
 func TestDeleteUser_NonExistent(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
+	userRepo := NewUserRepository(store)
 	// Should not error or panic
-	if err := store.DeleteUser(tr, dir, "ghost"); err != nil {
+	if err := userRepo.Delete(tr, dir, tuple.Tuple{"ghost"}); err != nil {
 		t.Fatalf("delete of non-existent should not error, got: %v", err)
 	}
 }
 
 func TestDeleteProduct_ClearsIndex(t *testing.T) {
 	store, tr, dir, kv := syncAndSetup()
+	productRepo := NewProductRepository(store)
 	typeID := store.Metadata()["Product"]
-	_ = store.CreateProduct(tr, dir, &Product{Id: "p1", Name: "X", Category: "cat1", Price: 5})
+	_ = productRepo.Create(tr, dir, &Product{Id: "p1", Name: "X", Category: "cat1", Price: 5})
 
-	_ = store.DeleteProduct(tr, dir, "p1")
+	_ = productRepo.Delete(tr, dir, tuple.Tuple{"p1"})
 	pk := tuple.Tuple{typeID, "p1"}.Pack()
 	ik := tuple.Tuple{typeID, "index", "Category", "cat1", "p1"}.Pack()
 	if kv.HasKey(pk) {
@@ -310,9 +324,10 @@ func TestDeleteProduct_ClearsIndex(t *testing.T) {
 
 func TestGetUserByEmail_NoResults(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
+	userRepo := NewUserRepository(store)
 
 	// GetRange returns empty → no results
-	results, err := store.GetUserByEmail(tr, dir, "nobody@test.com")
+	results, err := userRepo.GetByEmail(tr, dir, "nobody@test.com")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -323,8 +338,9 @@ func TestGetUserByEmail_NoResults(t *testing.T) {
 
 func TestGetProductByCategory_NoResults(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
+	productRepo := NewProductRepository(store)
 
-	results, err := store.GetProductByCategory(tr, dir, "nonexistent")
+	results, err := productRepo.GetByCategory(tr, dir, "nonexistent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -347,12 +363,13 @@ func TestIndex_CrossTypeIsolation(t *testing.T) {
 // BatchGet
 func TestBatchGetUser_AllFound(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
+	userRepo := NewUserRepository(store)
 	for _, id := range []string{"u1", "u2", "u3"} {
-		_ = store.CreateUser(tr, dir, &User{Id: id, Name: "Name" + id, Email: id + "@test.com"})
+		_ = userRepo.Create(tr, dir, &User{Id: id, Name: "Name" + id, Email: id + "@test.com"})
 	}
 
 	ids := []tuple.Tuple{{"u1"}, {"u2"}, {"u3"}}
-	result, err := store.BatchGetUser(tr, dir, ids)
+	result, err := userRepo.BatchGet(tr, dir, ids)
 	if err != nil {
 		t.Fatalf("BatchGetUser failed: %v", err)
 	}
@@ -363,11 +380,12 @@ func TestBatchGetUser_AllFound(t *testing.T) {
 
 func TestBatchGetUser_PartialFound(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
-	_ = store.CreateUser(tr, dir, &User{Id: "u1", Name: "A", Email: "a@t.com"})
-	_ = store.CreateUser(tr, dir, &User{Id: "u2", Name: "B", Email: "b@t.com"})
+	userRepo := NewUserRepository(store)
+	_ = userRepo.Create(tr, dir, &User{Id: "u1", Name: "A", Email: "a@t.com"})
+	_ = userRepo.Create(tr, dir, &User{Id: "u2", Name: "B", Email: "b@t.com"})
 
 	ids := []tuple.Tuple{{"u1"}, {"u2"}, {"u3"}} // u3 doesn't exist
-	result, err := store.BatchGetUser(tr, dir, ids)
+	result, err := userRepo.BatchGet(tr, dir, ids)
 	if err != nil {
 		t.Fatalf("BatchGetUser failed: %v", err)
 	}
@@ -378,9 +396,10 @@ func TestBatchGetUser_PartialFound(t *testing.T) {
 
 func TestBatchGetUser_NoneFound(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
+	userRepo := NewUserRepository(store)
 
 	ids := []tuple.Tuple{{"x1"}, {"x2"}}
-	result, err := store.BatchGetUser(tr, dir, ids)
+	result, err := userRepo.BatchGet(tr, dir, ids)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -391,8 +410,9 @@ func TestBatchGetUser_NoneFound(t *testing.T) {
 
 func TestBatchGetUser_EmptyInput(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
+	userRepo := NewUserRepository(store)
 
-	result, err := store.BatchGetUser(tr, dir, []tuple.Tuple{})
+	result, err := userRepo.BatchGet(tr, dir, []tuple.Tuple{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -403,11 +423,12 @@ func TestBatchGetUser_EmptyInput(t *testing.T) {
 
 func TestBatchGetProduct_Success(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
-	_ = store.CreateProduct(tr, dir, &Product{Id: "p1", Name: "A", Category: "c", Price: 1})
-	_ = store.CreateProduct(tr, dir, &Product{Id: "p2", Name: "B", Category: "c", Price: 2})
+	productRepo := NewProductRepository(store)
+	_ = productRepo.Create(tr, dir, &Product{Id: "p1", Name: "A", Category: "c", Price: 1})
+	_ = productRepo.Create(tr, dir, &Product{Id: "p2", Name: "B", Category: "c", Price: 2})
 
 	ids := []tuple.Tuple{{"p1"}, {"p2"}}
-	result, err := store.BatchGetProduct(tr, dir, ids)
+	result, err := productRepo.BatchGet(tr, dir, ids)
 	if err != nil {
 		t.Fatalf("BatchGetProduct failed: %v", err)
 	}
@@ -433,8 +454,9 @@ func TestBatchGetProduct_Success(t *testing.T) {
 
 func TestCreateUser_IndexKeyStructure(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
+	userRepo := NewUserRepository(store)
 	typeID := store.Metadata()["User"]
-	_ = store.CreateUser(tr, dir, &User{Id: "u1", Name: "A", Email: "a@t.com"})
+	_ = userRepo.Create(tr, dir, &User{Id: "u1", Name: "A", Email: "a@t.com"})
 
 	// Use the mock helper to scan for index keys
 	prefix := tuple.Tuple{typeID, "index", "Email", "a@t.com"}.Pack()
@@ -459,9 +481,10 @@ func TestCreateUser_IndexKeyStructure(t *testing.T) {
 
 func TestCreateProduct_MultipleInSameCategory(t *testing.T) {
 	store, tr, dir, _ := syncAndSetup()
+	productRepo := NewProductRepository(store)
 	typeID := store.Metadata()["Product"]
-	_ = store.CreateProduct(tr, dir, &Product{Id: "p1", Name: "A", Category: "tools", Price: 1})
-	_ = store.CreateProduct(tr, dir, &Product{Id: "p2", Name: "B", Category: "tools", Price: 2})
+	_ = productRepo.Create(tr, dir, &Product{Id: "p1", Name: "A", Category: "tools", Price: 1})
+	_ = productRepo.Create(tr, dir, &Product{Id: "p2", Name: "B", Category: "tools", Price: 2})
 
 	prefix := tuple.Tuple{typeID, "index", "Category", "tools"}.Pack()
 	kr, _ := fdb.PrefixRange(prefix)

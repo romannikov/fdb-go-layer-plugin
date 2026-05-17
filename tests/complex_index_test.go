@@ -9,12 +9,14 @@ import (
 func TestFanOutIndex(t *testing.T) {
 	store, tr, dir, kv := syncAndSetup()
 
+	postRepo := NewPostRepository(store)
+
 	post := &Post{
 		Id:   "post1",
 		Tags: []string{"tag1", "tag2", "tag3"},
 	}
 
-	err := store.CreatePost(tr, dir, post)
+	err := postRepo.Create(tr, dir, post)
 	if err != nil {
 		t.Fatal(err)
 	}

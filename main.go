@@ -441,9 +441,17 @@ func (s *RecordStore) get{{.Name}}TypeID() (int64, error) {
 	return typeID, nil
 }
 
-// Create{{.Name}} creates a new {{.Name}} entity in the database.
-func (s *RecordStore) Create{{.Name}}(tr Transaction, dir directory.DirectorySubspace, entity *{{.Name}}) error {
-	typeID, err := s.get{{.Name}}TypeID()
+type {{.Name}}Repository struct {
+	store *RecordStore
+}
+
+func New{{.Name}}Repository(store *RecordStore) *{{.Name}}Repository {
+	return &{{.Name}}Repository{store: store}
+}
+
+// Create creates a new {{.Name}} entity in the database.
+func (r *{{.Name}}Repository) Create(tr Transaction, dir directory.DirectorySubspace, entity *{{.Name}}) error {
+	typeID, err := r.store.get{{.Name}}TypeID()
 	if err != nil {
 		return err
 	}
@@ -515,15 +523,19 @@ func (s *RecordStore) Create{{.Name}}(tr Transaction, dir directory.DirectorySub
 	return nil
 }
 
-// Get{{.Name}} retrieves a {{.Name}} entity by its primary key.
-func (s *RecordStore) Get{{.Name}}(tr fdb.ReadTransaction, dir directory.DirectorySubspace, {{range $index, $element := .PrimaryKeyFields}}{{if $index}}, {{end}}{{.Name}} {{.Type}}{{end}}) (*{{.Name}}, error) {
-	typeID, err := s.get{{.Name}}TypeID()
+// Get retrieves a {{.Name}} entity by its primary key.
+func (r *{{.Name}}Repository) Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, key tuple.Tuple) (*{{.Name}}, error) {
+	typeID, err := r.store.get{{.Name}}TypeID()
 	if err != nil {
 		return nil, err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, {{range .PrimaryKeyFields}} {{.Name}}, {{end}}})
-	value := tr.Get(key).MustGet()
+	{{range $index, $element := .PrimaryKeyFields}}
+	{{.Name}} := key[{{$index}}].({{.Type}})
+	{{end}}
+
+	fdbKey := dir.Pack(tuple.Tuple{typeID, {{range .PrimaryKeyFields}} {{.Name}}, {{end}}})
+	value := tr.Get(fdbKey).MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("{{.Name | lower}} not found")
 	}
@@ -548,9 +560,9 @@ func (s *RecordStore) Get{{.Name}}(tr fdb.ReadTransaction, dir directory.Directo
 	return entity, nil
 }
 
-// Set{{.Name}} updates an existing {{.Name}} entity in the database.
-func (s *RecordStore) Set{{.Name}}(tr Transaction, dir directory.DirectorySubspace, entity *{{.Name}}) error {
-	typeID, err := s.get{{.Name}}TypeID()
+// Set updates an existing {{.Name}} entity in the database.
+func (r *{{.Name}}Repository) Set(tr Transaction, dir directory.DirectorySubspace, entity *{{.Name}}) error {
+	typeID, err := r.store.get{{.Name}}TypeID()
 	if err != nil {
 		return err
 	}
@@ -657,15 +669,19 @@ func (s *RecordStore) Set{{.Name}}(tr Transaction, dir directory.DirectorySubspa
 	return nil
 }
 
-// Delete{{.Name}} removes a {{.Name}} entity from the database.
-func (s *RecordStore) Delete{{.Name}}(tr Transaction, dir directory.DirectorySubspace, {{range $index, $element := .PrimaryKeyFields}}{{if $index}}, {{end}}{{.Name}} {{.Type}}{{end}}) error {
-	typeID, err := s.get{{.Name}}TypeID()
+// Delete removes a {{.Name}} entity from the database.
+func (r *{{.Name}}Repository) Delete(tr Transaction, dir directory.DirectorySubspace, key tuple.Tuple) error {
+	typeID, err := r.store.get{{.Name}}TypeID()
 	if err != nil {
 		return err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, {{range .PrimaryKeyFields}} {{.Name}}, {{end}}})
-	value := tr.Get(key).MustGet()
+	{{range $index, $element := .PrimaryKeyFields}}
+	{{.Name}} := key[{{$index}}].({{.Type}})
+	{{end}}
+
+	fdbKey := dir.Pack(tuple.Tuple{typeID, {{range .PrimaryKeyFields}} {{.Name}}, {{end}}})
+	value := tr.Get(fdbKey).MustGet()
 	if value != nil {
 		entity := &{{.Name}}{}
 		err := proto.Unmarshal(value, entity)
@@ -699,7 +715,7 @@ func (s *RecordStore) Delete{{.Name}}(tr Transaction, dir directory.DirectorySub
 			{{end}}
 		}
 	}
-	tr.Clear(key)
+	tr.Clear(fdbKey)
 	// Clear atomic fields
 	{{range .Fields}}
 	{{if .Mutation}}
@@ -714,13 +730,13 @@ func (s *RecordStore) Delete{{.Name}}(tr Transaction, dir directory.DirectorySub
 
 {{range .Fields}}
 {{if .MutationValue}}
-// {{if eq .MutationValue 2}}Add{{else if eq .MutationValue 12}}Max{{else if eq .MutationValue 13}}Min{{end}}{{$.Name}}{{.Name}} applies an atomic mutation to the {{.Name}} field of {{$.Name}}.
-func (s *RecordStore) {{if eq .MutationValue 2}}Add{{else if eq .MutationValue 12}}Max{{else if eq .MutationValue 13}}Min{{end}}{{$.Name}}{{.Name}}(tr Transaction, dir directory.DirectorySubspace, {{range $.PrimaryKeyFields}}{{.Name}} {{.Type}}, {{end}} val {{.Type}}) error {
-	typeID, err := s.get{{$.Name}}TypeID()
+// {{if eq .MutationValue 2}}Add{{else if eq .MutationValue 12}}Max{{else if eq .MutationValue 13}}Min{{end}}{{.Name}} applies an atomic mutation to the {{.Name}} field of {{$.Name}}.
+func (r *{{$.Name}}Repository) {{if eq .MutationValue 2}}Add{{else if eq .MutationValue 12}}Max{{else if eq .MutationValue 13}}Min{{end}}{{.Name}}(tr Transaction, dir directory.DirectorySubspace, id string, val {{.Type}}) error {
+	typeID, err := r.store.get{{$.Name}}TypeID()
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, {{range $.PrimaryKeyFields}} {{.Name}}, {{end}} "f", {{.Number}}})
+	key := dir.Pack(tuple.Tuple{typeID, id, "f", {{.Number}}})
 	
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val))
@@ -732,9 +748,9 @@ func (s *RecordStore) {{if eq .MutationValue 2}}Add{{else if eq .MutationValue 1
 {{end}}
 
 {{range $idxIndex, $idx := .SecondaryIndexes}}
-// Get{{$.Name}}By{{joinFieldNames $idx.Fields}} retrieves {{$.Name}} entities by their {{joinFieldNames $idx.Fields}} index.
-func (s *RecordStore) Get{{$.Name}}By{{joinFieldNames $idx.Fields}}(tr fdb.ReadTransaction, dir directory.DirectorySubspace, {{range $i, $f := $idx.Fields}}{{if $i}}, {{end}}{{$f.Name}} {{$f.Type}}{{end}}) ([]*{{$.Name}}, error) {
-	typeID, err := s.get{{$.Name}}TypeID()
+// GetBy{{joinFieldNames $idx.Fields}} retrieves {{$.Name}} entities by their {{joinFieldNames $idx.Fields}} index.
+func (r *{{$.Name}}Repository) GetBy{{joinFieldNames $idx.Fields}}(tr fdb.ReadTransaction, dir directory.DirectorySubspace, {{range $i, $f := $idx.Fields}}{{if $i}}, {{end}}{{$f.Name}} {{$f.Type}}{{end}}) ([]*{{$.Name}}, error) {
+	typeID, err := r.store.get{{$.Name}}TypeID()
 	if err != nil {
 		return nil, err
 	}
@@ -770,17 +786,17 @@ func (s *RecordStore) Get{{$.Name}}By{{joinFieldNames $idx.Fields}}(tr fdb.ReadT
 }
 {{end}}
 
-// BatchGet{{.Name}} retrieves multiple {{.Name}} entities by their primary keys.
-func (s *RecordStore) BatchGet{{.Name}}(tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*{{.Name}}, error) {
-	typeID, err := s.get{{.Name}}TypeID()
+// BatchGet retrieves multiple {{.Name}} entities by their primary keys.
+func (r *{{.Name}}Repository) BatchGet(tr fdb.ReadTransaction, dir directory.DirectorySubspace, keys []tuple.Tuple) (map[string]*{{.Name}}, error) {
+	typeID, err := r.store.get{{.Name}}TypeID()
 	if err != nil {
 		return nil, err
 	}
 
 	result := make(map[string]*{{.Name}})
-	futures := make([]fdb.FutureByteSlice, len(ids))
+	futures := make([]fdb.FutureByteSlice, len(keys))
 
-	for i, id := range ids {
+	for i, id := range keys {
 		keyTpl := append(tuple.Tuple{typeID}, id...)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
@@ -796,20 +812,20 @@ func (s *RecordStore) BatchGet{{.Name}}(tr fdb.ReadTransaction, dir directory.Di
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
-		result[ids[i].String()] = entity
+		result[keys[i].String()] = entity
 	}
 
 	return result, nil
 }
 
-// List{{.Name}} retrieves a list of {{.Name}} entities starting from the given key.
-func (s *RecordStore) List{{.Name}}(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts {{.Name}}PaginationOptions) (*{{.Name}}PaginatedResult, error) {
-	typeID, err := s.get{{.Name}}TypeID()
+// List retrieves a list of {{.Name}} entities starting from the given key.
+func (r *{{.Name}}Repository) List(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PaginationOptions) (*PaginatedResult[{{.Name}}], error) {
+	typeID, err := r.store.get{{.Name}}TypeID()
 	if err != nil {
 		return nil, err
 	}
 
-	result := &{{.Name}}PaginatedResult{
+	result := &PaginatedResult[{{.Name}}]{
 		Items: make([]*{{.Name}}, 0),
 	}
 
@@ -872,42 +888,5 @@ func (s *RecordStore) List{{.Name}}(tr fdb.ReadTransaction, dir directory.Direct
 	}
 
 	return result, nil
-}
-
-type {{.Name}}Repository struct {
-	store *RecordStore
-}
-
-func New{{.Name}}Repository(store *RecordStore) *{{.Name}}Repository {
-	return &{{.Name}}Repository{store: store}
-}
-
-func (r *{{.Name}}Repository) Create(tr Transaction, dir directory.DirectorySubspace, entity *{{.Name}}) error {
-	return r.store.Create{{.Name}}(tr, dir, entity)
-}
-
-func (r *{{.Name}}Repository) Get(tr fdb.ReadTransaction, dir directory.DirectorySubspace, key tuple.Tuple) (*{{.Name}}, error) {
-	return r.store.Get{{.Name}}(tr, dir, {{range $i, $f := .PrimaryKeyFields}} key[{{$i}}].({{$f.Type}}), {{end}})
-}
-
-func (r *{{.Name}}Repository) Set(tr Transaction, dir directory.DirectorySubspace, entity *{{.Name}}) error {
-	return r.store.Set{{.Name}}(tr, dir, entity)
-}
-
-func (r *{{.Name}}Repository) Delete(tr Transaction, dir directory.DirectorySubspace, key tuple.Tuple) error {
-	return r.store.Delete{{.Name}}(tr, dir, {{range $i, $f := .PrimaryKeyFields}} key[{{$i}}].({{$f.Type}}), {{end}})
-}
-
-func (r *{{.Name}}Repository) BatchGet(tr fdb.ReadTransaction, dir directory.DirectorySubspace, keys []tuple.Tuple) (map[string]*{{.Name}}, error) {
-	return r.store.BatchGet{{.Name}}(tr, dir, keys)
-}
-
-func (r *{{.Name}}Repository) List(tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PaginationOptions) (*PaginatedResult[{{.Name}}], error) {
-	specificOpts := {{.Name}}PaginationOptions{Begin: opts.Begin, Limit: opts.Limit}
-	res, err := r.store.List{{.Name}}(tr, dir, specificOpts)
-	if err != nil {
-		return nil, err
-	}
-	return &PaginatedResult[{{.Name}}]{Items: res.Items, NextKey: res.NextKey, HasMore: res.HasMore}, nil
 }
 `

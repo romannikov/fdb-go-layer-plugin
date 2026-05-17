@@ -42,7 +42,7 @@ func TestAtomicMutations(t *testing.T) {
 	}
 
 	// 2. Test Add
-	err = recordStore.AddCounterValue(tr, dir, "c1", 5)
+	err = counterRepo.AddValue(tr, dir, "c1", 5)
 	if err != nil {
 		t.Fatalf("failed to add value: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestAtomicMutations(t *testing.T) {
 	}
 
 	// 3. Test Max
-	err = recordStore.MaxCounterMaxValue(tr, dir, "c1", 50) // should not change
+	err = counterRepo.MaxMaxValue(tr, dir, "c1", 50) // should not change
 	if err != nil {
 		t.Fatalf("failed to max value: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestAtomicMutations(t *testing.T) {
 		t.Fatalf("expected max_value 100, got %d", retrieved.MaxValue)
 	}
 
-	err = recordStore.MaxCounterMaxValue(tr, dir, "c1", 150) // should change
+	err = counterRepo.MaxMaxValue(tr, dir, "c1", 150) // should change
 	if err != nil {
 		t.Fatalf("failed to max value: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestAtomicMutations(t *testing.T) {
 	}
 
 	// 4. Test Min
-	err = recordStore.MinCounterMinValue(tr, dir, "c1", 10) // should not change
+	err = counterRepo.MinMinValue(tr, dir, "c1", 10) // should not change
 	if err != nil {
 		t.Fatalf("failed to min value: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestAtomicMutations(t *testing.T) {
 		t.Fatalf("expected min_value 5, got %d", retrieved.MinValue)
 	}
 
-	err = recordStore.MinCounterMinValue(tr, dir, "c1", 2) // should change
+	err = counterRepo.MinMinValue(tr, dir, "c1", 2) // should change
 	if err != nil {
 		t.Fatalf("failed to min value: %v", err)
 	}

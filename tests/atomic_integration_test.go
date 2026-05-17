@@ -46,7 +46,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 2. Test Add
 	withTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.AddCounterValue(tr, dir, "c1", 5)
+		return counterRepo.AddValue(tr, dir, "c1", 5)
 	})
 
 	withTx(t, db, func(tr fdb.Transaction) error {
@@ -60,7 +60,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 3. Test Max
 	withTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.MaxCounterMaxValue(tr, dir, "c1", 50) // should not change
+		return counterRepo.MaxMaxValue(tr, dir, "c1", 50) // should not change
 	})
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
@@ -72,7 +72,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	}
 
 	withTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.MaxCounterMaxValue(tr, dir, "c1", 150) // should change
+		return counterRepo.MaxMaxValue(tr, dir, "c1", 150) // should change
 	})
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
@@ -85,7 +85,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 4. Test Min
 	withTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.MinCounterMinValue(tr, dir, "c1", 10) // should not change
+		return counterRepo.MinMinValue(tr, dir, "c1", 10) // should not change
 	})
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
@@ -97,7 +97,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	}
 
 	withTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.MinCounterMinValue(tr, dir, "c1", 2) // should change
+		return counterRepo.MinMinValue(tr, dir, "c1", 2) // should change
 	})
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
