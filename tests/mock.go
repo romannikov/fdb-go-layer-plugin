@@ -99,6 +99,14 @@ func (m *MockKV) HasKey(key []byte) bool {
 	return ok
 }
 
+func (m *MockKV) PrintKeys() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for k := range m.data {
+		fmt.Printf("Stored key: %x\n", []byte(k))
+	}
+}
+
 func (m *MockKV) KeyCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -170,6 +178,26 @@ func NewMockTransaction(kv *MockKV) *MockTransaction {
 
 func (m *MockTransaction) Set(key fdb.KeyConvertible, value []byte) {
 	m.kv.Set(key.FDBKey(), value)
+}
+
+func (m *MockTransaction) SetVersionstampedKey(key fdb.KeyConvertible, value []byte) {
+	keyBytes := key.FDBKey()
+	if len(keyBytes) < 4 {
+		panic("invalid versionstamped key: too short")
+	}
+	offset := binary.LittleEndian.Uint32(keyBytes[len(keyBytes)-4:])
+	
+	dummyVS := []byte("\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01")
+	
+	newKey := make([]byte, len(keyBytes)-4)
+	copy(newKey, keyBytes[:len(keyBytes)-4])
+	
+	if int(offset)+10 > len(newKey) {
+		panic("invalid versionstamped key: offset out of bounds")
+	}
+	copy(newKey[offset:], dummyVS)
+	
+	m.kv.Set(newKey, value)
 }
 
 func (m *MockTransaction) Clear(key fdb.KeyConvertible) {
@@ -276,6 +304,10 @@ func (m *MockDirectorySubspace) Pack(t tuple.Tuple) fdb.Key {
 	return t.Pack()
 }
 
+func (m *MockDirectorySubspace) PackWithVersionstamp(t tuple.Tuple) (fdb.Key, error) {
+	return t.PackWithVersionstamp(nil)
+}
+
 func (m *MockDirectorySubspace) Unpack(k fdb.KeyConvertible) (tuple.Tuple, error) {
 	return tuple.Unpack(k.FDBKey())
 }
@@ -297,7 +329,7 @@ func SyncAndSetup() (*fdblayer.RecordStore, *MockTransaction, *MockDirectorySubs
 	tr := NewMockTransaction(kv)
 	dir := &MockDirectorySubspace{}
 	recordStore := fdblayer.NewRecordStore()
-	_ = recordStore.SyncMetadata(context.Background(), tr, dir, []string{"User", "Product", "Post"})
+	_ = recordStore.SyncMetadata(context.Background(), tr, dir, []string{"User", "Product", "Post", "TaskMessage"})
 	return recordStore, tr, dir, kv
 }
 

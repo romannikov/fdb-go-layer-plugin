@@ -38,3 +38,14 @@ message Post {
     string id = 1;
     repeated string tags = 2;
 }
+
+message TaskMessage {
+    option (annotations.primary_key) = "queue_name";
+    option (annotations.primary_key) = "shard_id";
+    option (annotations.primary_key) = "versionstamp";
+
+    string queue_name = 1;
+    uint32 shard_id = 2;
+    bytes versionstamp = 3 [(annotations.is_versionstamp) = true];
+    bytes payload = 4;
+}

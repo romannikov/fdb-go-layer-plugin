@@ -18,6 +18,7 @@ type Transaction interface {
 	Add(key fdb.KeyConvertible, param []byte)
 	Max(key fdb.KeyConvertible, param []byte)
 	Min(key fdb.KeyConvertible, param []byte)
+	SetVersionstampedKey(key fdb.KeyConvertible, value []byte)
 }
 
 // GenericRepository is a generic data access interface for entity T with primary key PK.
