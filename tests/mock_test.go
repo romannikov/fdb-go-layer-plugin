@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"encoding/binary"
 	"sort"
 	"sync"
 
@@ -168,6 +169,49 @@ func (m *MockTransaction) Set(key fdb.KeyConvertible, value []byte) {
 
 func (m *MockTransaction) Clear(key fdb.KeyConvertible) {
 	m.kv.clear(key.FDBKey())
+}
+
+func (m *MockTransaction) AtomicOp(key fdb.KeyConvertible, mutationType fdb.MutationType, param []byte) {
+	k := key.FDBKey()
+	m.kv.mu.Lock()
+	defer m.kv.mu.Unlock()
+
+	current := m.kv.data[string(k)]
+
+	switch mutationType {
+	case fdb.MutationTypeAdd:
+		var currentVal uint64
+		if len(current) >= 8 {
+			currentVal = binary.LittleEndian.Uint64(current)
+		}
+		delta := binary.LittleEndian.Uint64(param)
+		newVal := currentVal + delta
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, newVal)
+		m.kv.data[string(k)] = buf
+
+	case fdb.MutationTypeMax:
+		var currentVal uint64
+		if len(current) >= 8 {
+			currentVal = binary.LittleEndian.Uint64(current)
+		}
+		val := binary.LittleEndian.Uint64(param)
+		if val > currentVal {
+			m.kv.data[string(k)] = param
+		}
+
+	case fdb.MutationTypeMin:
+		var currentVal uint64
+		if len(current) >= 8 {
+			currentVal = binary.LittleEndian.Uint64(current)
+		} else {
+			currentVal = ^uint64(0)
+		}
+		val := binary.LittleEndian.Uint64(param)
+		if val < currentVal {
+			m.kv.data[string(k)] = param
+		}
+	}
 }
 
 func (m *MockTransaction) Get(key fdb.KeyConvertible) fdb.FutureByteSlice {
