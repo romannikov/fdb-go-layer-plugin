@@ -12,7 +12,3 @@
 
 ### CLI Tool for Index Management
 **Improvement:** A side-car CLI tool to "sync" indexes. If a developer adds a `secondary_index` annotation, the tool could scan the database and build the missing index entries for existing records in the background.
-
-## 3. Technical Debt & Robustness
-### Tuple Packing Optimization
-**Improvement:** Ensure that the generated code uses efficient `tuple.Tuple` packing, especially for primary keys, to minimize key size and improve performance.
