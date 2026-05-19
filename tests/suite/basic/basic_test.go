@@ -80,12 +80,12 @@ func TestCreateUser_Success(t *testing.T) {
 
 	typeID := recordStore.Metadata()["User"]
 	// Primary key
-	pk := tuple.Tuple{typeID, "u1"}.Pack()
+	pk := tuple.Tuple{typeID, fdblayer.DataNamespace, "u1"}.Pack()
 	if !kv.HasKey(pk) {
 		t.Fatal("primary key not written")
 	}
 	// Index key
-	ik := tuple.Tuple{typeID, "index", "Email", "alice@example.com", "u1"}.Pack()
+	ik := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(2324124615), "alice@example.com", "u1"}.Pack()
 	if !kv.HasKey(ik) {
 		t.Fatal("index key not written")
 	}
@@ -111,11 +111,11 @@ func TestCreateProduct_Success(t *testing.T) {
 	}
 
 	typeID := recordStore.Metadata()["Product"]
-	pk := tuple.Tuple{typeID, "p1"}.Pack()
+	pk := tuple.Tuple{typeID, fdblayer.DataNamespace, "p1"}.Pack()
 	if !kv.HasKey(pk) {
 		t.Fatal("primary key not written")
 	}
-	ik := tuple.Tuple{typeID, "index", "Category", "tools", "p1"}.Pack()
+	ik := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(3475980913), "tools", "p1"}.Pack()
 	if !kv.HasKey(ik) {
 		t.Fatal("category index key not written")
 	}
@@ -231,7 +231,7 @@ func TestSetUser_IndexUpdated(t *testing.T) {
 
 	repo := store.NewUserRepository(recordStore)
 	_ = repo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "old@test.com"})
-	oldIdx := tuple.Tuple{typeID, "index", "Email", "old@test.com", "u1"}.Pack()
+	oldIdx := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(2324124615), "old@test.com", "u1"}.Pack()
 	if !kv.HasKey(oldIdx) {
 		t.Fatal("old index should exist after create")
 	}
@@ -244,7 +244,7 @@ func TestSetUser_IndexUpdated(t *testing.T) {
 		t.Fatal("stale old index key was NOT cleared")
 	}
 	// New index should exist
-	newIdx := tuple.Tuple{typeID, "index", "Email", "new@test.com", "u1"}.Pack()
+	newIdx := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(2324124615), "new@test.com", "u1"}.Pack()
 	if !kv.HasKey(newIdx) {
 		t.Fatal("new index key not written")
 	}
@@ -270,7 +270,7 @@ func TestSetProduct_IndexUpdated(t *testing.T) {
 
 	repo := store.NewProductRepository(recordStore)
 	_ = repo.Create(ctx, tr, dir, &store.Product{Id: "p1", Name: "X", Category: "old_cat", Price: 1})
-	oldIdx := tuple.Tuple{typeID, "index", "Category", "old_cat", "p1"}.Pack()
+	oldIdx := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(3475980913), "old_cat", "p1"}.Pack()
 	if !kv.HasKey(oldIdx) {
 		t.Fatal("old index should exist after create")
 	}
@@ -279,7 +279,7 @@ func TestSetProduct_IndexUpdated(t *testing.T) {
 	if kv.HasKey(oldIdx) {
 		t.Fatal("stale old index was NOT cleared")
 	}
-	newIdx := tuple.Tuple{typeID, "index", "Category", "new_cat", "p1"}.Pack()
+	newIdx := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(3475980913), "new_cat", "p1"}.Pack()
 	if !kv.HasKey(newIdx) {
 		t.Fatal("new index key not written")
 	}
@@ -297,11 +297,11 @@ func TestDeleteUser_Success(t *testing.T) {
 		t.Fatalf("DeleteUser failed: %v", err)
 	}
 
-	pk := tuple.Tuple{typeID, "u1"}.Pack()
+	pk := tuple.Tuple{typeID, fdblayer.DataNamespace, "u1"}.Pack()
 	if kv.HasKey(pk) {
 		t.Fatal("primary key not cleared")
 	}
-	ik := tuple.Tuple{typeID, "index", "Email", "a@test.com", "u1"}.Pack()
+	ik := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(2324124615), "a@test.com", "u1"}.Pack()
 	if kv.HasKey(ik) {
 		t.Fatal("index key not cleared")
 	}
@@ -330,8 +330,8 @@ func TestDeleteProduct_ClearsIndex(t *testing.T) {
 	_ = repo.Create(ctx, tr, dir, &store.Product{Id: "p1", Name: "X", Category: "cat1", Price: 5})
 
 	_ = repo.Delete(ctx, tr, dir, "p1")
-	pk := tuple.Tuple{typeID, "p1"}.Pack()
-	ik := tuple.Tuple{typeID, "index", "Category", "cat1", "p1"}.Pack()
+	pk := tuple.Tuple{typeID, fdblayer.DataNamespace, "p1"}.Pack()
+	ik := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(3475980913), "cat1", "p1"}.Pack()
 	if kv.HasKey(pk) {
 		t.Fatal("primary key not cleared")
 	}
@@ -476,7 +476,7 @@ func TestCreateUser_IndexKeyStructure(t *testing.T) {
 	_ = repo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "A", Email: "a@t.com"})
 
 	// Use the mock helper to scan for index keys
-	prefix := tuple.Tuple{typeID, "index", "Email", "a@t.com"}.Pack()
+	prefix := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(2324124615), "a@t.com"}.Pack()
 	kr, _ := fdb.PrefixRange(prefix)
 	kvs := tr.GetRangeSlice(kr, fdb.RangeOptions{})
 	if len(kvs) != 1 {
@@ -487,7 +487,7 @@ func TestCreateUser_IndexKeyStructure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unpack failed: %v", err)
 	}
-	// tpl = {typeID, "index", "Email", email, pk}
+	// tpl = {typeID, 1, indexID, email, pk}
 	if len(tpl) != 5 {
 		t.Fatalf("expected 5 elements in index key, got %d: %v", len(tpl), tpl)
 	}
@@ -504,7 +504,7 @@ func TestCreateProduct_MultipleInSameCategory(t *testing.T) {
 	_ = repo.Create(ctx, tr, dir, &store.Product{Id: "p1", Name: "A", Category: "tools", Price: 1})
 	_ = repo.Create(ctx, tr, dir, &store.Product{Id: "p2", Name: "B", Category: "tools", Price: 2})
 
-	prefix := tuple.Tuple{typeID, "index", "Category", "tools"}.Pack()
+	prefix := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(3475980913), "tools"}.Pack()
 	kr, _ := fdb.PrefixRange(prefix)
 	kvs := tr.GetRangeSlice(kr, fdb.RangeOptions{})
 	if len(kvs) != 2 {
@@ -529,7 +529,7 @@ func TestGenericRepository_User(t *testing.T) {
 	}
 
 	typeID := recordStore.Metadata()["User"]
-	pk := tuple.Tuple{typeID, "gen-1"}.Pack()
+	pk := tuple.Tuple{typeID, fdblayer.DataNamespace, "gen-1"}.Pack()
 	if !kv.HasKey(pk) {
 		t.Fatal("generic Create did not write primary key")
 	}

@@ -57,7 +57,7 @@ func (r *postRepository) Create(ctx context.Context, tr fdblayer.Transaction, di
 		return err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, entity.Id})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
 
 	// Save atomic fields and zero them out for marshaling
 
@@ -77,7 +77,7 @@ func (r *postRepository) Create(ctx context.Context, tr fdblayer.Transaction, di
 		// Fan-out index
 
 		for _, item := range entity.Tags {
-			indexKey := dir.Pack(tuple.Tuple{typeID, "index", "Tags",
+			indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
 
 				item,
 
@@ -101,7 +101,7 @@ func (r *postRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir di
 		return nil, err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, pk})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
 	value := tr.Get(key).MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("post not found")
@@ -127,7 +127,7 @@ func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 		return err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, entity.Id})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
 
 	// Clear stale index entries from the old version of the entity
 	oldValue := tr.Get(key).MustGet()
@@ -140,7 +140,7 @@ func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 				// Fan-out index
 
 				for _, item := range old.Tags {
-					oldIndexKey := dir.Pack(tuple.Tuple{typeID, "index", "Tags",
+					oldIndexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
 
 						item,
 
@@ -172,7 +172,7 @@ func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 		// Fan-out index
 
 		for _, item := range entity.Tags {
-			indexKey := dir.Pack(tuple.Tuple{typeID, "index", "Tags",
+			indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
 
 				item,
 
@@ -196,7 +196,7 @@ func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 		return err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, pk})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
 	value := tr.Get(key).MustGet()
 	if value != nil {
 		entity := &Post{}
@@ -208,7 +208,7 @@ func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 				// Fan-out index
 
 				for _, item := range entity.Tags {
-					indexKey := dir.Pack(tuple.Tuple{typeID, "index", "Tags",
+					indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
 
 						item,
 
@@ -244,7 +244,10 @@ func (r *postRepository) BatchGetPost(ctx context.Context, tr fdb.ReadTransactio
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		keyTpl := append(tuple.Tuple{typeID}, id...)
+		keyTpl := make(tuple.Tuple, 2+len(id))
+		keyTpl[0] = typeID
+		keyTpl[1] = fdblayer.DataNamespace
+		copy(keyTpl[2:], id)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
 	}
@@ -282,20 +285,22 @@ func (r *postRepository) ListPost(ctx context.Context, tr fdb.ReadTransaction, d
 		Items: make([]*Post, 0),
 	}
 
-	beginTpl := append(tuple.Tuple{typeID}, opts.Begin...)
+	beginTpl := make(tuple.Tuple, 2+len(opts.Begin))
+	beginTpl[0] = typeID
+	beginTpl[1] = fdblayer.DataNamespace
+	copy(beginTpl[2:], opts.Begin)
 	begin := dir.Pack(beginTpl)
 
-	// Scan all keys under typeID. We request extra rows to account for
-	// index entries that will be filtered out.
-	typePrefix := dir.Pack(tuple.Tuple{typeID})
-	typePrefixRange, err := fdb.PrefixRange(typePrefix)
+	// Scan only data keys under typeID namespace.
+	dataPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace})
+	dataPrefixRange, err := fdb.PrefixRange(dataPrefix)
 	if err != nil {
 		return nil, err
 	}
 
 	iter := tr.GetRange(fdb.KeyRange{
 		Begin: begin,
-		End:   typePrefixRange.End,
+		End:   dataPrefixRange.End,
 	}, fdb.RangeOptions{
 		Reverse: false,
 	}).Iterator()
@@ -306,17 +311,6 @@ func (r *postRepository) ListPost(ctx context.Context, tr fdb.ReadTransaction, d
 			return nil, err
 		}
 		kv := iter.MustGet()
-
-		// Skip index entries: their second tuple element is the string "index".
-		tpl, err := dir.Unpack(kv.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unpack key: %w", err)
-		}
-		if len(tpl) >= 2 {
-			if s, ok := tpl[1].(string); ok && s == "index" {
-				continue
-			}
-		}
 
 		entity := &Post{}
 		err = proto.Unmarshal(kv.Value, entity)
@@ -338,8 +332,8 @@ func (r *postRepository) ListPost(ctx context.Context, tr fdb.ReadTransaction, d
 		if err != nil {
 			return nil, fmt.Errorf("failed to unpack next key: %w", err)
 		}
-		// Remove typeID to return just the PK tuple
-		result.NextKey = tpl[1:]
+		// Remove typeID and DataNamespace to return just the PK tuple
+		result.NextKey = tpl[2:]
 		result.Items = result.Items[:opts.Limit]
 	}
 
@@ -357,7 +351,7 @@ func (r *postRepository) GetPostByTags(ctx context.Context, tr fdb.ReadTransacti
 	}
 
 	entities := []*Post{}
-	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, "index", "Tags", Tags})
+	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816, Tags})
 	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
 	if err != nil {
 		return nil, err
@@ -373,7 +367,10 @@ func (r *postRepository) GetPostByTags(ctx context.Context, tr fdb.ReadTransacti
 		}
 		pkIndexStart := 3 + 1
 		pkTuple := tpl[pkIndexStart:]
-		keyTpl := append(tuple.Tuple{typeID}, pkTuple...)
+		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
+		keyTpl[0] = typeID
+		keyTpl[1] = fdblayer.DataNamespace
+		copy(keyTpl[2:], pkTuple)
 		key := dir.Pack(keyTpl)
 		value := tr.Get(key).MustGet()
 		if value == nil {

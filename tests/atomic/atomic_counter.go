@@ -61,7 +61,7 @@ func (r *counterRepository) Create(ctx context.Context, tr fdblayer.Transaction,
 		return err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, entity.Id})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
 
 	// Save atomic fields and zero them out for marshaling
 
@@ -92,21 +92,21 @@ func (r *counterRepository) Create(ctx context.Context, tr fdblayer.Transaction,
 	// Store atomic fields in separate keys
 
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, entity.Id, "f", 2})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 2})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_Value))
 		tr.Set(fieldKey, buf)
 	}
 
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, entity.Id, "f", 3})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 3})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_MaxValue))
 		tr.Set(fieldKey, buf)
 	}
 
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, entity.Id, "f", 4})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 4})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_MinValue))
 		tr.Set(fieldKey, buf)
@@ -125,7 +125,7 @@ func (r *counterRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir
 		return nil, err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, pk})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
 	value := tr.Get(key).MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("counter not found")
@@ -139,7 +139,7 @@ func (r *counterRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir
 	// Read atomic fields
 
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, pk, "f", 2})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 2})
 		fieldVal := tr.Get(fieldKey).MustGet()
 		if fieldVal != nil {
 			entity.Value = int64(binary.LittleEndian.Uint64(fieldVal))
@@ -147,7 +147,7 @@ func (r *counterRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir
 	}
 
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, pk, "f", 3})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 3})
 		fieldVal := tr.Get(fieldKey).MustGet()
 		if fieldVal != nil {
 			entity.MaxValue = int64(binary.LittleEndian.Uint64(fieldVal))
@@ -155,7 +155,7 @@ func (r *counterRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir
 	}
 
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, pk, "f", 4})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 4})
 		fieldVal := tr.Get(fieldKey).MustGet()
 		if fieldVal != nil {
 			entity.MinValue = int64(binary.LittleEndian.Uint64(fieldVal))
@@ -175,7 +175,7 @@ func (r *counterRepository) Set(ctx context.Context, tr fdblayer.Transaction, di
 		return err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, entity.Id})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
 
 	// Clear stale index entries from the old version of the entity
 	oldValue := tr.Get(key).MustGet()
@@ -215,21 +215,21 @@ func (r *counterRepository) Set(ctx context.Context, tr fdblayer.Transaction, di
 	// Store atomic fields in separate keys
 
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, entity.Id, "f", 2})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 2})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_Value))
 		tr.Set(fieldKey, buf)
 	}
 
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, entity.Id, "f", 3})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 3})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_MaxValue))
 		tr.Set(fieldKey, buf)
 	}
 
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, entity.Id, "f", 4})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 4})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_MinValue))
 		tr.Set(fieldKey, buf)
@@ -248,7 +248,7 @@ func (r *counterRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 		return err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, pk})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
 	value := tr.Get(key).MustGet()
 	if value != nil {
 		entity := &Counter{}
@@ -261,17 +261,17 @@ func (r *counterRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 	// Clear atomic fields
 
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, pk, "f", 2})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 2})
 		tr.Clear(fieldKey)
 	}
 
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, pk, "f", 3})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 3})
 		tr.Clear(fieldKey)
 	}
 
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, pk, "f", 4})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 4})
 		tr.Clear(fieldKey)
 	}
 
@@ -295,7 +295,10 @@ func (r *counterRepository) BatchGetCounter(ctx context.Context, tr fdb.ReadTran
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		keyTpl := append(tuple.Tuple{typeID}, id...)
+		keyTpl := make(tuple.Tuple, 2+len(id))
+		keyTpl[0] = typeID
+		keyTpl[1] = fdblayer.DataNamespace
+		copy(keyTpl[2:], id)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
 	}
@@ -333,20 +336,22 @@ func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransact
 		Items: make([]*Counter, 0),
 	}
 
-	beginTpl := append(tuple.Tuple{typeID}, opts.Begin...)
+	beginTpl := make(tuple.Tuple, 2+len(opts.Begin))
+	beginTpl[0] = typeID
+	beginTpl[1] = fdblayer.DataNamespace
+	copy(beginTpl[2:], opts.Begin)
 	begin := dir.Pack(beginTpl)
 
-	// Scan all keys under typeID. We request extra rows to account for
-	// index entries that will be filtered out.
-	typePrefix := dir.Pack(tuple.Tuple{typeID})
-	typePrefixRange, err := fdb.PrefixRange(typePrefix)
+	// Scan only data keys under typeID namespace.
+	dataPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace})
+	dataPrefixRange, err := fdb.PrefixRange(dataPrefix)
 	if err != nil {
 		return nil, err
 	}
 
 	iter := tr.GetRange(fdb.KeyRange{
 		Begin: begin,
-		End:   typePrefixRange.End,
+		End:   dataPrefixRange.End,
 	}, fdb.RangeOptions{
 		Reverse: false,
 	}).Iterator()
@@ -357,17 +362,6 @@ func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransact
 			return nil, err
 		}
 		kv := iter.MustGet()
-
-		// Skip index entries: their second tuple element is the string "index".
-		tpl, err := dir.Unpack(kv.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unpack key: %w", err)
-		}
-		if len(tpl) >= 2 {
-			if s, ok := tpl[1].(string); ok && s == "index" {
-				continue
-			}
-		}
 
 		entity := &Counter{}
 		err = proto.Unmarshal(kv.Value, entity)
@@ -389,8 +383,8 @@ func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransact
 		if err != nil {
 			return nil, fmt.Errorf("failed to unpack next key: %w", err)
 		}
-		// Remove typeID to return just the PK tuple
-		result.NextKey = tpl[1:]
+		// Remove typeID and DataNamespace to return just the PK tuple
+		result.NextKey = tpl[2:]
 		result.Items = result.Items[:opts.Limit]
 	}
 
@@ -406,7 +400,7 @@ func (r *counterRepository) AddCounterValue(ctx context.Context, tr fdblayer.Tra
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, Id, "f", 2})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 2})
 
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val))
@@ -424,7 +418,7 @@ func (r *counterRepository) MaxCounterMaxValue(ctx context.Context, tr fdblayer.
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, Id, "f", 3})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 3})
 
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val))
@@ -442,7 +436,7 @@ func (r *counterRepository) MinCounterMinValue(ctx context.Context, tr fdblayer.
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, Id, "f", 4})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 4})
 
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val))
