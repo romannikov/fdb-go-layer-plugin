@@ -59,33 +59,19 @@ func (r *postRepository) Create(ctx context.Context, tr fdblayer.Transaction, di
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
 
-	// Save atomic fields and zero them out for marshaling
-
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
 
-	// Restore atomic fields
-
 	tr.Set(key, value)
 
-	// Store atomic fields in separate keys
-
-	{
-
-		// Fan-out index
-
-		for _, item := range entity.Tags {
-			indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
-
-				item,
-
-				entity.Id,
-			})
-			tr.Set(indexKey, []byte{})
-		}
-
+	// Fan-out index
+	for _, item := range entity.Tags {
+		tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+			item,
+			entity.Id,
+		}), []byte{})
 	}
 
 	return nil
@@ -112,8 +98,6 @@ func (r *postRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir di
 		return nil, err
 	}
 
-	// Read atomic fields
-
 	return entity, nil
 }
 
@@ -134,53 +118,30 @@ func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 	if oldValue != nil {
 		old := &Post{}
 		if unmarshalErr := proto.Unmarshal(oldValue, old); unmarshalErr == nil {
-
-			{
-
-				// Fan-out index
-
-				for _, item := range old.Tags {
-					oldIndexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
-
-						item,
-
-						old.Id,
-					})
-					tr.Clear(oldIndexKey)
-				}
-
+			// Fan-out index
+			for _, item := range old.Tags {
+				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+					item,
+					old.Id,
+				}))
 			}
 
 		}
 	}
-
-	// Save atomic fields and zero them out for marshaling
 
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
 
-	// Restore atomic fields
-
 	tr.Set(key, value)
 
-	// Store atomic fields in separate keys
-
-	{
-
-		// Fan-out index
-
-		for _, item := range entity.Tags {
-			indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
-
-				item,
-
-				entity.Id,
-			})
-			tr.Set(indexKey, []byte{})
-		}
-
+	// Fan-out index
+	for _, item := range entity.Tags {
+		tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+			item,
+			entity.Id,
+		}), []byte{})
 	}
 
 	return nil
@@ -202,27 +163,16 @@ func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 		entity := &Post{}
 		err := proto.Unmarshal(value, entity)
 		if err == nil {
-
-			{
-
-				// Fan-out index
-
-				for _, item := range entity.Tags {
-					indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
-
-						item,
-
-						entity.Id,
-					})
-					tr.Clear(indexKey)
-				}
-
+			// Fan-out index
+			for _, item := range entity.Tags {
+				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+					item,
+					entity.Id,
+				}))
 			}
-
 		}
 	}
 	tr.Clear(key)
-	// Clear atomic fields
 
 	return nil
 }

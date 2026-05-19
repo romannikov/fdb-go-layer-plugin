@@ -59,29 +59,15 @@ func (r *userRepository) Create(ctx context.Context, tr fdblayer.Transaction, di
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
 
-	// Save atomic fields and zero them out for marshaling
-
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
 
-	// Restore atomic fields
-
 	tr.Set(key, value)
 
-	// Store atomic fields in separate keys
-
-	{
-
-		// Standard index
-		indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615,
-			entity.Email,
-			entity.Id,
-		})
-		tr.Set(indexKey, []byte{})
-
-	}
+	// Standard index
+	tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, entity.Email, entity.Id}), []byte{})
 
 	return nil
 }
@@ -107,8 +93,6 @@ func (r *userRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir di
 		return nil, err
 	}
 
-	// Read atomic fields
-
 	return entity, nil
 }
 
@@ -129,44 +113,21 @@ func (r *userRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 	if oldValue != nil {
 		old := &User{}
 		if unmarshalErr := proto.Unmarshal(oldValue, old); unmarshalErr == nil {
-
-			{
-
-				// Standard index
-				oldIndexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615,
-					old.Email,
-					old.Id,
-				})
-				tr.Clear(oldIndexKey)
-
-			}
+			// Standard index
+			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, old.Email, old.Id}))
 
 		}
 	}
-
-	// Save atomic fields and zero them out for marshaling
 
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
 
-	// Restore atomic fields
-
 	tr.Set(key, value)
 
-	// Store atomic fields in separate keys
-
-	{
-
-		// Standard index
-		indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615,
-			entity.Email,
-			entity.Id,
-		})
-		tr.Set(indexKey, []byte{})
-
-	}
+	// Standard index
+	tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, entity.Email, entity.Id}), []byte{})
 
 	return nil
 }
@@ -187,22 +148,11 @@ func (r *userRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 		entity := &User{}
 		err := proto.Unmarshal(value, entity)
 		if err == nil {
-
-			{
-
-				// Standard index
-				indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615,
-					entity.Email,
-					entity.Id,
-				})
-				tr.Clear(indexKey)
-
-			}
-
+			// Standard index
+			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, entity.Email, entity.Id}))
 		}
 	}
 	tr.Clear(key)
-	// Clear atomic fields
 
 	return nil
 }
