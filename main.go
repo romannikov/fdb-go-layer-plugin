@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"hash/fnv"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	annotationspb "github.com/romannikov/fdb-go-layer-plugin/fdb-layer"
+	"golang.org/x/tools/imports"
 )
 
 type Field struct {
@@ -89,9 +91,18 @@ func main() {
 			fileName := msg.FilePrefix + "_" + strings.ToLower(msg.Name) + ".go"
 			genFile := plugin.NewGeneratedFile(fileName, "")
 
-			err := tmpl.Execute(genFile, msg)
+			var buf bytes.Buffer
+			err := tmpl.Execute(&buf, msg)
 			if err != nil {
 				return err
+			}
+
+			processed, err := imports.Process(fileName, buf.Bytes(), nil)
+			if err != nil {
+				log.Printf("Warning: failed to process imports for %s: %v", fileName, err)
+				genFile.Write(buf.Bytes())
+			} else {
+				genFile.Write(processed)
 			}
 			fmt.Fprintf(os.Stderr, "Generated %s\n", fileName)
 		}
@@ -537,81 +548,82 @@ func (r *{{.Name | lower}}Repository) Create(ctx context.Context, tr fdblayer.Tr
 		return err
 	}
 
-	{{if msgHasVersionstampPK .}}
+	{{if msgHasVersionstampPK . -}}
 	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, {{range .PrimaryKeyFields}}{{if .IsVersionstamp}}tuple.IncompleteVersionstamp(0){{else}}{{packField (printf "entity.%s" .Name) .}}{{end}}, {{end}}})
 	if err != nil {
 		return err
 	}
-	{{else}}
+	{{- else -}}
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, {{range .PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}})
-	{{end}}
+	{{- end}}
 
+	{{if hasMutationFields . -}}
 	// Save atomic fields and zero them out for marshaling
-	{{range .Fields}}
-	{{if .Mutation}}
+	{{range .Fields -}}
+	{{if .Mutation -}}
 	atomic_{{.Name}} := entity.{{.Name}}
 	entity.{{.Name}} = 0
-	{{end}}
-	{{end}}
+	{{end -}}
+	{{end -}}
+	{{- end}}
 
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
 
+	{{if hasMutationFields . -}}
 	// Restore atomic fields
-	{{range .Fields}}
-	{{if .Mutation}}
+	{{range .Fields -}}
+	{{if .Mutation -}}
 	entity.{{.Name}} = atomic_{{.Name}}
-	{{end}}
-	{{end}}
+	{{end -}}
+	{{end -}}
+	{{- end}}
 
-	{{if msgHasVersionstampPK .}}
+	{{if msgHasVersionstampPK . -}}
 	tr.SetVersionstampedKey(key, value)
-	{{else}}
+	{{- else -}}
 	tr.Set(key, value)
-	{{end}}
+	{{- end}}
 
+	{{if hasMutationFields . -}}
 	// Store atomic fields in separate keys
-	{{range .Fields}}
-	{{if .Mutation}}
+	{{range .Fields -}}
+	{{if .Mutation -}}
 	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}} {{.Number}}})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_{{.Name}}))
 		tr.Set(fieldKey, buf)
 	}
-	{{end}}
-	{{end}}
+	{{end -}}
+	{{end -}}
+	{{- end}}
 
-	{{range $idxIndex, $idx := .SecondaryIndexes}}
-	{
-		{{if $idx.IsFanOut}}
-		// Fan-out index
-		{{range $i, $f := $idx.Fields}}
-		{{if $f.IsRepeated}}
-		for _, item := range entity.{{$f.Name}} {
-			indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
-				{{range $j, $sf := $idx.Fields}}
-				{{if eq $j $i}} item, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
-				{{end}}
-				{{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
-			})
-			tr.Set(indexKey, []byte{})
-		}
-		{{end}}
-		{{end}}
-		{{else}}
-		// Standard index
-		indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
-			{{range $i, $f := $idx.Fields}} {{packField (printf "entity.%s" $f.Name) $f}}, {{end}}
+	{{range $idxIndex, $idx := .SecondaryIndexes -}}
+	{{if $idx.IsFanOut -}}
+	// Fan-out index
+	{{range $i, $f := $idx.Fields -}}
+	{{if $f.IsRepeated -}}
+	for _, item := range entity.{{$f.Name}} {
+		tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
+			{{range $j, $sf := $idx.Fields -}}
+			{{if eq $j $i}} item, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
+			{{- end}}
 			{{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
-		})
-		tr.Set(indexKey, []byte{})
-		{{end}}
+		}), []byte{})
 	}
+	{{- end}}
+	{{- end}}
+	{{- else -}}
+	// Standard index
+	tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
+		{{- range $i, $f := $idx.Fields}} {{packField (printf "entity.%s" $f.Name) $f}}, {{end}}
+		{{- range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
+	}), []byte{})
+	{{- end}}
 	{{end}}
-
 	return nil
 }
 
@@ -636,9 +648,10 @@ func (r *{{.Name | lower}}Repository) Get(ctx context.Context, tr fdb.ReadTransa
 		return nil, err
 	}
 
+	{{if hasMutationFields . -}}
 	// Read atomic fields
-	{{range .Fields}}
-	{{if .Mutation}}
+	{{range .Fields -}}
+	{{if .Mutation -}}
 	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{if eq (len $.PrimaryKeyFields) 1}}{{packField "pk" (index $.PrimaryKeyFields 0)}}{{else if gt (len $.PrimaryKeyFields) 1}}{{range $i, $f := $.PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}, {{.Number}}})
 		fieldVal := tr.Get(fieldKey).MustGet()
@@ -646,8 +659,9 @@ func (r *{{.Name | lower}}Repository) Get(ctx context.Context, tr fdb.ReadTransa
 			entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
 		}
 	}
-	{{end}}
-	{{end}}
+	{{end -}}
+	{{end -}}
+	{{- end}}
 	return entity, nil
 }
 
@@ -688,103 +702,100 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 	if oldValue != nil {
 		old := &{{.Name}}{}
 		if unmarshalErr := proto.Unmarshal(oldValue, old); unmarshalErr == nil {
-			{{range $idxIndex, $idx := .SecondaryIndexes}}
-			{
-				{{if $idx.IsFanOut}}
-				// Fan-out index
-				{{range $i, $f := $idx.Fields}}
-				{{if $f.IsRepeated}}
-				for _, item := range old.{{$f.Name}} {
-					oldIndexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
-						{{range $j, $sf := $idx.Fields}}
-						{{if eq $j $i}} item, {{else}} {{packField (printf "old.%s" $sf.Name) $sf}}, {{end}}
-						{{end}}
-						{{range $.PrimaryKeyFields}} {{packField (printf "old.%s" .Name) .}}, {{end}}
-					})
-					tr.Clear(oldIndexKey)
-				}
-				{{end}}
-				{{end}}
-				{{else}}
-				// Standard index
-				oldIndexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}},
-					{{range $i, $f := $idx.Fields}} {{packField (printf "old.%s" $f.Name) $f}}, {{end}}
+			{{range $idxIndex, $idx := .SecondaryIndexes -}}
+			{{if $idx.IsFanOut -}}
+			// Fan-out index
+			{{range $i, $f := $idx.Fields -}}
+			{{if $f.IsRepeated -}}
+			for _, item := range old.{{$f.Name}} {
+				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
+					{{range $j, $sf := $idx.Fields -}}
+					{{if eq $j $i}} item, {{else}} {{packField (printf "old.%s" $sf.Name) $sf}}, {{end}}
+					{{- end}}
 					{{range $.PrimaryKeyFields}} {{packField (printf "old.%s" .Name) .}}, {{end}}
-				})
-				tr.Clear(oldIndexKey)
-				{{end}}
+				}))
 			}
+			{{- end}}
+			{{- end}}
+			{{- else -}}
+			// Standard index
+			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}},
+				{{- range $i, $f := $idx.Fields}} {{packField (printf "old.%s" $f.Name) $f}}, {{end}}
+				{{- range $.PrimaryKeyFields}} {{packField (printf "old.%s" .Name) .}}, {{end}}
+			}))
+			{{- end}}
 			{{end}}
 		}
 	}
 	{{end}}
 
+	{{if hasMutationFields . -}}
 	// Save atomic fields and zero them out for marshaling
-	{{range .Fields}}
-	{{if .Mutation}}
+	{{range .Fields -}}
+	{{if .Mutation -}}
 	atomic_{{.Name}} := entity.{{.Name}}
 	entity.{{.Name}} = 0
-	{{end}}
-	{{end}}
+	{{end -}}
+	{{end -}}
+	{{- end}}
 
 	value, err := proto.Marshal(entity)
 	if err != nil {
 		return err
 	}
 
+	{{if hasMutationFields . -}}
 	// Restore atomic fields
-	{{range .Fields}}
-	{{if .Mutation}}
+	{{range .Fields -}}
+	{{if .Mutation -}}
 	entity.{{.Name}} = atomic_{{.Name}}
-	{{end}}
-	{{end}}
+	{{end -}}
+	{{end -}}
+	{{- end}}
 
-	{{if msgHasVersionstampPK .}}
+	{{if msgHasVersionstampPK . -}}
 	tr.SetVersionstampedKey(key, value)
-	{{else}}
+	{{- else -}}
 	tr.Set(key, value)
-	{{end}}
+	{{- end}}
 
+	{{if hasMutationFields . -}}
 	// Store atomic fields in separate keys
-	{{range .Fields}}
-	{{if .Mutation}}
+	{{range .Fields -}}
+	{{if .Mutation -}}
 	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}} {{.Number}}})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_{{.Name}}))
 		tr.Set(fieldKey, buf)
 	}
-	{{end}}
-	{{end}}
+	{{end -}}
+	{{end -}}
+	{{- end}}
 
-	{{range $idxIndex, $idx := .SecondaryIndexes}}
-	{
-		{{if $idx.IsFanOut}}
-		// Fan-out index
-		{{range $i, $f := $idx.Fields}}
-		{{if $f.IsRepeated}}
-		for _, item := range entity.{{$f.Name}} {
-			indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
-				{{range $j, $sf := $idx.Fields}}
-				{{if eq $j $i}} item, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
-				{{end}}
-				{{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
-			})
-			tr.Set(indexKey, []byte{})
-		}
-		{{end}}
-		{{end}}
-		{{else}}
-		// Standard index
-		indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
-			{{range $i, $f := $idx.Fields}} {{packField (printf "entity.%s" $f.Name) $f}}, {{end}}
+	{{range $idxIndex, $idx := .SecondaryIndexes -}}
+	{{if $idx.IsFanOut -}}
+	// Fan-out index
+	{{range $i, $f := $idx.Fields -}}
+	{{if $f.IsRepeated -}}
+	for _, item := range entity.{{$f.Name}} {
+		tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
+			{{range $j, $sf := $idx.Fields -}}
+			{{if eq $j $i}} item, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
+			{{- end}}
 			{{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
-		})
-		tr.Set(indexKey, []byte{})
-		{{end}}
+		}), []byte{})
 	}
+	{{- end}}
+	{{- end}}
+	{{- else -}}
+	// Standard index
+	tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
+		{{- range $i, $f := $idx.Fields}} {{packField (printf "entity.%s" $f.Name) $f}}, {{end}}
+		{{- range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
+	}), []byte{})
+	{{- end}}
 	{{end}}
-
 	return nil
 }
 
@@ -804,45 +815,44 @@ func (r *{{.Name | lower}}Repository) Delete(ctx context.Context, tr fdblayer.Tr
 		entity := &{{.Name}}{}
 		err := proto.Unmarshal(value, entity)
 		if err == nil {
-			{{range $idxIndex, $idx := .SecondaryIndexes}}
-			{
-				{{if $idx.IsFanOut}}
-				// Fan-out index
-				{{range $i, $f := $idx.Fields}}
-				{{if $f.IsRepeated}}
-				for _, item := range entity.{{$f.Name}} {
-					indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
-						{{range $j, $sf := $idx.Fields}}
-						{{if eq $j $i}} item, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
-						{{end}}
-						{{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
-					})
-					tr.Clear(indexKey)
-				}
-				{{end}}
-				{{end}}
-				{{else}}
-				// Standard index
-				indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
-					{{range $i, $f := $idx.Fields}} {{packField (printf "entity.%s" $f.Name) $f}}, {{end}}
+			{{range $idxIndex, $idx := .SecondaryIndexes -}}
+			{{if $idx.IsFanOut -}}
+			// Fan-out index
+			{{range $i, $f := $idx.Fields -}}
+			{{if $f.IsRepeated -}}
+			for _, item := range entity.{{$f.Name}} {
+				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
+					{{range $j, $sf := $idx.Fields -}}
+					{{if eq $j $i}} item, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
+					{{- end}}
 					{{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
-				})
-				tr.Clear(indexKey)
-				{{end}}
+				}))
 			}
-			{{end}}
+			{{- end}}
+			{{- end}}
+			{{- else -}}
+			// Standard index
+			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
+				{{- range $i, $f := $idx.Fields}} {{packField (printf "entity.%s" $f.Name) $f}}, {{end}}
+				{{- range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
+			}))
+			{{- end}}
+			{{end -}}
 		}
 	}
 	tr.Clear(key)
+
+	{{if hasMutationFields . -}}
 	// Clear atomic fields
-	{{range .Fields}}
-	{{if .Mutation}}
+	{{range .Fields -}}
+	{{if .Mutation -}}
 	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{if eq (len $.PrimaryKeyFields) 1}}{{packField "pk" (index $.PrimaryKeyFields 0)}}{{else if gt (len $.PrimaryKeyFields) 1}}{{range $i, $f := $.PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}, {{.Number}}})
 		tr.Clear(fieldKey)
 	}
-	{{end}}
-	{{end}}
+	{{end -}}
+	{{end -}}
+	{{- end}}
 	return nil
 }
 
