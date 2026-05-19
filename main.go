@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"hash/fnv"
 	"log"
 	"os"
 	"strings"
@@ -30,6 +31,7 @@ type SecondaryIndex struct {
 	Fields      []Field
 	IsFanOut    bool
 	FanOutField Field
+	IndexID     int64
 }
 
 type Message struct {
@@ -194,6 +196,8 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 		}
 	}
 
+	usedHashes := make(map[int64]string)
+
 	if proto.HasExtension(msgOptions, annotationspb.E_SecondaryIndex) {
 		siValues := proto.GetExtension(msgOptions, annotationspb.E_SecondaryIndex)
 		if siValues != nil {
@@ -224,10 +228,25 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 							fanOutField = f
 						}
 					}
+					h := fnv.New32a()
+					var fieldNames []string
+					for _, f := range idxFields {
+						fieldNames = append(fieldNames, strings.ToLower(f.Name))
+					}
+					signature := strings.Join(fieldNames, ",")
+					h.Write([]byte(signature))
+					indexID := int64(h.Sum32())
+
+					if existingSig, ok := usedHashes[indexID]; ok {
+						log.Fatalf("Secondary index ID collision detected in message %s: indices with fields %s and %s share the same hash %d", msgName, signature, existingSig, indexID)
+					}
+					usedHashes[indexID] = signature
+
 					secondaryIndexes = append(secondaryIndexes, SecondaryIndex{
 						Fields:      idxFields,
 						IsFanOut:    isFanOut,
 						FanOutField: fanOutField,
+						IndexID:     indexID,
 					})
 				}
 			case *annotationspb.SecondaryIndex:
@@ -238,6 +257,7 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 							Name:       field.GoName,
 							Type:       GoType(field.Desc.Kind()),
 							IsRepeated: field.Desc.IsList(),
+							IsUnsigned: field.Desc.Kind() == protoreflect.Uint32Kind || field.Desc.Kind() == protoreflect.Uint64Kind || field.Desc.Kind() == protoreflect.Fixed32Kind || field.Desc.Kind() == protoreflect.Fixed64Kind,
 						})
 					} else {
 						log.Fatalf("Secondary index field %s not found in message %s", idxFieldName, msgName)
@@ -254,10 +274,25 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 						fanOutField = f
 					}
 				}
+				h := fnv.New32a()
+				var fieldNames []string
+				for _, f := range idxFields {
+					fieldNames = append(fieldNames, strings.ToLower(f.Name))
+				}
+				signature := strings.Join(fieldNames, ",")
+				h.Write([]byte(signature))
+				indexID := int64(h.Sum32())
+
+				if existingSig, ok := usedHashes[indexID]; ok {
+					log.Fatalf("Secondary index ID collision detected in message %s: indices with fields %s and %s share the same hash %d", msgName, signature, existingSig, indexID)
+				}
+				usedHashes[indexID] = signature
+
 				secondaryIndexes = append(secondaryIndexes, SecondaryIndex{
 					Fields:      idxFields,
 					IsFanOut:    isFanOut,
 					FanOutField: fanOutField,
+					IndexID:     indexID,
 				})
 			default:
 				log.Fatalf("Unknown type for secondary_index: %T", v)
@@ -323,7 +358,10 @@ func HasBinaryImports(msg Message) bool {
 }
 
 func PackField(name string, f Field) string {
-	if f.Type == "int32" || f.Type == "int64" || f.IsUnsigned {
+	if f.IsUnsigned {
+		return "uint64(" + name + ")"
+	}
+	if f.Type == "int32" || f.Type == "int64" {
 		return "int64(" + name + ")"
 	}
 	return name
@@ -382,12 +420,12 @@ func (r *{{.Name | lower}}Repository) Enqueue(ctx context.Context, tr fdblayer.T
 	}
 
 	{{if msgHasVersionstampPK .}}
-	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, {{range .PrimaryKeyFields}}{{if .IsVersionstamp}}tuple.IncompleteVersionstamp(0){{else}}{{packField (printf "entity.%s" .Name) .}}{{end}}, {{end}}})
+	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, {{range .PrimaryKeyFields}}{{if .IsVersionstamp}}tuple.IncompleteVersionstamp(0){{else}}{{packField (printf "entity.%s" .Name) .}}{{end}}, {{end}}})
 	if err != nil {
 		return err
 	}
 	{{else}}
-	key := dir.Pack(tuple.Tuple{typeID, {{range .PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, {{range .PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}})
 	{{end}}
 
 	value, err := proto.Marshal(entity)
@@ -414,7 +452,7 @@ func (r *{{.Name | lower}}Repository) Dequeue(ctx context.Context, tr fdblayer.T
 		return nil, err
 	}
 
-	prefixTuple := tuple.Tuple{typeID, {{(index .PrimaryKeyFields 0).Name | lower}}}
+	prefixTuple := tuple.Tuple{typeID, fdblayer.DataNamespace, {{(index .PrimaryKeyFields 0).Name | lower}}}
 	prefixRange, err := fdb.PrefixRange(dir.Pack(prefixTuple))
 	if err != nil {
 		return nil, err
@@ -500,12 +538,12 @@ func (r *{{.Name | lower}}Repository) Create(ctx context.Context, tr fdblayer.Tr
 	}
 
 	{{if msgHasVersionstampPK .}}
-	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, {{range .PrimaryKeyFields}}{{if .IsVersionstamp}}tuple.IncompleteVersionstamp(0){{else}}{{packField (printf "entity.%s" .Name) .}}{{end}}, {{end}}})
+	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, {{range .PrimaryKeyFields}}{{if .IsVersionstamp}}tuple.IncompleteVersionstamp(0){{else}}{{packField (printf "entity.%s" .Name) .}}{{end}}, {{end}}})
 	if err != nil {
 		return err
 	}
 	{{else}}
-	key := dir.Pack(tuple.Tuple{typeID, {{range .PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, {{range .PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}})
 	{{end}}
 
 	// Save atomic fields and zero them out for marshaling
@@ -538,7 +576,7 @@ func (r *{{.Name | lower}}Repository) Create(ctx context.Context, tr fdblayer.Tr
 	{{range .Fields}}
 	{{if .Mutation}}
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, {{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}} "f", {{.Number}}})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}} {{.Number}}})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_{{.Name}}))
 		tr.Set(fieldKey, buf)
@@ -553,7 +591,7 @@ func (r *{{.Name | lower}}Repository) Create(ctx context.Context, tr fdblayer.Tr
 		{{range $i, $f := $idx.Fields}}
 		{{if $f.IsRepeated}}
 		for _, item := range entity.{{$f.Name}} {
-			indexKey := dir.Pack(tuple.Tuple{typeID, "index", "{{joinFieldNames $idx.Fields}}", 
+			indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
 				{{range $j, $sf := $idx.Fields}}
 				{{if eq $j $i}} item, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
 				{{end}}
@@ -565,7 +603,7 @@ func (r *{{.Name | lower}}Repository) Create(ctx context.Context, tr fdblayer.Tr
 		{{end}}
 		{{else}}
 		// Standard index
-		indexKey := dir.Pack(tuple.Tuple{typeID, "index", "{{joinFieldNames $idx.Fields}}", 
+		indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
 			{{range $i, $f := $idx.Fields}} {{packField (printf "entity.%s" $f.Name) $f}}, {{end}}
 			{{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
 		})
@@ -587,7 +625,7 @@ func (r *{{.Name | lower}}Repository) Get(ctx context.Context, tr fdb.ReadTransa
 		return nil, err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, {{if eq (len .PrimaryKeyFields) 1}}{{packField "pk" (index .PrimaryKeyFields 0)}}{{else if gt (len .PrimaryKeyFields) 1}}{{range $i, $f := .PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, {{if eq (len .PrimaryKeyFields) 1}}{{packField "pk" (index .PrimaryKeyFields 0)}}{{else if gt (len .PrimaryKeyFields) 1}}{{range $i, $f := .PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}})
 	value := tr.Get(key).MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("{{.Name | lower}} not found")
@@ -602,7 +640,7 @@ func (r *{{.Name | lower}}Repository) Get(ctx context.Context, tr fdb.ReadTransa
 	{{range .Fields}}
 	{{if .Mutation}}
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, {{if eq (len $.PrimaryKeyFields) 1}}{{packField "pk" (index $.PrimaryKeyFields 0)}}{{else if gt (len $.PrimaryKeyFields) 1}}{{range $i, $f := $.PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}, "f", {{.Number}}})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{if eq (len $.PrimaryKeyFields) 1}}{{packField "pk" (index $.PrimaryKeyFields 0)}}{{else if gt (len $.PrimaryKeyFields) 1}}{{range $i, $f := $.PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}, {{.Number}}})
 		fieldVal := tr.Get(fieldKey).MustGet()
 		if fieldVal != nil {
 			entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
@@ -634,16 +672,16 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 		}
 	}
 	if hasOldVS {
-		oldKey := dir.Pack(tuple.Tuple{typeID, {{range .PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}})
+		oldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, {{range .PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}})
 		tr.Clear(oldKey)
 	}
 
-	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, {{range .PrimaryKeyFields}}{{if .IsVersionstamp}}tuple.IncompleteVersionstamp(0){{else}}{{packField (printf "entity.%s" .Name) .}}{{end}}, {{end}}})
+	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, {{range .PrimaryKeyFields}}{{if .IsVersionstamp}}tuple.IncompleteVersionstamp(0){{else}}{{packField (printf "entity.%s" .Name) .}}{{end}}, {{end}}})
 	if err != nil {
 		return err
 	}
 	{{else}}
-	key := dir.Pack(tuple.Tuple{typeID, {{range .PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, {{range .PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}})
 
 	// Clear stale index entries from the old version of the entity
 	oldValue := tr.Get(key).MustGet()
@@ -657,7 +695,7 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 				{{range $i, $f := $idx.Fields}}
 				{{if $f.IsRepeated}}
 				for _, item := range old.{{$f.Name}} {
-					oldIndexKey := dir.Pack(tuple.Tuple{typeID, "index", "{{joinFieldNames $idx.Fields}}", 
+					oldIndexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
 						{{range $j, $sf := $idx.Fields}}
 						{{if eq $j $i}} item, {{else}} {{packField (printf "old.%s" $sf.Name) $sf}}, {{end}}
 						{{end}}
@@ -669,7 +707,7 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 				{{end}}
 				{{else}}
 				// Standard index
-				oldIndexKey := dir.Pack(tuple.Tuple{typeID, "index", "{{joinFieldNames $idx.Fields}}",
+				oldIndexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}},
 					{{range $i, $f := $idx.Fields}} {{packField (printf "old.%s" $f.Name) $f}}, {{end}}
 					{{range $.PrimaryKeyFields}} {{packField (printf "old.%s" .Name) .}}, {{end}}
 				})
@@ -711,7 +749,7 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 	{{range .Fields}}
 	{{if .Mutation}}
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, {{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}} "f", {{.Number}}})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}} {{.Number}}})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_{{.Name}}))
 		tr.Set(fieldKey, buf)
@@ -726,7 +764,7 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 		{{range $i, $f := $idx.Fields}}
 		{{if $f.IsRepeated}}
 		for _, item := range entity.{{$f.Name}} {
-			indexKey := dir.Pack(tuple.Tuple{typeID, "index", "{{joinFieldNames $idx.Fields}}", 
+			indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
 				{{range $j, $sf := $idx.Fields}}
 				{{if eq $j $i}} item, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
 				{{end}}
@@ -738,7 +776,7 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 		{{end}}
 		{{else}}
 		// Standard index
-		indexKey := dir.Pack(tuple.Tuple{typeID, "index", "{{joinFieldNames $idx.Fields}}", 
+		indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
 			{{range $i, $f := $idx.Fields}} {{packField (printf "entity.%s" $f.Name) $f}}, {{end}}
 			{{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
 		})
@@ -760,7 +798,7 @@ func (r *{{.Name | lower}}Repository) Delete(ctx context.Context, tr fdblayer.Tr
 		return err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, {{if eq (len .PrimaryKeyFields) 1}}{{packField "pk" (index .PrimaryKeyFields 0)}}{{else if gt (len .PrimaryKeyFields) 1}}{{range $i, $f := .PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, {{if eq (len .PrimaryKeyFields) 1}}{{packField "pk" (index .PrimaryKeyFields 0)}}{{else if gt (len .PrimaryKeyFields) 1}}{{range $i, $f := .PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}})
 	value := tr.Get(key).MustGet()
 	if value != nil {
 		entity := &{{.Name}}{}
@@ -773,7 +811,7 @@ func (r *{{.Name | lower}}Repository) Delete(ctx context.Context, tr fdblayer.Tr
 				{{range $i, $f := $idx.Fields}}
 				{{if $f.IsRepeated}}
 				for _, item := range entity.{{$f.Name}} {
-					indexKey := dir.Pack(tuple.Tuple{typeID, "index", "{{joinFieldNames $idx.Fields}}", 
+					indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
 						{{range $j, $sf := $idx.Fields}}
 						{{if eq $j $i}} item, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
 						{{end}}
@@ -785,7 +823,7 @@ func (r *{{.Name | lower}}Repository) Delete(ctx context.Context, tr fdblayer.Tr
 				{{end}}
 				{{else}}
 				// Standard index
-				indexKey := dir.Pack(tuple.Tuple{typeID, "index", "{{joinFieldNames $idx.Fields}}", 
+				indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
 					{{range $i, $f := $idx.Fields}} {{packField (printf "entity.%s" $f.Name) $f}}, {{end}}
 					{{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
 				})
@@ -800,7 +838,7 @@ func (r *{{.Name | lower}}Repository) Delete(ctx context.Context, tr fdblayer.Tr
 	{{range .Fields}}
 	{{if .Mutation}}
 	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, {{if eq (len $.PrimaryKeyFields) 1}}{{packField "pk" (index $.PrimaryKeyFields 0)}}{{else if gt (len $.PrimaryKeyFields) 1}}{{range $i, $f := $.PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}, "f", {{.Number}}})
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{if eq (len $.PrimaryKeyFields) 1}}{{packField "pk" (index $.PrimaryKeyFields 0)}}{{else if gt (len $.PrimaryKeyFields) 1}}{{range $i, $f := $.PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}, {{.Number}}})
 		tr.Clear(fieldKey)
 	}
 	{{end}}
@@ -825,7 +863,10 @@ func (r *{{.Name | lower}}Repository) BatchGet{{.Name}}(ctx context.Context, tr 
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		keyTpl := append(tuple.Tuple{typeID}, id...)
+		keyTpl := make(tuple.Tuple, 2+len(id))
+		keyTpl[0] = typeID
+		keyTpl[1] = fdblayer.DataNamespace
+		copy(keyTpl[2:], id)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
 	}
@@ -863,20 +904,22 @@ func (r *{{.Name | lower}}Repository) List{{.Name}}(ctx context.Context, tr fdb.
 		Items: make([]*{{.Name}}, 0),
 	}
 
-	beginTpl := append(tuple.Tuple{typeID}, opts.Begin...)
+	beginTpl := make(tuple.Tuple, 2+len(opts.Begin))
+	beginTpl[0] = typeID
+	beginTpl[1] = fdblayer.DataNamespace
+	copy(beginTpl[2:], opts.Begin)
 	begin := dir.Pack(beginTpl)
 
-	// Scan all keys under typeID. We request extra rows to account for
-	// index entries that will be filtered out.
-	typePrefix := dir.Pack(tuple.Tuple{typeID})
-	typePrefixRange, err := fdb.PrefixRange(typePrefix)
+	// Scan only data keys under typeID namespace.
+	dataPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace})
+	dataPrefixRange, err := fdb.PrefixRange(dataPrefix)
 	if err != nil {
 		return nil, err
 	}
 
 	iter := tr.GetRange(fdb.KeyRange{
 		Begin: begin,
-		End:   typePrefixRange.End,
+		End:   dataPrefixRange.End,
 	}, fdb.RangeOptions{
 		Reverse: false,
 	}).Iterator()
@@ -887,17 +930,6 @@ func (r *{{.Name | lower}}Repository) List{{.Name}}(ctx context.Context, tr fdb.
 			return nil, err
 		}
 		kv := iter.MustGet()
-
-		// Skip index entries: their second tuple element is the string "index".
-		tpl, err := dir.Unpack(kv.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unpack key: %w", err)
-		}
-		if len(tpl) >= 2 {
-			if s, ok := tpl[1].(string); ok && s == "index" {
-				continue
-			}
-		}
 
 		entity := &{{.Name}}{}
 		err = proto.Unmarshal(kv.Value, entity)
@@ -919,8 +951,8 @@ func (r *{{.Name | lower}}Repository) List{{.Name}}(ctx context.Context, tr fdb.
 		if err != nil {
 			return nil, fmt.Errorf("failed to unpack next key: %w", err)
 		}
-		// Remove typeID to return just the PK tuple
-		result.NextKey = tpl[1:]
+		// Remove typeID and DataNamespace to return just the PK tuple
+		result.NextKey = tpl[2:]
 		result.Items = result.Items[:opts.Limit]
 	}
 
@@ -939,7 +971,7 @@ func (r *{{$.Name | lower}}Repository) Get{{$.Name}}By{{joinFieldNames $idx.Fiel
 	}
 
 	entities := []*{{$.Name}}{}
-	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, "index", "{{joinFieldNames $idx.Fields}}", {{range $i, $f := $idx.Fields}} {{packField $f.Name $f}}, {{end}}})
+	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, {{range $i, $f := $idx.Fields}} {{packField $f.Name $f}}, {{end}}})
 	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
 	if err != nil {
 		return nil, err
@@ -955,7 +987,10 @@ func (r *{{$.Name | lower}}Repository) Get{{$.Name}}By{{joinFieldNames $idx.Fiel
 		}
 		pkIndexStart := 3 + {{len $idx.Fields}}
 		pkTuple := tpl[pkIndexStart:]
-		keyTpl := append(tuple.Tuple{typeID}, pkTuple...)
+		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
+		keyTpl[0] = typeID
+		keyTpl[1] = fdblayer.DataNamespace
+		copy(keyTpl[2:], pkTuple)
 		key := dir.Pack(keyTpl)
 		value := tr.Get(key).MustGet()
 		if value == nil {
@@ -983,7 +1018,7 @@ func (r *{{$.Name | lower}}Repository) {{if eq .MutationValue 2}}Add{{else if eq
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, {{range $.PrimaryKeyFields}} {{packField .Name .}}, {{end}} "f", {{.Number}}})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{range $.PrimaryKeyFields}} {{packField .Name .}}, {{end}} {{.Number}}})
 	
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val))

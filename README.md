@@ -32,20 +32,24 @@ Assume we have a `User` message with `TypeID = 1` and a `Task` message with `Typ
 - *Example*: If the meta subspace is `app_meta`, the key might be `app_meta/"User"` and the value `(1)`.
 #### 2. Standard Data Record
 - **Purpose**: Stores the serialized message.
-- **Key**: `[Data Subspace] + (1, "u123")`
+- **Key**: `[Data Subspace] + (1, 0, "u123")` (Uses namespace constant `0` for data)
 - **Value**: `[Serialized User Protobuf Blob]`
-- *Example*: A user with ID `u123` is stored at key `app_data/1/"u123"`.
+- *Example*: A user with ID `u123` is stored at key `app_data/1/0/"u123"`.
 #### 3. Secondary Index
 - **Purpose**: Enables lookup by indexed fields.
-- **Key**: `[Data Subspace] + (1, "index", "email", "user@example.com", "u123")`
+- **Key**: `[Data Subspace] + (1, 1, indexID, "user@example.com", "u123")` (Uses namespace constant `1` for index, and a stable compile-time 32-bit FNV-1a hash indexID)
 - **Value**: `[]` (empty)
 - *Note*: The plugin does NOT store the whole record in the index. It stores a **reference** to the record (the primary key `"u123"`) within the index key itself.
 - *Example*: Searching for `user@example.com` will find this index key, and the trailing `"u123"` tells the plugin which record to fetch.
 #### 4. Queue Message
 - **Purpose**: Stores messages in a queue.
-- **Key**: `[Data Subspace] + (2, queue_name, shard_id, versionstamp)`
+- **Key**: `[Data Subspace] + (2, 0, queue_name, shard_id, versionstamp)` (Uses namespace constant `0` for data)
 - **Value**: `[Serialized Task Protobuf Blob]`
-- *Example*: A task in the `"high-priority"` queue (queue_name) might be stored at `app_data/2/"high-priority"/1/versionstamp`.
+- *Example*: A task in the `"high-priority"` queue (queue_name) might be stored at `app_data/2/0/"high-priority"/1/versionstamp`.
+#### 5. Atomic Field Record
+- **Purpose**: Stores atomic mutation field values.
+- **Key**: `[Data Subspace] + (1, 2, "u123", field_number)` (Uses namespace constant `2` for fields)
+- **Value**: `[8-byte binary representation of the integer value]`
 ### How to Make Data User-Local
 If you want to ensure that all data belonging to a specific user is stored together (e.g., for GDPR compliance or efficient cleanup), you can structure your directory subspaces by user ID:
 For instance, instead of a global `app_data` subspace, create a subspace per user:

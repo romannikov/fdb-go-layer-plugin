@@ -38,7 +38,7 @@ func (r *taskmessageRepository) Enqueue(ctx context.Context, tr fdblayer.Transac
 		return err
 	}
 
-	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, entity.QueueName, int64(entity.ShardId), tuple.IncompleteVersionstamp(0)})
+	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.QueueName, uint64(entity.ShardId), tuple.IncompleteVersionstamp(0)})
 	if err != nil {
 		return err
 	}
@@ -63,7 +63,7 @@ func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transac
 		return nil, err
 	}
 
-	prefixTuple := tuple.Tuple{typeID, queuename}
+	prefixTuple := tuple.Tuple{typeID, fdblayer.DataNamespace, queuename}
 	prefixRange, err := fdb.PrefixRange(dir.Pack(prefixTuple))
 	if err != nil {
 		return nil, err

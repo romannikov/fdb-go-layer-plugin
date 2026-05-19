@@ -10,6 +10,13 @@ import (
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 )
 
+// Partition namespaces under the typeID prefix.
+const (
+	DataNamespace  int64 = 0
+	IndexNamespace int64 = 1
+	FieldNamespace int64 = 2
+)
+
 // Transaction is a mockable interface that abstracts fdb.Transaction
 type Transaction interface {
 	fdb.ReadTransaction

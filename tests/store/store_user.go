@@ -57,7 +57,7 @@ func (r *userRepository) Create(ctx context.Context, tr fdblayer.Transaction, di
 		return err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, entity.Id})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
 
 	// Save atomic fields and zero them out for marshaling
 
@@ -75,7 +75,7 @@ func (r *userRepository) Create(ctx context.Context, tr fdblayer.Transaction, di
 	{
 
 		// Standard index
-		indexKey := dir.Pack(tuple.Tuple{typeID, "index", "Email",
+		indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615,
 			entity.Email,
 			entity.Id,
 		})
@@ -96,7 +96,7 @@ func (r *userRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir di
 		return nil, err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, pk})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
 	value := tr.Get(key).MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("user not found")
@@ -122,7 +122,7 @@ func (r *userRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 		return err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, entity.Id})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
 
 	// Clear stale index entries from the old version of the entity
 	oldValue := tr.Get(key).MustGet()
@@ -133,7 +133,7 @@ func (r *userRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 			{
 
 				// Standard index
-				oldIndexKey := dir.Pack(tuple.Tuple{typeID, "index", "Email",
+				oldIndexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615,
 					old.Email,
 					old.Id,
 				})
@@ -160,7 +160,7 @@ func (r *userRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 	{
 
 		// Standard index
-		indexKey := dir.Pack(tuple.Tuple{typeID, "index", "Email",
+		indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615,
 			entity.Email,
 			entity.Id,
 		})
@@ -181,7 +181,7 @@ func (r *userRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 		return err
 	}
 
-	key := dir.Pack(tuple.Tuple{typeID, pk})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
 	value := tr.Get(key).MustGet()
 	if value != nil {
 		entity := &User{}
@@ -191,7 +191,7 @@ func (r *userRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 			{
 
 				// Standard index
-				indexKey := dir.Pack(tuple.Tuple{typeID, "index", "Email",
+				indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615,
 					entity.Email,
 					entity.Id,
 				})
@@ -224,7 +224,10 @@ func (r *userRepository) BatchGetUser(ctx context.Context, tr fdb.ReadTransactio
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		keyTpl := append(tuple.Tuple{typeID}, id...)
+		keyTpl := make(tuple.Tuple, 2+len(id))
+		keyTpl[0] = typeID
+		keyTpl[1] = fdblayer.DataNamespace
+		copy(keyTpl[2:], id)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
 	}
@@ -262,20 +265,22 @@ func (r *userRepository) ListUser(ctx context.Context, tr fdb.ReadTransaction, d
 		Items: make([]*User, 0),
 	}
 
-	beginTpl := append(tuple.Tuple{typeID}, opts.Begin...)
+	beginTpl := make(tuple.Tuple, 2+len(opts.Begin))
+	beginTpl[0] = typeID
+	beginTpl[1] = fdblayer.DataNamespace
+	copy(beginTpl[2:], opts.Begin)
 	begin := dir.Pack(beginTpl)
 
-	// Scan all keys under typeID. We request extra rows to account for
-	// index entries that will be filtered out.
-	typePrefix := dir.Pack(tuple.Tuple{typeID})
-	typePrefixRange, err := fdb.PrefixRange(typePrefix)
+	// Scan only data keys under typeID namespace.
+	dataPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace})
+	dataPrefixRange, err := fdb.PrefixRange(dataPrefix)
 	if err != nil {
 		return nil, err
 	}
 
 	iter := tr.GetRange(fdb.KeyRange{
 		Begin: begin,
-		End:   typePrefixRange.End,
+		End:   dataPrefixRange.End,
 	}, fdb.RangeOptions{
 		Reverse: false,
 	}).Iterator()
@@ -286,17 +291,6 @@ func (r *userRepository) ListUser(ctx context.Context, tr fdb.ReadTransaction, d
 			return nil, err
 		}
 		kv := iter.MustGet()
-
-		// Skip index entries: their second tuple element is the string "index".
-		tpl, err := dir.Unpack(kv.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unpack key: %w", err)
-		}
-		if len(tpl) >= 2 {
-			if s, ok := tpl[1].(string); ok && s == "index" {
-				continue
-			}
-		}
 
 		entity := &User{}
 		err = proto.Unmarshal(kv.Value, entity)
@@ -318,8 +312,8 @@ func (r *userRepository) ListUser(ctx context.Context, tr fdb.ReadTransaction, d
 		if err != nil {
 			return nil, fmt.Errorf("failed to unpack next key: %w", err)
 		}
-		// Remove typeID to return just the PK tuple
-		result.NextKey = tpl[1:]
+		// Remove typeID and DataNamespace to return just the PK tuple
+		result.NextKey = tpl[2:]
 		result.Items = result.Items[:opts.Limit]
 	}
 
@@ -337,7 +331,7 @@ func (r *userRepository) GetUserByEmail(ctx context.Context, tr fdb.ReadTransact
 	}
 
 	entities := []*User{}
-	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, "index", "Email", Email})
+	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, Email})
 	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
 	if err != nil {
 		return nil, err
@@ -353,7 +347,10 @@ func (r *userRepository) GetUserByEmail(ctx context.Context, tr fdb.ReadTransact
 		}
 		pkIndexStart := 3 + 1
 		pkTuple := tpl[pkIndexStart:]
-		keyTpl := append(tuple.Tuple{typeID}, pkTuple...)
+		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
+		keyTpl[0] = typeID
+		keyTpl[1] = fdblayer.DataNamespace
+		copy(keyTpl[2:], pkTuple)
 		key := dir.Pack(keyTpl)
 		value := tr.Get(key).MustGet()
 		if value == nil {

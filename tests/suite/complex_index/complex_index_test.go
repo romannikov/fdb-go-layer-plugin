@@ -9,6 +9,7 @@ import (
 
 	"github.com/romannikov/fdb-go-layer-plugin/tests"
 	"github.com/romannikov/fdb-go-layer-plugin/tests/store"
+	fdblayer "github.com/romannikov/fdb-go-layer-plugin/fdb-layer"
 )
 
 func init() {
@@ -35,7 +36,7 @@ func TestFanOutIndex(t *testing.T) {
 	typeID := recordStore.Metadata()["Post"]
 
 	for _, tag := range post.Tags {
-		indexKey := dir.Pack(tuple.Tuple{typeID, "index", "Tags", tag, post.Id})
+		indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(4095142816), tag, post.Id})
 		if !kv.HasKey(indexKey) {
 			t.Errorf("Missing index entry for tag %s", tag)
 		}
@@ -67,7 +68,7 @@ func TestVersionstampedPrimaryKey(t *testing.T) {
 		TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
 		UserVersion:        0,
 	}
-	expectedKey := dir.Pack(tuple.Tuple{typeID, "email_queue", int64(1), dummyVS})
+	expectedKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "email_queue", uint64(1), dummyVS})
 
 	if !kv.HasKey(expectedKey) {
 		t.Fatalf("Expected key not found in mock store: %v", expectedKey)
