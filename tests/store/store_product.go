@@ -83,7 +83,9 @@ func (r *productRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
-	value := tr.Get(key).MustGet()
+	valueFuture := tr.Get(key)
+
+	value := valueFuture.MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("product not found")
 	}
@@ -113,8 +115,10 @@ func (r *productRepository) Set(ctx context.Context, tr fdblayer.Transaction, di
 	if oldValue != nil {
 		old := &Product{}
 		if unmarshalErr := proto.Unmarshal(oldValue, old); unmarshalErr == nil {
-			// Standard index
-			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 3475980913, old.Category, old.Id}))
+			// Standard index (only clear if indexed field value changed)
+			if old.Category != entity.Category {
+				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 3475980913, old.Category, old.Id}))
+			}
 
 		}
 	}
@@ -180,6 +184,7 @@ func (r *productRepository) BatchGetProduct(ctx context.Context, tr fdb.ReadTran
 		copy(keyTpl[2:], id)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
+
 	}
 
 	for i, future := range futures {
@@ -195,6 +200,7 @@ func (r *productRepository) BatchGetProduct(ctx context.Context, tr fdb.ReadTran
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
+
 		result[ids[i].String()] = entity
 	}
 
@@ -228,12 +234,17 @@ func (r *productRepository) ListProduct(ctx context.Context, tr fdb.ReadTransact
 		return nil, err
 	}
 
+	rangeOpts := fdb.RangeOptions{
+		Reverse: false,
+	}
+	if opts.Limit > 0 {
+		rangeOpts.Limit = opts.Limit + 1
+	}
+
 	iter := tr.GetRange(fdb.KeyRange{
 		Begin: begin,
 		End:   dataPrefixRange.End,
-	}, fdb.RangeOptions{
-		Reverse: false,
-	}).Iterator()
+	}, rangeOpts).Iterator()
 
 	var nextKey fdb.Key
 	for iter.Advance() {
@@ -287,7 +298,9 @@ func (r *productRepository) GetProductByCategory(ctx context.Context, tr fdb.Rea
 		return nil, err
 	}
 	kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
-	for _, kv := range kvs {
+	futures := make([]fdb.FutureByteSlice, len(kvs))
+
+	for i, kv := range kvs {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -302,7 +315,14 @@ func (r *productRepository) GetProductByCategory(ctx context.Context, tr fdb.Rea
 		keyTpl[1] = fdblayer.DataNamespace
 		copy(keyTpl[2:], pkTuple)
 		key := dir.Pack(keyTpl)
-		value := tr.Get(key).MustGet()
+		futures[i] = tr.Get(key)
+
+	}
+	for _, future := range futures {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		value := future.MustGet()
 		if value == nil {
 			continue
 		}
@@ -311,6 +331,7 @@ func (r *productRepository) GetProductByCategory(ctx context.Context, tr fdb.Rea
 		if err != nil {
 			return nil, err
 		}
+
 		entities = append(entities, entity)
 	}
 	return entities, nil

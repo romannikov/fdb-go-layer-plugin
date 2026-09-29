@@ -638,7 +638,16 @@ func (r *{{.Name | lower}}Repository) Get(ctx context.Context, tr fdb.ReadTransa
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, {{if eq (len .PrimaryKeyFields) 1}}{{packField "pk" (index .PrimaryKeyFields 0)}}{{else if gt (len .PrimaryKeyFields) 1}}{{range $i, $f := .PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}})
-	value := tr.Get(key).MustGet()
+	valueFuture := tr.Get(key)
+	{{if hasMutationFields . -}}
+	// Issue atomic field reads concurrently with the primary record read
+	{{range .Fields -}}
+	{{if .Mutation -}}
+	fieldFuture_{{.Name}} := tr.Get(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{if eq (len $.PrimaryKeyFields) 1}}{{packField "pk" (index $.PrimaryKeyFields 0)}}{{else if gt (len $.PrimaryKeyFields) 1}}{{range $i, $f := $.PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}, {{.Number}}}))
+	{{end -}}
+	{{end -}}
+	{{- end}}
+	value := valueFuture.MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("{{.Name | lower}} not found")
 	}
@@ -649,15 +658,10 @@ func (r *{{.Name | lower}}Repository) Get(ctx context.Context, tr fdb.ReadTransa
 	}
 
 	{{if hasMutationFields . -}}
-	// Read atomic fields
 	{{range .Fields -}}
 	{{if .Mutation -}}
-	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{if eq (len $.PrimaryKeyFields) 1}}{{packField "pk" (index $.PrimaryKeyFields 0)}}{{else if gt (len $.PrimaryKeyFields) 1}}{{range $i, $f := $.PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}, {{.Number}}})
-		fieldVal := tr.Get(fieldKey).MustGet()
-		if fieldVal != nil {
-			entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
-		}
+	if fieldVal := fieldFuture_{{.Name}}.MustGet(); fieldVal != nil {
+		entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
 	}
 	{{end -}}
 	{{end -}}
@@ -697,6 +701,7 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 	{{else}}
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, {{range .PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}})
 
+	{{if gt (len .SecondaryIndexes) 0 -}}
 	// Clear stale index entries from the old version of the entity
 	oldValue := tr.Get(key).MustGet()
 	if oldValue != nil {
@@ -718,15 +723,18 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 			{{- end}}
 			{{- end}}
 			{{- else -}}
-			// Standard index
-			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}},
-				{{- range $i, $f := $idx.Fields}} {{packField (printf "old.%s" $f.Name) $f}}, {{end}}
-				{{- range $.PrimaryKeyFields}} {{packField (printf "old.%s" .Name) .}}, {{end}}
-			}))
+			// Standard index (only clear if indexed field value changed)
+			if {{range $i, $f := $idx.Fields}}{{if $i}} || {{end}}old.{{$f.Name}} != entity.{{$f.Name}}{{end}} {
+				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}},
+					{{- range $i, $f := $idx.Fields}} {{packField (printf "old.%s" $f.Name) $f}}, {{end}}
+					{{- range $.PrimaryKeyFields}} {{packField (printf "old.%s" .Name) .}}, {{end}}
+				}))
+			}
 			{{- end}}
 			{{end}}
 		}
 	}
+	{{- end}}
 	{{end}}
 
 	{{if hasMutationFields . -}}
@@ -810,6 +818,7 @@ func (r *{{.Name | lower}}Repository) Delete(ctx context.Context, tr fdblayer.Tr
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, {{if eq (len .PrimaryKeyFields) 1}}{{packField "pk" (index .PrimaryKeyFields 0)}}{{else if gt (len .PrimaryKeyFields) 1}}{{range $i, $f := .PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}})
+	{{if gt (len .SecondaryIndexes) 0 -}}
 	value := tr.Get(key).MustGet()
 	if value != nil {
 		entity := &{{.Name}}{}
@@ -840,6 +849,7 @@ func (r *{{.Name | lower}}Repository) Delete(ctx context.Context, tr fdblayer.Tr
 			{{end -}}
 		}
 	}
+	{{- end}}
 	tr.Clear(key)
 
 	{{if hasMutationFields . -}}
@@ -868,6 +878,13 @@ func (r *{{.Name | lower}}Repository) BatchGet{{.Name}}(ctx context.Context, tr 
 
 	result := make(map[string]*{{.Name}})
 	futures := make([]fdb.FutureByteSlice, len(ids))
+	{{if hasMutationFields . -}}
+	{{range .Fields -}}
+	{{if .Mutation -}}
+	fieldFutures_{{.Name}} := make([]fdb.FutureByteSlice, len(ids))
+	{{end -}}
+	{{end -}}
+	{{- end}}
 
 	for i, id := range ids {
 		if err := ctx.Err(); err != nil {
@@ -879,6 +896,20 @@ func (r *{{.Name | lower}}Repository) BatchGet{{.Name}}(ctx context.Context, tr 
 		copy(keyTpl[2:], id)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
+		{{if hasMutationFields . -}}
+		{{range .Fields -}}
+		{{if .Mutation -}}
+		{
+			fieldTpl := make(tuple.Tuple, 3+len(id))
+			fieldTpl[0] = typeID
+			fieldTpl[1] = fdblayer.FieldNamespace
+			copy(fieldTpl[2:], id)
+			fieldTpl[2+len(id)] = {{.Number}}
+			fieldFutures_{{.Name}}[i] = tr.Get(dir.Pack(fieldTpl))
+		}
+		{{end -}}
+		{{end -}}
+		{{- end}}
 	}
 
 	for i, future := range futures {
@@ -894,6 +925,15 @@ func (r *{{.Name | lower}}Repository) BatchGet{{.Name}}(ctx context.Context, tr 
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
+		{{if hasMutationFields . -}}
+		{{range .Fields -}}
+		{{if .Mutation -}}
+		if fieldVal := fieldFutures_{{.Name}}[i].MustGet(); fieldVal != nil {
+			entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
+		}
+		{{end -}}
+		{{end -}}
+		{{- end}}
 		result[ids[i].String()] = entity
 	}
 
@@ -927,12 +967,17 @@ func (r *{{.Name | lower}}Repository) List{{.Name}}(ctx context.Context, tr fdb.
 		return nil, err
 	}
 
+	rangeOpts := fdb.RangeOptions{
+		Reverse: false,
+	}
+	if opts.Limit > 0 {
+		rangeOpts.Limit = opts.Limit + 1
+	}
+
 	iter := tr.GetRange(fdb.KeyRange{
 		Begin: begin,
 		End:   dataPrefixRange.End,
-	}, fdb.RangeOptions{
-		Reverse: false,
-	}).Iterator()
+	}, rangeOpts).Iterator()
 
 	var nextKey fdb.Key
 	for iter.Advance() {
@@ -966,6 +1011,31 @@ func (r *{{.Name | lower}}Repository) List{{.Name}}(ctx context.Context, tr fdb.
 		result.Items = result.Items[:opts.Limit]
 	}
 
+	{{if hasMutationFields . -}}
+	// Populate atomic fields for returned items (pipelined)
+	{{range .Fields -}}
+	{{if .Mutation -}}
+	fieldFutures_{{.Name}} := make([]fdb.FutureByteSlice, len(result.Items))
+	{{end -}}
+	{{end -}}
+	for i, entity := range result.Items {
+		{{range .Fields -}}
+		{{if .Mutation -}}
+		fieldFutures_{{.Name}}[i] = tr.Get(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}} {{.Number}}}))
+		{{end -}}
+		{{end -}}
+	}
+	for i, entity := range result.Items {
+		{{range .Fields -}}
+		{{if .Mutation -}}
+		if fieldVal := fieldFutures_{{.Name}}[i].MustGet(); fieldVal != nil {
+			entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
+		}
+		{{end -}}
+		{{end -}}
+	}
+	{{- end}}
+
 	return result, nil
 }
 
@@ -987,7 +1057,15 @@ func (r *{{$.Name | lower}}Repository) Get{{$.Name}}By{{joinFieldNames $idx.Fiel
 		return nil, err
 	}
 	kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
-	for _, kv := range kvs {
+	futures := make([]fdb.FutureByteSlice, len(kvs))
+	{{if hasMutationFields $ -}}
+	{{range $.Fields -}}
+	{{if .Mutation -}}
+	fieldFutures_{{.Name}} := make([]fdb.FutureByteSlice, len(kvs))
+	{{end -}}
+	{{end -}}
+	{{- end}}
+	for i, kv := range kvs {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -1002,7 +1080,27 @@ func (r *{{$.Name | lower}}Repository) Get{{$.Name}}By{{joinFieldNames $idx.Fiel
 		keyTpl[1] = fdblayer.DataNamespace
 		copy(keyTpl[2:], pkTuple)
 		key := dir.Pack(keyTpl)
-		value := tr.Get(key).MustGet()
+		futures[i] = tr.Get(key)
+		{{if hasMutationFields $ -}}
+		{{range $.Fields -}}
+		{{if .Mutation -}}
+		{
+			fieldTpl := make(tuple.Tuple, 3+len(pkTuple))
+			fieldTpl[0] = typeID
+			fieldTpl[1] = fdblayer.FieldNamespace
+			copy(fieldTpl[2:], pkTuple)
+			fieldTpl[2+len(pkTuple)] = {{.Number}}
+			fieldFutures_{{.Name}}[i] = tr.Get(dir.Pack(fieldTpl))
+		}
+		{{end -}}
+		{{end -}}
+		{{- end}}
+	}
+	for {{if hasMutationFields $}}i{{else}}_{{end}}, future := range futures {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		value := future.MustGet()
 		if value == nil {
 			continue
 		}
@@ -1011,6 +1109,15 @@ func (r *{{$.Name | lower}}Repository) Get{{$.Name}}By{{joinFieldNames $idx.Fiel
 		if err != nil {
 			return nil, err
 		}
+		{{if hasMutationFields $ -}}
+		{{range $.Fields -}}
+		{{if .Mutation -}}
+		if fieldVal := fieldFutures_{{.Name}}[i].MustGet(); fieldVal != nil {
+			entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
+		}
+		{{end -}}
+		{{end -}}
+		{{- end}}
 		entities = append(entities, entity)
 	}
 	return entities, nil

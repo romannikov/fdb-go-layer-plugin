@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
+	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 
 	fdblayer "github.com/romannikov/fdb-go-layer-plugin/fdb-layer"
 	"github.com/romannikov/fdb-go-layer-plugin/tests"
@@ -114,5 +115,32 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	})
 	if retrieved.MinValue != 2 {
 		t.Fatalf("expected min_value 2, got %d", retrieved.MinValue)
+	}
+
+	// 5. Verify BatchGetCounter populates atomic fields
+	var batchRes map[string]*atomic.Counter
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		batchRes, err = counterRepo.BatchGetCounter(ctx, tr, dir, []tuple.Tuple{{"c1"}})
+		return err
+	})
+	batchItem := batchRes[`("c1")`]
+	if batchItem == nil || batchItem.Value != 15 || batchItem.MaxValue != 150 || batchItem.MinValue != 2 {
+		t.Fatalf("BatchGetCounter did not populate atomic fields: %+v", batchItem)
+	}
+
+	// 6. Verify ListCounter populates atomic fields
+	var listRes *atomic.CounterPaginatedResult
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		listRes, err = counterRepo.ListCounter(ctx, tr, dir, atomic.CounterPaginationOptions{Limit: 10})
+		return err
+	})
+	if len(listRes.Items) != 1 {
+		t.Fatalf("expected 1 counter in ListCounter, got %d", len(listRes.Items))
+	}
+	listItem := listRes.Items[0]
+	if listItem.Value != 15 || listItem.MaxValue != 150 || listItem.MinValue != 2 {
+		t.Fatalf("ListCounter did not populate atomic fields: %+v", listItem)
 	}
 }

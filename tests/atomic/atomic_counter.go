@@ -64,13 +64,10 @@ func (r *counterRepository) Create(ctx context.Context, tr fdblayer.Transaction,
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
 
 	// Save atomic fields and zero them out for marshaling
-
 	atomic_Value := entity.Value
 	entity.Value = 0
-
 	atomic_MaxValue := entity.MaxValue
 	entity.MaxValue = 0
-
 	atomic_MinValue := entity.MinValue
 	entity.MinValue = 0
 
@@ -80,31 +77,25 @@ func (r *counterRepository) Create(ctx context.Context, tr fdblayer.Transaction,
 	}
 
 	// Restore atomic fields
-
 	entity.Value = atomic_Value
-
 	entity.MaxValue = atomic_MaxValue
-
 	entity.MinValue = atomic_MinValue
 
 	tr.Set(key, value)
 
 	// Store atomic fields in separate keys
-
 	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 2})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_Value))
 		tr.Set(fieldKey, buf)
 	}
-
 	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 3})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_MaxValue))
 		tr.Set(fieldKey, buf)
 	}
-
 	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 4})
 		buf := make([]byte, 8)
@@ -126,7 +117,13 @@ func (r *counterRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
-	value := tr.Get(key).MustGet()
+	valueFuture := tr.Get(key)
+	// Issue atomic field reads concurrently with the primary record read
+	fieldFuture_Value := tr.Get(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 2}))
+	fieldFuture_MaxValue := tr.Get(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 3}))
+	fieldFuture_MinValue := tr.Get(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 4}))
+
+	value := valueFuture.MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("counter not found")
 	}
@@ -136,30 +133,14 @@ func (r *counterRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir
 		return nil, err
 	}
 
-	// Read atomic fields
-
-	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 2})
-		fieldVal := tr.Get(fieldKey).MustGet()
-		if fieldVal != nil {
-			entity.Value = int64(binary.LittleEndian.Uint64(fieldVal))
-		}
+	if fieldVal := fieldFuture_Value.MustGet(); fieldVal != nil {
+		entity.Value = int64(binary.LittleEndian.Uint64(fieldVal))
 	}
-
-	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 3})
-		fieldVal := tr.Get(fieldKey).MustGet()
-		if fieldVal != nil {
-			entity.MaxValue = int64(binary.LittleEndian.Uint64(fieldVal))
-		}
+	if fieldVal := fieldFuture_MaxValue.MustGet(); fieldVal != nil {
+		entity.MaxValue = int64(binary.LittleEndian.Uint64(fieldVal))
 	}
-
-	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 4})
-		fieldVal := tr.Get(fieldKey).MustGet()
-		if fieldVal != nil {
-			entity.MinValue = int64(binary.LittleEndian.Uint64(fieldVal))
-		}
+	if fieldVal := fieldFuture_MinValue.MustGet(); fieldVal != nil {
+		entity.MinValue = int64(binary.LittleEndian.Uint64(fieldVal))
 	}
 
 	return entity, nil
@@ -177,23 +158,11 @@ func (r *counterRepository) Set(ctx context.Context, tr fdblayer.Transaction, di
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
 
-	// Clear stale index entries from the old version of the entity
-	oldValue := tr.Get(key).MustGet()
-	if oldValue != nil {
-		old := &Counter{}
-		if unmarshalErr := proto.Unmarshal(oldValue, old); unmarshalErr == nil {
-
-		}
-	}
-
 	// Save atomic fields and zero them out for marshaling
-
 	atomic_Value := entity.Value
 	entity.Value = 0
-
 	atomic_MaxValue := entity.MaxValue
 	entity.MaxValue = 0
-
 	atomic_MinValue := entity.MinValue
 	entity.MinValue = 0
 
@@ -203,31 +172,25 @@ func (r *counterRepository) Set(ctx context.Context, tr fdblayer.Transaction, di
 	}
 
 	// Restore atomic fields
-
 	entity.Value = atomic_Value
-
 	entity.MaxValue = atomic_MaxValue
-
 	entity.MinValue = atomic_MinValue
 
 	tr.Set(key, value)
 
 	// Store atomic fields in separate keys
-
 	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 2})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_Value))
 		tr.Set(fieldKey, buf)
 	}
-
 	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 3})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_MaxValue))
 		tr.Set(fieldKey, buf)
 	}
-
 	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 4})
 		buf := make([]byte, 8)
@@ -249,27 +212,18 @@ func (r *counterRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
-	value := tr.Get(key).MustGet()
-	if value != nil {
-		entity := &Counter{}
-		err := proto.Unmarshal(value, entity)
-		if err == nil {
 
-		}
-	}
 	tr.Clear(key)
-	// Clear atomic fields
 
+	// Clear atomic fields
 	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 2})
 		tr.Clear(fieldKey)
 	}
-
 	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 3})
 		tr.Clear(fieldKey)
 	}
-
 	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 4})
 		tr.Clear(fieldKey)
@@ -290,6 +244,9 @@ func (r *counterRepository) BatchGetCounter(ctx context.Context, tr fdb.ReadTran
 
 	result := make(map[string]*Counter)
 	futures := make([]fdb.FutureByteSlice, len(ids))
+	fieldFutures_Value := make([]fdb.FutureByteSlice, len(ids))
+	fieldFutures_MaxValue := make([]fdb.FutureByteSlice, len(ids))
+	fieldFutures_MinValue := make([]fdb.FutureByteSlice, len(ids))
 
 	for i, id := range ids {
 		if err := ctx.Err(); err != nil {
@@ -301,6 +258,31 @@ func (r *counterRepository) BatchGetCounter(ctx context.Context, tr fdb.ReadTran
 		copy(keyTpl[2:], id)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
+		{
+			fieldTpl := make(tuple.Tuple, 3+len(id))
+			fieldTpl[0] = typeID
+			fieldTpl[1] = fdblayer.FieldNamespace
+			copy(fieldTpl[2:], id)
+			fieldTpl[2+len(id)] = 2
+			fieldFutures_Value[i] = tr.Get(dir.Pack(fieldTpl))
+		}
+		{
+			fieldTpl := make(tuple.Tuple, 3+len(id))
+			fieldTpl[0] = typeID
+			fieldTpl[1] = fdblayer.FieldNamespace
+			copy(fieldTpl[2:], id)
+			fieldTpl[2+len(id)] = 3
+			fieldFutures_MaxValue[i] = tr.Get(dir.Pack(fieldTpl))
+		}
+		{
+			fieldTpl := make(tuple.Tuple, 3+len(id))
+			fieldTpl[0] = typeID
+			fieldTpl[1] = fdblayer.FieldNamespace
+			copy(fieldTpl[2:], id)
+			fieldTpl[2+len(id)] = 4
+			fieldFutures_MinValue[i] = tr.Get(dir.Pack(fieldTpl))
+		}
+
 	}
 
 	for i, future := range futures {
@@ -316,6 +298,16 @@ func (r *counterRepository) BatchGetCounter(ctx context.Context, tr fdb.ReadTran
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
+		if fieldVal := fieldFutures_Value[i].MustGet(); fieldVal != nil {
+			entity.Value = int64(binary.LittleEndian.Uint64(fieldVal))
+		}
+		if fieldVal := fieldFutures_MaxValue[i].MustGet(); fieldVal != nil {
+			entity.MaxValue = int64(binary.LittleEndian.Uint64(fieldVal))
+		}
+		if fieldVal := fieldFutures_MinValue[i].MustGet(); fieldVal != nil {
+			entity.MinValue = int64(binary.LittleEndian.Uint64(fieldVal))
+		}
+
 		result[ids[i].String()] = entity
 	}
 
@@ -349,12 +341,17 @@ func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransact
 		return nil, err
 	}
 
+	rangeOpts := fdb.RangeOptions{
+		Reverse: false,
+	}
+	if opts.Limit > 0 {
+		rangeOpts.Limit = opts.Limit + 1
+	}
+
 	iter := tr.GetRange(fdb.KeyRange{
 		Begin: begin,
 		End:   dataPrefixRange.End,
-	}, fdb.RangeOptions{
-		Reverse: false,
-	}).Iterator()
+	}, rangeOpts).Iterator()
 
 	var nextKey fdb.Key
 	for iter.Advance() {
@@ -386,6 +383,27 @@ func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransact
 		// Remove typeID and DataNamespace to return just the PK tuple
 		result.NextKey = tpl[2:]
 		result.Items = result.Items[:opts.Limit]
+	}
+
+	// Populate atomic fields for returned items (pipelined)
+	fieldFutures_Value := make([]fdb.FutureByteSlice, len(result.Items))
+	fieldFutures_MaxValue := make([]fdb.FutureByteSlice, len(result.Items))
+	fieldFutures_MinValue := make([]fdb.FutureByteSlice, len(result.Items))
+	for i, entity := range result.Items {
+		fieldFutures_Value[i] = tr.Get(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 2}))
+		fieldFutures_MaxValue[i] = tr.Get(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 3}))
+		fieldFutures_MinValue[i] = tr.Get(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 4}))
+	}
+	for i, entity := range result.Items {
+		if fieldVal := fieldFutures_Value[i].MustGet(); fieldVal != nil {
+			entity.Value = int64(binary.LittleEndian.Uint64(fieldVal))
+		}
+		if fieldVal := fieldFutures_MaxValue[i].MustGet(); fieldVal != nil {
+			entity.MaxValue = int64(binary.LittleEndian.Uint64(fieldVal))
+		}
+		if fieldVal := fieldFutures_MinValue[i].MustGet(); fieldVal != nil {
+			entity.MinValue = int64(binary.LittleEndian.Uint64(fieldVal))
+		}
 	}
 
 	return result, nil
