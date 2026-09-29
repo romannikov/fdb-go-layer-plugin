@@ -37,6 +37,36 @@ type GenericRepository[T any, PK any] interface {
 	Delete(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, pk PK) error
 }
 
+type rangeSliceReader interface {
+	GetRangeSlice(r fdb.Range, options fdb.RangeOptions) []fdb.KeyValue
+}
+
+// RangeFuture wraps an asynchronous fdb.RangeResult (for real FoundationDB
+// transactions, starting the range read immediately upon creation) or a slice
+// returned by a mock transaction implementing GetRangeSlice.
+type RangeFuture struct {
+	rr     fdb.RangeResult
+	slice  []fdb.KeyValue
+	isMock bool
+}
+
+// GetRange starts an asynchronous range read on tr (or reads via GetRangeSlice
+// when tr is a mock transaction in unit tests).
+func GetRange(tr fdb.ReadTransaction, r fdb.Range, opts fdb.RangeOptions) RangeFuture {
+	if mockTr, ok := tr.(rangeSliceReader); ok {
+		return RangeFuture{slice: mockTr.GetRangeSlice(r, opts), isMock: true}
+	}
+	return RangeFuture{rr: tr.GetRange(r, opts)}
+}
+
+// GetSliceOrPanic blocks until the range read completes and returns all KeyValues.
+func (rf RangeFuture) GetSliceOrPanic() []fdb.KeyValue {
+	if rf.isMock {
+		return rf.slice
+	}
+	return rf.rr.GetSliceOrPanic()
+}
+
 // RecordStore holds metadata mapping between message names and their integer type IDs.
 type RecordStore struct {
 	mu             sync.RWMutex

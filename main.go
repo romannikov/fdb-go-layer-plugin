@@ -678,12 +678,12 @@ func (r *{{.Name | lower}}Repository) Get(ctx context.Context, tr fdb.ReadTransa
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, {{if eq (len .PrimaryKeyFields) 1}}{{packField "pk" (index .PrimaryKeyFields 0)}}{{else if gt (len .PrimaryKeyFields) 1}}{{range $i, $f := .PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}})
 	valueFuture := tr.Get(key)
 	{{if hasMutationFields . -}}
-	// Issue atomic field reads concurrently with the primary record read
-	{{range .Fields -}}
-	{{if .Mutation -}}
-	fieldFuture_{{.Name}} := tr.Get(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{if eq (len $.PrimaryKeyFields) 1}}{{packField "pk" (index $.PrimaryKeyFields 0)}}{{else if gt (len $.PrimaryKeyFields) 1}}{{range $i, $f := $.PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}, {{.Number}}}))
-	{{end -}}
-	{{end -}}
+	// Issue a single prefix range read for all atomic fields concurrently with the primary record read
+	fieldPrefixRange, err := fdb.PrefixRange(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{if eq (len .PrimaryKeyFields) 1}}{{packField "pk" (index .PrimaryKeyFields 0)}}{{else if gt (len .PrimaryKeyFields) 1}}{{range $i, $f := .PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}}))
+	if err != nil {
+		return nil, err
+	}
+	fieldFuture := fdblayer.GetRange(tr, fieldPrefixRange, fdb.RangeOptions{})
 	{{- end}}
 	value := valueFuture.MustGet()
 	if value == nil {
@@ -696,13 +696,27 @@ func (r *{{.Name | lower}}Repository) Get(ctx context.Context, tr fdb.ReadTransa
 	}
 
 	{{if hasMutationFields . -}}
-	{{range .Fields -}}
-	{{if .Mutation -}}
-	if fieldVal := fieldFuture_{{.Name}}.MustGet(); fieldVal != nil {
-		entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
+	for _, fkv := range fieldFuture.GetSliceOrPanic() {
+		if len(fkv.Value) < 8 {
+			continue
+		}
+		ftpl, err := dir.Unpack(fkv.Key)
+		if err != nil || len(ftpl) == 0 {
+			continue
+		}
+		fieldNum, ok := ftpl[len(ftpl)-1].(int64)
+		if !ok {
+			continue
+		}
+		switch fieldNum {
+		{{range .Fields -}}
+		{{if .Mutation -}}
+		case {{.Number}}:
+			entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fkv.Value))
+		{{end -}}
+		{{end -}}
+		}
 	}
-	{{end -}}
-	{{end -}}
 	{{- end}}
 	return entity, nil
 }
@@ -786,8 +800,7 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 	{{- end}}
 
 	value, err := proto.Marshal(entity)
-
-	{{if hasMutationFields . -}}
+	{{- if hasMutationFields .}}
 	// Restore atomic fields
 	{{range .Fields -}}
 	{{if .Mutation -}}
@@ -795,7 +808,6 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 	{{end -}}
 	{{end -}}
 	{{- end}}
-
 	if err != nil {
 		return err
 	}
@@ -904,11 +916,7 @@ func (r *{{.Name | lower}}Repository) BatchGet{{.Name}}(ctx context.Context, tr 
 	result := make(map[string]*{{.Name}})
 	futures := make([]fdb.FutureByteSlice, len(ids))
 	{{if hasMutationFields . -}}
-	{{range .Fields -}}
-	{{if .Mutation -}}
-	fieldFutures_{{.Name}} := make([]fdb.FutureByteSlice, len(ids))
-	{{end -}}
-	{{end -}}
+	fieldFutures := make([]fdblayer.RangeFuture, len(ids))
 	{{- end}}
 
 	for i, id := range ids {
@@ -922,18 +930,15 @@ func (r *{{.Name | lower}}Repository) BatchGet{{.Name}}(ctx context.Context, tr 
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
 		{{if hasMutationFields . -}}
-		{{range .Fields -}}
-		{{if .Mutation -}}
-		{
-			fieldTpl := make(tuple.Tuple, 3+len(id))
-			fieldTpl[0] = typeID
-			fieldTpl[1] = fdblayer.FieldNamespace
-			copy(fieldTpl[2:], id)
-			fieldTpl[2+len(id)] = {{.Number}}
-			fieldFutures_{{.Name}}[i] = tr.Get(dir.Pack(fieldTpl))
+		fieldTpl := make(tuple.Tuple, 2+len(id))
+		fieldTpl[0] = typeID
+		fieldTpl[1] = fdblayer.FieldNamespace
+		copy(fieldTpl[2:], id)
+		fieldRange, err := fdb.PrefixRange(dir.Pack(fieldTpl))
+		if err != nil {
+			return nil, err
 		}
-		{{end -}}
-		{{end -}}
+		fieldFutures[i] = fdblayer.GetRange(tr, fieldRange, fdb.RangeOptions{})
 		{{- end}}
 	}
 
@@ -951,13 +956,27 @@ func (r *{{.Name | lower}}Repository) BatchGet{{.Name}}(ctx context.Context, tr 
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
 		{{if hasMutationFields . -}}
-		{{range .Fields -}}
-		{{if .Mutation -}}
-		if fieldVal := fieldFutures_{{.Name}}[i].MustGet(); fieldVal != nil {
-			entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
+		for _, fkv := range fieldFutures[i].GetSliceOrPanic() {
+			if len(fkv.Value) < 8 {
+				continue
+			}
+			ftpl, err := dir.Unpack(fkv.Key)
+			if err != nil || len(ftpl) == 0 {
+				continue
+			}
+			fieldNum, ok := ftpl[len(ftpl)-1].(int64)
+			if !ok {
+				continue
+			}
+			switch fieldNum {
+			{{range .Fields -}}
+			{{if .Mutation -}}
+			case {{.Number}}:
+				entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fkv.Value))
+			{{end -}}
+			{{end -}}
+			}
 		}
-		{{end -}}
-		{{end -}}
 		{{- end}}
 		result[ids[i].String()] = entity
 	}
@@ -1037,27 +1056,47 @@ func (r *{{.Name | lower}}Repository) List{{.Name}}(ctx context.Context, tr fdb.
 	}
 
 	{{if hasMutationFields . -}}
-	// Populate atomic fields for returned items (pipelined)
-	{{range .Fields -}}
-	{{if .Mutation -}}
-	fieldFutures_{{.Name}} := make([]fdb.FutureByteSlice, len(result.Items))
-	{{end -}}
-	{{end -}}
-	for i, entity := range result.Items {
-		{{range .Fields -}}
-		{{if .Mutation -}}
-		fieldFutures_{{.Name}}[i] = tr.Get(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}} {{.Number}}}))
-		{{end -}}
-		{{end -}}
-	}
-	for i, entity := range result.Items {
-		{{range .Fields -}}
-		{{if .Mutation -}}
-		if fieldVal := fieldFutures_{{.Name}}[i].MustGet(); fieldVal != nil {
-			entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
+	// Populate atomic fields for all returned items in a single range read
+	if len(result.Items) > 0 {
+		first := result.Items[0]
+		last := result.Items[len(result.Items)-1]
+		fieldBegin := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{range $.PrimaryKeyFields}} {{packField (printf "first.%s" .Name) .}}, {{end}}})
+		fieldEndPrefix, err := fdb.PrefixRange(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{range $.PrimaryKeyFields}} {{packField (printf "last.%s" .Name) .}}, {{end}}}))
+		if err != nil {
+			return nil, err
 		}
-		{{end -}}
-		{{end -}}
+		itemByPK := make(map[string]*{{.Name}}, len(result.Items))
+		for _, entity := range result.Items {
+			pkKey := tuple.Tuple{ {{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}} }.String()
+			itemByPK[pkKey] = entity
+		}
+		fieldKVs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: fieldBegin, End: fieldEndPrefix.End}, fdb.RangeOptions{}).GetSliceOrPanic()
+		pkLen := {{len .PrimaryKeyFields}}
+		for _, fkv := range fieldKVs {
+			if len(fkv.Value) < 8 {
+				continue
+			}
+			ftpl, err := dir.Unpack(fkv.Key)
+			if err != nil || len(ftpl) < 3+pkLen {
+				continue
+			}
+			entity, ok := itemByPK[ftpl[2:2+pkLen].String()]
+			if !ok {
+				continue
+			}
+			fieldNum, ok := ftpl[2+pkLen].(int64)
+			if !ok {
+				continue
+			}
+			switch fieldNum {
+			{{range .Fields -}}
+			{{if .Mutation -}}
+			case {{.Number}}:
+				entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fkv.Value))
+			{{end -}}
+			{{end -}}
+			}
+		}
 	}
 	{{- end}}
 
@@ -1084,11 +1123,7 @@ func (r *{{$.Name | lower}}Repository) Get{{$.Name}}By{{joinFieldNames $idx.Fiel
 	kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
 	futures := make([]fdb.FutureByteSlice, len(kvs))
 	{{if hasMutationFields $ -}}
-	{{range $.Fields -}}
-	{{if .Mutation -}}
-	fieldFutures_{{.Name}} := make([]fdb.FutureByteSlice, len(kvs))
-	{{end -}}
-	{{end -}}
+	fieldFutures := make([]fdblayer.RangeFuture, len(kvs))
 	{{- end}}
 	for i, kv := range kvs {
 		if err := ctx.Err(); err != nil {
@@ -1110,18 +1145,15 @@ func (r *{{$.Name | lower}}Repository) Get{{$.Name}}By{{joinFieldNames $idx.Fiel
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
 		{{if hasMutationFields $ -}}
-		{{range $.Fields -}}
-		{{if .Mutation -}}
-		{
-			fieldTpl := make(tuple.Tuple, 3+len(pkTuple))
-			fieldTpl[0] = typeID
-			fieldTpl[1] = fdblayer.FieldNamespace
-			copy(fieldTpl[2:], pkTuple)
-			fieldTpl[2+len(pkTuple)] = {{.Number}}
-			fieldFutures_{{.Name}}[i] = tr.Get(dir.Pack(fieldTpl))
+		fieldTpl := make(tuple.Tuple, 2+len(pkTuple))
+		fieldTpl[0] = typeID
+		fieldTpl[1] = fdblayer.FieldNamespace
+		copy(fieldTpl[2:], pkTuple)
+		fieldRange, err := fdb.PrefixRange(dir.Pack(fieldTpl))
+		if err != nil {
+			return nil, err
 		}
-		{{end -}}
-		{{end -}}
+		fieldFutures[i] = fdblayer.GetRange(tr, fieldRange, fdb.RangeOptions{})
 		{{- end}}
 	}
 	for {{if hasMutationFields $}}i{{else}}_{{end}}, future := range futures {
@@ -1141,13 +1173,27 @@ func (r *{{$.Name | lower}}Repository) Get{{$.Name}}By{{joinFieldNames $idx.Fiel
 			return nil, err
 		}
 		{{if hasMutationFields $ -}}
-		{{range $.Fields -}}
-		{{if .Mutation -}}
-		if fieldVal := fieldFutures_{{.Name}}[i].MustGet(); fieldVal != nil {
-			entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
+		for _, fkv := range fieldFutures[i].GetSliceOrPanic() {
+			if len(fkv.Value) < 8 {
+				continue
+			}
+			ftpl, err := dir.Unpack(fkv.Key)
+			if err != nil || len(ftpl) == 0 {
+				continue
+			}
+			fieldNum, ok := ftpl[len(ftpl)-1].(int64)
+			if !ok {
+				continue
+			}
+			switch fieldNum {
+			{{range $.Fields -}}
+			{{if .Mutation -}}
+			case {{.Number}}:
+				entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fkv.Value))
+			{{end -}}
+			{{end -}}
+			}
 		}
-		{{end -}}
-		{{end -}}
 		{{- end}}
 		entities = append(entities, entity)
 	}
