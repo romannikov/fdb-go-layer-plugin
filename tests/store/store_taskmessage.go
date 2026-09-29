@@ -38,7 +38,7 @@ func (r *taskmessageRepository) Enqueue(ctx context.Context, tr fdblayer.Transac
 		return err
 	}
 
-	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.QueueName, uint64(entity.ShardId), tuple.IncompleteVersionstamp(0)})
+	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.QueueName, uint64(entity.ShardId), tuple.IncompleteVersionstamp(r.store.NextUserVersion())})
 	if err != nil {
 		return err
 	}
@@ -86,6 +86,14 @@ func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transac
 	err = proto.Unmarshal(payload, entity)
 	if err != nil {
 		return nil, err
+	}
+
+	if tpl, unpackErr := dir.Unpack(keyToDelete); unpackErr == nil {
+		if len(tpl) > 2+2 {
+			if vs, ok := tpl[2+2].(tuple.Versionstamp); ok {
+				entity.Versionstamp = vs.Bytes()
+			}
+		}
 	}
 
 	return entity, nil

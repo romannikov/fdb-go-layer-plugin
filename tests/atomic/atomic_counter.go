@@ -369,12 +369,12 @@ func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransact
 		nextKey = kv.Key
 
 		// Stop once we have enough items for pagination check
-		if len(result.Items) > opts.Limit {
+		if opts.Limit > 0 && len(result.Items) > opts.Limit {
 			break
 		}
 	}
 
-	result.HasMore = len(result.Items) > opts.Limit
+	result.HasMore = opts.Limit > 0 && len(result.Items) > opts.Limit
 	if result.HasMore {
 		tpl, err := dir.Unpack(nextKey)
 		if err != nil {
