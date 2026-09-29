@@ -88,7 +88,9 @@ func (r *postRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir di
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
-	value := tr.Get(key).MustGet()
+	valueFuture := tr.Get(key)
+
+	value := valueFuture.MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("post not found")
 	}
@@ -200,6 +202,7 @@ func (r *postRepository) BatchGetPost(ctx context.Context, tr fdb.ReadTransactio
 		copy(keyTpl[2:], id)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
+
 	}
 
 	for i, future := range futures {
@@ -215,6 +218,7 @@ func (r *postRepository) BatchGetPost(ctx context.Context, tr fdb.ReadTransactio
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
+
 		result[ids[i].String()] = entity
 	}
 
@@ -248,12 +252,17 @@ func (r *postRepository) ListPost(ctx context.Context, tr fdb.ReadTransaction, d
 		return nil, err
 	}
 
+	rangeOpts := fdb.RangeOptions{
+		Reverse: false,
+	}
+	if opts.Limit > 0 {
+		rangeOpts.Limit = opts.Limit + 1
+	}
+
 	iter := tr.GetRange(fdb.KeyRange{
 		Begin: begin,
 		End:   dataPrefixRange.End,
-	}, fdb.RangeOptions{
-		Reverse: false,
-	}).Iterator()
+	}, rangeOpts).Iterator()
 
 	var nextKey fdb.Key
 	for iter.Advance() {
@@ -307,7 +316,9 @@ func (r *postRepository) GetPostByTags(ctx context.Context, tr fdb.ReadTransacti
 		return nil, err
 	}
 	kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
-	for _, kv := range kvs {
+	futures := make([]fdb.FutureByteSlice, len(kvs))
+
+	for i, kv := range kvs {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -322,7 +333,14 @@ func (r *postRepository) GetPostByTags(ctx context.Context, tr fdb.ReadTransacti
 		keyTpl[1] = fdblayer.DataNamespace
 		copy(keyTpl[2:], pkTuple)
 		key := dir.Pack(keyTpl)
-		value := tr.Get(key).MustGet()
+		futures[i] = tr.Get(key)
+
+	}
+	for _, future := range futures {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		value := future.MustGet()
 		if value == nil {
 			continue
 		}
@@ -331,6 +349,7 @@ func (r *postRepository) GetPostByTags(ctx context.Context, tr fdb.ReadTransacti
 		if err != nil {
 			return nil, err
 		}
+
 		entities = append(entities, entity)
 	}
 	return entities, nil

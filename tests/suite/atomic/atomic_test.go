@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	fdblayer "github.com/romannikov/fdb-go-layer-plugin/fdb-layer"
 	"github.com/romannikov/fdb-go-layer-plugin/tests"
 	"github.com/romannikov/fdb-go-layer-plugin/tests/atomic"
@@ -105,4 +106,18 @@ func TestAtomicMutations(t *testing.T) {
 	if genRetrieved.MinValue != 2 {
 		t.Fatalf("unexpected min_value retrieved: %d", genRetrieved.MinValue)
 	}
+
+	// 5. Verify BatchGetCounter populates atomic fields
+	batchRes, err := counterRepo.BatchGetCounter(ctx, tr, dir, []tuple.Tuple{{"c1"}})
+	if err != nil {
+		t.Fatalf("BatchGetCounter failed: %v", err)
+	}
+	batchItem, ok := batchRes[`("c1")`]
+	if !ok || batchItem == nil {
+		t.Fatalf("expected c1 in BatchGetCounter result, got: %+v", batchRes)
+	}
+	if batchItem.Value != 15 || batchItem.MaxValue != 150 || batchItem.MinValue != 2 {
+		t.Fatalf("BatchGetCounter did not populate atomic fields: got %+v", batchItem)
+	}
 }
+
