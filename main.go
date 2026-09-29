@@ -27,6 +27,7 @@ type Field struct {
 	Number          int32
 	IsVersionstamp  bool
 	IsUnsigned      bool
+	IsEnum          bool
 }
 
 type SecondaryIndex struct {
@@ -79,12 +80,12 @@ func main() {
 		}
 
 		tmpl := template.Must(template.New("fdb").Funcs(template.FuncMap{
-			"joinFieldNames":      JoinFieldNames,
-			"lower":               strings.ToLower,
-			"hasMutationFields":   HasMutationFields,
-			"hasBinaryImports":    HasBinaryImports,
+			"joinFieldNames":       JoinFieldNames,
+			"lower":                strings.ToLower,
+			"hasMutationFields":    HasMutationFields,
+			"hasBinaryImports":     HasBinaryImports,
 			"msgHasVersionstampPK": MsgHasVersionstampPK,
-			"packField":           PackField,
+			"packField":            PackField,
 		}).Parse(fdbTemplate))
 
 		for _, msg := range messages {
@@ -155,7 +156,7 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 
 		fields = append(fields, Field{
 			Name:            field.GoName,
-			Type:            GoType(field.Desc.Kind()),
+			Type:            FieldGoType(field),
 			IsRepeated:      field.Desc.IsList(),
 			Mutation:        mutation,
 			MutationFDBType: mutationFDBType,
@@ -163,6 +164,7 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 			Number:          int32(field.Desc.Number()),
 			IsVersionstamp:  isVersionstamp,
 			IsUnsigned:      field.Desc.Kind() == protoreflect.Uint32Kind || field.Desc.Kind() == protoreflect.Uint64Kind || field.Desc.Kind() == protoreflect.Fixed32Kind || field.Desc.Kind() == protoreflect.Fixed64Kind,
+			IsEnum:          field.Desc.Kind() == protoreflect.EnumKind,
 		})
 	}
 
@@ -198,9 +200,10 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 
 			primaryKeyFields = append(primaryKeyFields, Field{
 				Name:           field.GoName,
-				Type:           GoType(field.Desc.Kind()),
+				Type:           FieldGoType(field),
 				IsVersionstamp: isVersionstamp,
 				IsUnsigned:     field.Desc.Kind() == protoreflect.Uint32Kind || field.Desc.Kind() == protoreflect.Uint64Kind || field.Desc.Kind() == protoreflect.Fixed32Kind || field.Desc.Kind() == protoreflect.Fixed64Kind,
+				IsEnum:         field.Desc.Kind() == protoreflect.EnumKind,
 			})
 		} else {
 			log.Fatalf("Primary key field %s not found in message %s", pkName, msgName)
@@ -220,9 +223,10 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 						if field, ok := fieldMap[idxFieldName]; ok {
 							idxFields = append(idxFields, Field{
 								Name:       field.GoName,
-								Type:       GoType(field.Desc.Kind()),
+								Type:       FieldGoType(field),
 								IsRepeated: field.Desc.IsList(),
 								IsUnsigned: field.Desc.Kind() == protoreflect.Uint32Kind || field.Desc.Kind() == protoreflect.Uint64Kind || field.Desc.Kind() == protoreflect.Fixed32Kind || field.Desc.Kind() == protoreflect.Fixed64Kind,
+								IsEnum:     field.Desc.Kind() == protoreflect.EnumKind,
 							})
 						} else {
 							log.Fatalf("Secondary index field %s not found in message %s", idxFieldName, msgName)
@@ -266,9 +270,10 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 					if field, ok := fieldMap[idxFieldName]; ok {
 						idxFields = append(idxFields, Field{
 							Name:       field.GoName,
-							Type:       GoType(field.Desc.Kind()),
+							Type:       FieldGoType(field),
 							IsRepeated: field.Desc.IsList(),
 							IsUnsigned: field.Desc.Kind() == protoreflect.Uint32Kind || field.Desc.Kind() == protoreflect.Uint64Kind || field.Desc.Kind() == protoreflect.Fixed32Kind || field.Desc.Kind() == protoreflect.Fixed64Kind,
+							IsEnum:     field.Desc.Kind() == protoreflect.EnumKind,
 						})
 					} else {
 						log.Fatalf("Secondary index field %s not found in message %s", idxFieldName, msgName)
@@ -328,12 +333,23 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 	}
 }
 
+func FieldGoType(field *protogen.Field) string {
+	if field.Desc.Kind() == protoreflect.EnumKind && field.Enum != nil {
+		return field.Enum.GoIdent.GoName
+	}
+	return GoType(field.Desc.Kind())
+}
+
 func GoType(kind protoreflect.Kind) string {
 	switch kind {
-	case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Uint32Kind, protoreflect.Fixed32Kind, protoreflect.Sfixed32Kind:
+	case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Sfixed32Kind:
 		return "int32"
-	case protoreflect.Int64Kind, protoreflect.Sint64Kind, protoreflect.Uint64Kind, protoreflect.Fixed64Kind, protoreflect.Sfixed64Kind:
+	case protoreflect.Uint32Kind, protoreflect.Fixed32Kind:
+		return "uint32"
+	case protoreflect.Int64Kind, protoreflect.Sint64Kind, protoreflect.Sfixed64Kind:
 		return "int64"
+	case protoreflect.Uint64Kind, protoreflect.Fixed64Kind:
+		return "uint64"
 	case protoreflect.FloatKind:
 		return "float32"
 	case protoreflect.DoubleKind:
@@ -342,6 +358,8 @@ func GoType(kind protoreflect.Kind) string {
 		return "string"
 	case protoreflect.BoolKind:
 		return "bool"
+	case protoreflect.BytesKind:
+		return "[]byte"
 	default:
 		return "interface{}"
 	}
@@ -369,10 +387,10 @@ func HasBinaryImports(msg Message) bool {
 }
 
 func PackField(name string, f Field) string {
-	if f.IsUnsigned {
+	if f.IsUnsigned || f.Type == "uint32" || f.Type == "uint64" {
 		return "uint64(" + name + ")"
 	}
-	if f.Type == "int32" || f.Type == "int64" {
+	if f.IsEnum || f.Type == "int32" || f.Type == "int64" {
 		return "int64(" + name + ")"
 	}
 	return name
@@ -463,7 +481,7 @@ func (r *{{.Name | lower}}Repository) Dequeue(ctx context.Context, tr fdblayer.T
 		return nil, err
 	}
 
-	prefixTuple := tuple.Tuple{typeID, fdblayer.DataNamespace, {{(index .PrimaryKeyFields 0).Name | lower}}}
+	prefixTuple := tuple.Tuple{typeID, fdblayer.DataNamespace, {{packField ((index .PrimaryKeyFields 0).Name | lower) (index .PrimaryKeyFields 0)}}}
 	prefixRange, err := fdb.PrefixRange(dir.Pack(prefixTuple))
 	if err != nil {
 		return nil, err
@@ -609,7 +627,7 @@ func (r *{{.Name | lower}}Repository) Create(ctx context.Context, tr fdblayer.Tr
 	for _, item := range entity.{{$f.Name}} {
 		tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
 			{{range $j, $sf := $idx.Fields -}}
-			{{if eq $j $i}} item, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
+			{{if eq $j $i}} {{packField "item" $sf}}, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
 			{{- end}}
 			{{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
 		}), []byte{})
@@ -638,16 +656,7 @@ func (r *{{.Name | lower}}Repository) Get(ctx context.Context, tr fdb.ReadTransa
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, {{if eq (len .PrimaryKeyFields) 1}}{{packField "pk" (index .PrimaryKeyFields 0)}}{{else if gt (len .PrimaryKeyFields) 1}}{{range $i, $f := .PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}})
-	valueFuture := tr.Get(key)
-	{{if hasMutationFields . -}}
-	// Issue atomic field reads concurrently with the primary record read
-	{{range .Fields -}}
-	{{if .Mutation -}}
-	fieldFuture_{{.Name}} := tr.Get(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{if eq (len $.PrimaryKeyFields) 1}}{{packField "pk" (index $.PrimaryKeyFields 0)}}{{else if gt (len $.PrimaryKeyFields) 1}}{{range $i, $f := $.PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}, {{.Number}}}))
-	{{end -}}
-	{{end -}}
-	{{- end}}
-	value := valueFuture.MustGet()
+	value := tr.Get(key).MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("{{.Name | lower}} not found")
 	}
@@ -658,10 +667,15 @@ func (r *{{.Name | lower}}Repository) Get(ctx context.Context, tr fdb.ReadTransa
 	}
 
 	{{if hasMutationFields . -}}
+	// Read atomic fields
 	{{range .Fields -}}
 	{{if .Mutation -}}
-	if fieldVal := fieldFuture_{{.Name}}.MustGet(); fieldVal != nil {
-		entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
+	{
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{if eq (len $.PrimaryKeyFields) 1}}{{packField "pk" (index $.PrimaryKeyFields 0)}}{{else if gt (len $.PrimaryKeyFields) 1}}{{range $i, $f := $.PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}, {{.Number}}})
+		fieldVal := tr.Get(fieldKey).MustGet()
+		if fieldVal != nil {
+			entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
+		}
 	}
 	{{end -}}
 	{{end -}}
@@ -701,7 +715,6 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 	{{else}}
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, {{range .PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}})
 
-	{{if gt (len .SecondaryIndexes) 0 -}}
 	// Clear stale index entries from the old version of the entity
 	oldValue := tr.Get(key).MustGet()
 	if oldValue != nil {
@@ -715,7 +728,7 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 			for _, item := range old.{{$f.Name}} {
 				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
 					{{range $j, $sf := $idx.Fields -}}
-					{{if eq $j $i}} item, {{else}} {{packField (printf "old.%s" $sf.Name) $sf}}, {{end}}
+					{{if eq $j $i}} {{packField "item" $sf}}, {{else}} {{packField (printf "old.%s" $sf.Name) $sf}}, {{end}}
 					{{- end}}
 					{{range $.PrimaryKeyFields}} {{packField (printf "old.%s" .Name) .}}, {{end}}
 				}))
@@ -723,18 +736,15 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 			{{- end}}
 			{{- end}}
 			{{- else -}}
-			// Standard index (only clear if indexed field value changed)
-			if {{range $i, $f := $idx.Fields}}{{if $i}} || {{end}}old.{{$f.Name}} != entity.{{$f.Name}}{{end}} {
-				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}},
-					{{- range $i, $f := $idx.Fields}} {{packField (printf "old.%s" $f.Name) $f}}, {{end}}
-					{{- range $.PrimaryKeyFields}} {{packField (printf "old.%s" .Name) .}}, {{end}}
-				}))
-			}
+			// Standard index
+			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}},
+				{{- range $i, $f := $idx.Fields}} {{packField (printf "old.%s" $f.Name) $f}}, {{end}}
+				{{- range $.PrimaryKeyFields}} {{packField (printf "old.%s" .Name) .}}, {{end}}
+			}))
 			{{- end}}
 			{{end}}
 		}
 	}
-	{{- end}}
 	{{end}}
 
 	{{if hasMutationFields . -}}
@@ -789,7 +799,7 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 	for _, item := range entity.{{$f.Name}} {
 		tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
 			{{range $j, $sf := $idx.Fields -}}
-			{{if eq $j $i}} item, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
+			{{if eq $j $i}} {{packField "item" $sf}}, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
 			{{- end}}
 			{{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
 		}), []byte{})
@@ -818,7 +828,6 @@ func (r *{{.Name | lower}}Repository) Delete(ctx context.Context, tr fdblayer.Tr
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, {{if eq (len .PrimaryKeyFields) 1}}{{packField "pk" (index .PrimaryKeyFields 0)}}{{else if gt (len .PrimaryKeyFields) 1}}{{range $i, $f := .PrimaryKeyFields}}{{if $i}}, {{end}}{{packField (printf "pk.%s" $f.Name) $f}}{{end}}{{end}}})
-	{{if gt (len .SecondaryIndexes) 0 -}}
 	value := tr.Get(key).MustGet()
 	if value != nil {
 		entity := &{{.Name}}{}
@@ -832,7 +841,7 @@ func (r *{{.Name | lower}}Repository) Delete(ctx context.Context, tr fdblayer.Tr
 			for _, item := range entity.{{$f.Name}} {
 				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, {{$idx.IndexID}}, 
 					{{range $j, $sf := $idx.Fields -}}
-					{{if eq $j $i}} item, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
+					{{if eq $j $i}} {{packField "item" $sf}}, {{else}} {{packField (printf "entity.%s" $sf.Name) $sf}}, {{end}}
 					{{- end}}
 					{{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}}
 				}))
@@ -849,7 +858,6 @@ func (r *{{.Name | lower}}Repository) Delete(ctx context.Context, tr fdblayer.Tr
 			{{end -}}
 		}
 	}
-	{{- end}}
 	tr.Clear(key)
 
 	{{if hasMutationFields . -}}
@@ -878,13 +886,6 @@ func (r *{{.Name | lower}}Repository) BatchGet{{.Name}}(ctx context.Context, tr 
 
 	result := make(map[string]*{{.Name}})
 	futures := make([]fdb.FutureByteSlice, len(ids))
-	{{if hasMutationFields . -}}
-	{{range .Fields -}}
-	{{if .Mutation -}}
-	fieldFutures_{{.Name}} := make([]fdb.FutureByteSlice, len(ids))
-	{{end -}}
-	{{end -}}
-	{{- end}}
 
 	for i, id := range ids {
 		if err := ctx.Err(); err != nil {
@@ -896,20 +897,6 @@ func (r *{{.Name | lower}}Repository) BatchGet{{.Name}}(ctx context.Context, tr 
 		copy(keyTpl[2:], id)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
-		{{if hasMutationFields . -}}
-		{{range .Fields -}}
-		{{if .Mutation -}}
-		{
-			fieldTpl := make(tuple.Tuple, 3+len(id))
-			fieldTpl[0] = typeID
-			fieldTpl[1] = fdblayer.FieldNamespace
-			copy(fieldTpl[2:], id)
-			fieldTpl[2+len(id)] = {{.Number}}
-			fieldFutures_{{.Name}}[i] = tr.Get(dir.Pack(fieldTpl))
-		}
-		{{end -}}
-		{{end -}}
-		{{- end}}
 	}
 
 	for i, future := range futures {
@@ -925,15 +912,6 @@ func (r *{{.Name | lower}}Repository) BatchGet{{.Name}}(ctx context.Context, tr 
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
-		{{if hasMutationFields . -}}
-		{{range .Fields -}}
-		{{if .Mutation -}}
-		if fieldVal := fieldFutures_{{.Name}}[i].MustGet(); fieldVal != nil {
-			entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
-		}
-		{{end -}}
-		{{end -}}
-		{{- end}}
 		result[ids[i].String()] = entity
 	}
 
@@ -967,17 +945,12 @@ func (r *{{.Name | lower}}Repository) List{{.Name}}(ctx context.Context, tr fdb.
 		return nil, err
 	}
 
-	rangeOpts := fdb.RangeOptions{
-		Reverse: false,
-	}
-	if opts.Limit > 0 {
-		rangeOpts.Limit = opts.Limit + 1
-	}
-
 	iter := tr.GetRange(fdb.KeyRange{
 		Begin: begin,
 		End:   dataPrefixRange.End,
-	}, rangeOpts).Iterator()
+	}, fdb.RangeOptions{
+		Reverse: false,
+	}).Iterator()
 
 	var nextKey fdb.Key
 	for iter.Advance() {
@@ -1011,31 +984,6 @@ func (r *{{.Name | lower}}Repository) List{{.Name}}(ctx context.Context, tr fdb.
 		result.Items = result.Items[:opts.Limit]
 	}
 
-	{{if hasMutationFields . -}}
-	// Populate atomic fields for returned items (pipelined)
-	{{range .Fields -}}
-	{{if .Mutation -}}
-	fieldFutures_{{.Name}} := make([]fdb.FutureByteSlice, len(result.Items))
-	{{end -}}
-	{{end -}}
-	for i, entity := range result.Items {
-		{{range .Fields -}}
-		{{if .Mutation -}}
-		fieldFutures_{{.Name}}[i] = tr.Get(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}} {{.Number}}}))
-		{{end -}}
-		{{end -}}
-	}
-	for i, entity := range result.Items {
-		{{range .Fields -}}
-		{{if .Mutation -}}
-		if fieldVal := fieldFutures_{{.Name}}[i].MustGet(); fieldVal != nil {
-			entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
-		}
-		{{end -}}
-		{{end -}}
-	}
-	{{- end}}
-
 	return result, nil
 }
 
@@ -1057,15 +1005,7 @@ func (r *{{$.Name | lower}}Repository) Get{{$.Name}}By{{joinFieldNames $idx.Fiel
 		return nil, err
 	}
 	kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
-	futures := make([]fdb.FutureByteSlice, len(kvs))
-	{{if hasMutationFields $ -}}
-	{{range $.Fields -}}
-	{{if .Mutation -}}
-	fieldFutures_{{.Name}} := make([]fdb.FutureByteSlice, len(kvs))
-	{{end -}}
-	{{end -}}
-	{{- end}}
-	for i, kv := range kvs {
+	for _, kv := range kvs {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -1080,27 +1020,7 @@ func (r *{{$.Name | lower}}Repository) Get{{$.Name}}By{{joinFieldNames $idx.Fiel
 		keyTpl[1] = fdblayer.DataNamespace
 		copy(keyTpl[2:], pkTuple)
 		key := dir.Pack(keyTpl)
-		futures[i] = tr.Get(key)
-		{{if hasMutationFields $ -}}
-		{{range $.Fields -}}
-		{{if .Mutation -}}
-		{
-			fieldTpl := make(tuple.Tuple, 3+len(pkTuple))
-			fieldTpl[0] = typeID
-			fieldTpl[1] = fdblayer.FieldNamespace
-			copy(fieldTpl[2:], pkTuple)
-			fieldTpl[2+len(pkTuple)] = {{.Number}}
-			fieldFutures_{{.Name}}[i] = tr.Get(dir.Pack(fieldTpl))
-		}
-		{{end -}}
-		{{end -}}
-		{{- end}}
-	}
-	for {{if hasMutationFields $}}i{{else}}_{{end}}, future := range futures {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		value := future.MustGet()
+		value := tr.Get(key).MustGet()
 		if value == nil {
 			continue
 		}
@@ -1109,15 +1029,6 @@ func (r *{{$.Name | lower}}Repository) Get{{$.Name}}By{{joinFieldNames $idx.Fiel
 		if err != nil {
 			return nil, err
 		}
-		{{if hasMutationFields $ -}}
-		{{range $.Fields -}}
-		{{if .Mutation -}}
-		if fieldVal := fieldFutures_{{.Name}}[i].MustGet(); fieldVal != nil {
-			entity.{{.Name}} = {{.Type}}(binary.LittleEndian.Uint64(fieldVal))
-		}
-		{{end -}}
-		{{end -}}
-		{{- end}}
 		entities = append(entities, entity)
 	}
 	return entities, nil
