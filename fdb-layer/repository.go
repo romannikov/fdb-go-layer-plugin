@@ -84,6 +84,7 @@ func (s *RecordStore) SyncMetadata(ctx context.Context, tr Transaction, metaDir 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	s.metadata = make(map[string]int64, len(messages))
 	kvs := tr.GetRange(metaDir, fdb.RangeOptions{}).GetSliceOrPanic()
 
 	maxID := int64(0)
@@ -92,15 +93,21 @@ func (s *RecordStore) SyncMetadata(ctx context.Context, tr Transaction, metaDir 
 			return err
 		}
 		tpl, err := metaDir.Unpack(kv.Key)
-		if err != nil {
-			return err
+		if err != nil || len(tpl) != 1 {
+			continue
+		}
+		msgName, ok := tpl[0].(string)
+		if !ok {
+			continue
 		}
 		valTpl, err := tuple.Unpack(kv.Value)
-		if err != nil {
-			return err
+		if err != nil || len(valTpl) != 1 {
+			continue
 		}
-		msgName := tpl[0].(string)
-		id := valTpl[0].(int64)
+		id, ok := valTpl[0].(int64)
+		if !ok {
+			continue
+		}
 		s.metadata[msgName] = id
 		if id > maxID {
 			maxID = id
@@ -111,13 +118,25 @@ func (s *RecordStore) SyncMetadata(ctx context.Context, tr Transaction, metaDir 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if _, exists := s.metadata[msg]; !exists {
-			maxID++
-			s.metadata[msg] = maxID
-			key := metaDir.Pack(tuple.Tuple{msg})
-			val := tuple.Tuple{int64(maxID)}.Pack()
-			tr.Set(key, val)
+		if _, exists := s.metadata[msg]; exists {
+			continue
 		}
+		key := metaDir.Pack(tuple.Tuple{msg})
+		if raw := tr.Get(key).MustGet(); raw != nil {
+			if valTpl, err := tuple.Unpack(raw); err == nil && len(valTpl) == 1 {
+				if id, ok := valTpl[0].(int64); ok {
+					s.metadata[msg] = id
+					if id > maxID {
+						maxID = id
+					}
+					continue
+				}
+			}
+		}
+		maxID++
+		s.metadata[msg] = maxID
+		val := tuple.Tuple{int64(maxID)}.Pack()
+		tr.Set(key, val)
 	}
 	return nil
 }

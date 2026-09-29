@@ -63,6 +63,48 @@ func TestIntegration_SyncMetadata_Idempotent(t *testing.T) {
 	}
 }
 
+func TestIntegration_SyncMetadata_NonMetadataKeysAndRetry(t *testing.T) {
+	ctx := context.Background()
+	db := fdb.MustOpenDefault()
+	dir, cleanup := tests.TestDir(t, db)
+	defer cleanup()
+
+	// Write unrelated non-metadata keys into the same directory subspace
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		tr.Set(dir.Pack(tuple.Tuple{"setup_config"}), []byte(`{"initialized":true}`))
+		tr.Set(dir.Pack(tuple.Tuple{int64(999)}), tuple.Tuple{"not_an_int"}.Pack())
+		tr.Set(dir.Pack(tuple.Tuple{"nested", "key"}), tuple.Tuple{int64(1)}.Pack())
+		return nil
+	})
+
+	recordStore := fdblayer.NewRecordStore()
+	attempts := 0
+	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+		attempts++
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product"}); err != nil {
+			return nil, err
+		}
+		if attempts == 1 {
+			// Simulate retryable transaction conflict (not_committed = 1020)
+			return nil, fdb.Error{Code: 1020}
+		}
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("SyncMetadata with retry and non-metadata keys failed: %v", err)
+	}
+
+	// Verify keys were actually persisted to FDB on the second attempt
+	freshStore := fdblayer.NewRecordStore()
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return freshStore.SyncMetadata(ctx, tr, dir, []string{})
+	})
+	meta := freshStore.Metadata()
+	if meta["User"] == 0 || meta["Product"] == 0 {
+		t.Fatalf("expected User and Product persisted after retry, got: %v", meta)
+	}
+}
+
 // CRUD Round-Trip
 func TestIntegration_CreateAndGetUser(t *testing.T) {
 	ctx := context.Background()

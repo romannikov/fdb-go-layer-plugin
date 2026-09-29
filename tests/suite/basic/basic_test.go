@@ -65,6 +65,30 @@ func TestNewRecordStore_EmptyMetadata(t *testing.T) {
 	}
 }
 
+func TestSyncMetadata_TransactionRetry(t *testing.T) {
+	ctx := context.Background()
+	recordStore := fdblayer.NewRecordStore()
+	dir := &tests.MockDirectorySubspace{}
+
+	// Attempt 1: populates in-memory recordStore, but its transactionKV is discarded (simulating FDB conflict).
+	abortedKV := tests.NewMockKV()
+	abortedTr := tests.NewMockTransaction(abortedKV)
+	if err := recordStore.SyncMetadata(ctx, abortedTr, dir, []string{"User", "Product"}); err != nil {
+		t.Fatalf("first attempt SyncMetadata failed: %v", err)
+	}
+
+	// Attempt 2: runs on a fresh committed KV. It must still write the metadata keys to committedKV.
+	committedKV := tests.NewMockKV()
+	committedTr := tests.NewMockTransaction(committedKV)
+	if err := recordStore.SyncMetadata(ctx, committedTr, dir, []string{"User", "Product"}); err != nil {
+		t.Fatalf("retry SyncMetadata failed: %v", err)
+	}
+
+	if len(committedKV.Snapshot()) != 2 {
+		t.Fatalf("expected 2 metadata keys written on retry, got %d", len(committedKV.Snapshot()))
+	}
+}
+
 // CRUD Tests
 
 // Create
