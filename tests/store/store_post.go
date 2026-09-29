@@ -113,21 +113,14 @@ func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 		return err
 	}
 
+	var old *Post
+
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
 
-	// Clear stale index entries from the old version of the entity
-	oldValue := tr.Get(key).MustGet()
-	if oldValue != nil {
-		old := &Post{}
-		if unmarshalErr := proto.Unmarshal(oldValue, old); unmarshalErr == nil {
-			// Fan-out index
-			for _, item := range old.Tags {
-				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
-					item,
-					old.Id,
-				}))
-			}
-
+	if oldValue := tr.Get(key).MustGet(); oldValue != nil {
+		var unmarshaled Post
+		if unmarshalErr := proto.Unmarshal(oldValue, &unmarshaled); unmarshalErr == nil {
+			old = &unmarshaled
 		}
 	}
 
@@ -139,11 +132,38 @@ func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 	tr.Set(key, value)
 
 	// Fan-out index
-	for _, item := range entity.Tags {
-		tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
-			item,
-			entity.Id,
-		}), []byte{})
+	if old != nil {
+		oldSet := make(map[string]struct{}, len(old.Tags))
+		for _, item := range old.Tags {
+			oldSet[item] = struct{}{}
+		}
+		newSet := make(map[string]struct{}, len(entity.Tags))
+		for _, item := range entity.Tags {
+			newSet[item] = struct{}{}
+		}
+		for _, item := range old.Tags {
+			if _, keep := newSet[item]; !keep {
+				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+					item,
+					old.Id,
+				}))
+			}
+		}
+		for _, item := range entity.Tags {
+			if _, existed := oldSet[item]; !existed {
+				tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+					item,
+					entity.Id,
+				}), []byte{})
+			}
+		}
+	} else {
+		for _, item := range entity.Tags {
+			tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+				item,
+				entity.Id,
+			}), []byte{})
+		}
 	}
 
 	return nil

@@ -108,18 +108,14 @@ func (r *productRepository) Set(ctx context.Context, tr fdblayer.Transaction, di
 		return err
 	}
 
+	var old *Product
+
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
 
-	// Clear stale index entries from the old version of the entity
-	oldValue := tr.Get(key).MustGet()
-	if oldValue != nil {
-		old := &Product{}
-		if unmarshalErr := proto.Unmarshal(oldValue, old); unmarshalErr == nil {
-			// Standard index (only clear if indexed field value changed)
-			if old.Category != entity.Category {
-				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 3475980913, old.Category, old.Id}))
-			}
-
+	if oldValue := tr.Get(key).MustGet(); oldValue != nil {
+		var unmarshaled Product
+		if unmarshalErr := proto.Unmarshal(oldValue, &unmarshaled); unmarshalErr == nil {
+			old = &unmarshaled
 		}
 	}
 
@@ -131,7 +127,12 @@ func (r *productRepository) Set(ctx context.Context, tr fdblayer.Transaction, di
 	tr.Set(key, value)
 
 	// Standard index
-	tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 3475980913, entity.Category, entity.Id}), []byte{})
+	if old == nil || old.Category != entity.Category {
+		if old != nil {
+			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 3475980913, old.Category, old.Id}))
+		}
+		tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 3475980913, entity.Category, entity.Id}), []byte{})
+	}
 
 	return nil
 }
