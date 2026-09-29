@@ -119,5 +119,35 @@ func TestAtomicMutations(t *testing.T) {
 	if batchItem.Value != 15 || batchItem.MaxValue != 150 || batchItem.MinValue != 2 {
 		t.Fatalf("BatchGetCounter did not populate atomic fields: got %+v", batchItem)
 	}
+
+	// 6. Verify Set does not overwrite atomic fields in FieldNamespace (C-2)
+	err = counterRepo.Set(ctx, tr, dir, &atomic.Counter{Id: "c1"})
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+	retrievedAfterSet, err := counterRepo.Get(ctx, tr, dir, "c1")
+	if err != nil {
+		t.Fatalf("Get after Set failed: %v", err)
+	}
+	if retrievedAfterSet.Value != 15 || retrievedAfterSet.MaxValue != 150 || retrievedAfterSet.MinValue != 2 {
+		t.Fatalf("Set overwrote atomic fields: got %+v", retrievedAfterSet)
+	}
+
+	// 7. Verify Create with default zero MinValue allows positive Min mutations (C-3)
+	err = counterRepo.Create(ctx, tr, dir, &atomic.Counter{Id: "c_zero"})
+	if err != nil {
+		t.Fatalf("failed to create zero-initialized counter: %v", err)
+	}
+	err = counterRepo.MinCounterMinValue(ctx, tr, dir, "c_zero", 42)
+	if err != nil {
+		t.Fatalf("failed to apply Min on zero-initialized counter: %v", err)
+	}
+	retrievedZero, err := counterRepo.Get(ctx, tr, dir, "c_zero")
+	if err != nil {
+		t.Fatalf("failed to get c_zero: %v", err)
+	}
+	if retrievedZero.MinValue != 42 {
+		t.Fatalf("expected min_value 42 on zero-initialized counter, got %d", retrievedZero.MinValue)
+	}
 }
 
