@@ -143,4 +143,33 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	if listItem.Value != 15 || listItem.MaxValue != 150 || listItem.MinValue != 2 {
 		t.Fatalf("ListCounter did not populate atomic fields: %+v", listItem)
 	}
+
+	// 7. Verify Set does not overwrite atomic fields in FieldNamespace (C-2)
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return counterRepo.Set(ctx, tr, dir, &atomic.Counter{Id: "c1"})
+	})
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
+		return err
+	})
+	if retrieved.Value != 15 || retrieved.MaxValue != 150 || retrieved.MinValue != 2 {
+		t.Fatalf("Set overwrote atomic fields: %+v", retrieved)
+	}
+
+	// 8. Verify Create with default zero MinValue allows positive Min mutations (C-3)
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return counterRepo.Create(ctx, tr, dir, &atomic.Counter{Id: "c_zero"})
+	})
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return counterRepo.MinCounterMinValue(ctx, tr, dir, "c_zero", 42)
+	})
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		retrieved, err = counterRepo.Get(ctx, tr, dir, "c_zero")
+		return err
+	})
+	if retrieved.MinValue != 42 {
+		t.Fatalf("expected min_value 42 on zero-initialized counter, got %d", retrieved.MinValue)
+	}
 }

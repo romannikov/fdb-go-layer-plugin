@@ -72,35 +72,35 @@ func (r *counterRepository) Create(ctx context.Context, tr fdblayer.Transaction,
 	entity.MinValue = 0
 
 	value, err := proto.Marshal(entity)
-	if err != nil {
-		return err
-	}
-
 	// Restore atomic fields
 	entity.Value = atomic_Value
 	entity.MaxValue = atomic_MaxValue
 	entity.MinValue = atomic_MinValue
 
+	if err != nil {
+		return err
+	}
+
 	tr.Set(key, value)
 
-	// Store atomic fields in separate keys
-	{
+	// Store non-zero initial atomic fields in separate keys
+	if atomic_Value != 0 {
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 2})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_Value))
-		tr.Set(fieldKey, buf)
+		tr.Add(fieldKey, buf)
 	}
-	{
+	if atomic_MaxValue != 0 {
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 3})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_MaxValue))
-		tr.Set(fieldKey, buf)
+		tr.Max(fieldKey, buf)
 	}
-	{
+	if atomic_MinValue != 0 {
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 4})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_MinValue))
-		tr.Set(fieldKey, buf)
+		tr.Min(fieldKey, buf)
 	}
 
 	return nil
@@ -167,36 +167,17 @@ func (r *counterRepository) Set(ctx context.Context, tr fdblayer.Transaction, di
 	entity.MinValue = 0
 
 	value, err := proto.Marshal(entity)
-	if err != nil {
-		return err
-	}
 
 	// Restore atomic fields
 	entity.Value = atomic_Value
 	entity.MaxValue = atomic_MaxValue
 	entity.MinValue = atomic_MinValue
 
-	tr.Set(key, value)
+	if err != nil {
+		return err
+	}
 
-	// Store atomic fields in separate keys
-	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 2})
-		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, uint64(atomic_Value))
-		tr.Set(fieldKey, buf)
-	}
-	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 3})
-		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, uint64(atomic_MaxValue))
-		tr.Set(fieldKey, buf)
-	}
-	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 4})
-		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, uint64(atomic_MinValue))
-		tr.Set(fieldKey, buf)
-	}
+	tr.Set(key, value)
 
 	return nil
 }

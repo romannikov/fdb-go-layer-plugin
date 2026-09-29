@@ -600,11 +600,7 @@ func (r *{{.Name | lower}}Repository) Create(ctx context.Context, tr fdblayer.Tr
 	{{- end}}
 
 	value, err := proto.Marshal(entity)
-	if err != nil {
-		return err
-	}
-
-	{{if hasMutationFields . -}}
+	{{- if hasMutationFields .}}
 	// Restore atomic fields
 	{{range .Fields -}}
 	{{if .Mutation -}}
@@ -612,6 +608,9 @@ func (r *{{.Name | lower}}Repository) Create(ctx context.Context, tr fdblayer.Tr
 	{{end -}}
 	{{end -}}
 	{{- end}}
+	if err != nil {
+		return err
+	}
 
 	{{if msgHasVersionstampPK . -}}
 	tr.SetVersionstampedKey(key, value)
@@ -620,14 +619,14 @@ func (r *{{.Name | lower}}Repository) Create(ctx context.Context, tr fdblayer.Tr
 	{{- end}}
 
 	{{if hasMutationFields . -}}
-	// Store atomic fields in separate keys
+	// Store non-zero initial atomic fields in separate keys
 	{{range .Fields -}}
 	{{if .Mutation -}}
-	{
+	if atomic_{{.Name}} != 0 {
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}} {{.Number}}})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(atomic_{{.Name}}))
-		tr.Set(fieldKey, buf)
+		{{if eq .MutationValue 2}}tr.Add(fieldKey, buf){{else if eq .MutationValue 12}}tr.Max(fieldKey, buf){{else if eq .MutationValue 13}}tr.Min(fieldKey, buf){{else}}tr.Set(fieldKey, buf){{end}}
 	}
 	{{end -}}
 	{{end -}}
@@ -780,9 +779,6 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 	{{- end}}
 
 	value, err := proto.Marshal(entity)
-	if err != nil {
-		return err
-	}
 
 	{{if hasMutationFields . -}}
 	// Restore atomic fields
@@ -793,24 +789,14 @@ func (r *{{.Name | lower}}Repository) Set(ctx context.Context, tr fdblayer.Trans
 	{{end -}}
 	{{- end}}
 
+	if err != nil {
+		return err
+	}
+
 	{{if msgHasVersionstampPK . -}}
 	tr.SetVersionstampedKey(key, value)
 	{{- else -}}
 	tr.Set(key, value)
-	{{- end}}
-
-	{{if hasMutationFields . -}}
-	// Store atomic fields in separate keys
-	{{range .Fields -}}
-	{{if .Mutation -}}
-	{
-		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, {{range $.PrimaryKeyFields}} {{packField (printf "entity.%s" .Name) .}}, {{end}} {{.Number}}})
-		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, uint64(atomic_{{.Name}}))
-		tr.Set(fieldKey, buf)
-	}
-	{{end -}}
-	{{end -}}
 	{{- end}}
 
 	{{range $idxIndex, $idx := .SecondaryIndexes -}}
