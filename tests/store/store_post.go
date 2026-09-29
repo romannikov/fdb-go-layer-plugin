@@ -280,12 +280,12 @@ func (r *postRepository) ListPost(ctx context.Context, tr fdb.ReadTransaction, d
 		nextKey = kv.Key
 
 		// Stop once we have enough items for pagination check
-		if len(result.Items) > opts.Limit {
+		if opts.Limit > 0 && len(result.Items) > opts.Limit {
 			break
 		}
 	}
 
-	result.HasMore = len(result.Items) > opts.Limit
+	result.HasMore = opts.Limit > 0 && len(result.Items) > opts.Limit
 	if result.HasMore {
 		tpl, err := dir.Unpack(nextKey)
 		if err != nil {
@@ -327,6 +327,9 @@ func (r *postRepository) GetPostByTags(ctx context.Context, tr fdb.ReadTransacti
 			return nil, err
 		}
 		pkIndexStart := 3 + 1
+		if len(tpl) <= pkIndexStart {
+			continue
+		}
 		pkTuple := tpl[pkIndexStart:]
 		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
 		keyTpl[0] = typeID
@@ -339,6 +342,9 @@ func (r *postRepository) GetPostByTags(ctx context.Context, tr fdb.ReadTransacti
 	for _, future := range futures {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if future == nil {
+			continue
 		}
 		value := future.MustGet()
 		if value == nil {

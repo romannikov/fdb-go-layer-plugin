@@ -73,4 +73,24 @@ func TestVersionstampedPrimaryKey(t *testing.T) {
 	if !kv.HasKey(expectedKey) {
 		t.Fatalf("Expected key not found in mock store: %v", expectedKey)
 	}
+
+	// Second enqueue in the same transaction with the same QueueName and ShardId
+	// must receive UserVersion=1 so it does not overwrite the first item.
+	task2 := &store.TaskMessage{
+		QueueName: "email_queue",
+		ShardId:   1,
+		Payload:   []byte("send second email"),
+	}
+	if err := taskRepo.Enqueue(ctx, tr, dir, task2); err != nil {
+		t.Fatal(err)
+	}
+	dummyVS2 := tuple.Versionstamp{
+		TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		UserVersion:        1,
+	}
+	expectedKey2 := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "email_queue", uint64(1), dummyVS2})
+	if !kv.HasKey(expectedKey2) {
+		t.Fatalf("Expected second versionstamped key with UserVersion=1 not found in mock store: %v", expectedKey2)
+	}
 }
+

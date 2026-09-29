@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
@@ -38,8 +39,9 @@ type GenericRepository[T any, PK any] interface {
 
 // RecordStore holds metadata mapping between message names and their integer type IDs.
 type RecordStore struct {
-	mu       sync.RWMutex
-	metadata map[string]int64
+	mu             sync.RWMutex
+	metadata       map[string]int64
+	userVersionSeq atomic.Uint32
 }
 
 // NewRecordStore creates a new RecordStore instance.
@@ -47,6 +49,13 @@ func NewRecordStore() *RecordStore {
 	return &RecordStore{
 		metadata: make(map[string]int64),
 	}
+}
+
+// NextUserVersion returns a monotonically increasing 16-bit user version so
+// that multiple versionstamped keys written within the same transaction receive
+// distinct user versions instead of colliding at 0.
+func (s *RecordStore) NextUserVersion() uint16 {
+	return uint16(s.userVersionSeq.Add(1) - 1)
 }
 
 // GetTypeID retrieves the type ID for a given message name.

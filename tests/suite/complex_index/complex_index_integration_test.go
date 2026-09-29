@@ -597,3 +597,53 @@ func TestIntegration_MultipleQueues(t *testing.T) {
 		t.Fatalf("expected queue_B to be empty, got %+v", emptyB)
 	}
 }
+
+func TestIntegration_QueueSameTransactionEnqueue(t *testing.T) {
+	ctx := context.Background()
+	db := fdb.MustOpenDefault()
+	dir, cleanup := tests.TestDir(t, db)
+	defer cleanup()
+
+	recordStore := fdblayer.NewRecordStore()
+	taskRepo := store.NewTaskMessageRepository(recordStore)
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"TaskMessage"})
+	})
+
+	// Enqueue two tasks with the SAME QueueName and ShardId in a SINGLE transaction.
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if err := taskRepo.Enqueue(ctx, tr, dir, &store.TaskMessage{
+			QueueName: "batch_q",
+			ShardId:   1,
+			Payload:   []byte("first"),
+		}); err != nil {
+			return err
+		}
+		return taskRepo.Enqueue(ctx, tr, dir, &store.TaskMessage{
+			QueueName: "batch_q",
+			ShardId:   1,
+			Payload:   []byte("second"),
+		})
+	})
+
+	var d1, d2 *store.TaskMessage
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		d1, err = taskRepo.Dequeue(ctx, tr, dir, "batch_q")
+		return err
+	})
+	if d1 == nil || string(d1.Payload) != "first" || len(d1.Versionstamp) != 12 {
+		t.Fatalf("expected first task with 12-byte versionstamp, got %+v", d1)
+	}
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		d2, err = taskRepo.Dequeue(ctx, tr, dir, "batch_q")
+		return err
+	})
+	if d2 == nil || string(d2.Payload) != "second" || len(d2.Versionstamp) != 12 {
+		t.Fatalf("expected second task with 12-byte versionstamp, got %+v", d2)
+	}
+}
+
