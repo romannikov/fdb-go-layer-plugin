@@ -324,6 +324,10 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 		}
 	}
 
+	if len(primaryKeyFields) == 0 && !isQueue {
+		return nil
+	}
+
 	return &Message{
 		Name:             msgName,
 		Fields:           fields,
@@ -336,6 +340,9 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 func FieldGoType(field *protogen.Field) string {
 	if field.Desc.Kind() == protoreflect.EnumKind && field.Enum != nil {
 		return field.Enum.GoIdent.GoName
+	}
+	if field.Desc.Kind() == protoreflect.MessageKind && field.Message != nil && !field.Desc.IsMap() {
+		return "*" + field.Message.GoIdent.GoName
 	}
 	return GoType(field.Desc.Kind())
 }

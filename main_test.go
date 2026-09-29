@@ -3,8 +3,20 @@ package main
 import (
 	"testing"
 
+	"google.golang.org/protobuf/compiler/protogen"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
+
+func TestProcessMessage_SkipsUnannotatedHelperMessage(t *testing.T) {
+	helperMsg := &protogen.Message{
+		GoIdent: protogen.GoIdent{GoName: "Address"},
+	}
+	opts := &descriptorpb.MessageOptions{}
+	if got := ProcessMessage(helperMsg, opts); got != nil {
+		t.Fatalf("expected ProcessMessage to return nil for unannotated helper message, got %+v", got)
+	}
+}
 
 func TestGoType_AllKinds(t *testing.T) {
 	tests := []struct {
