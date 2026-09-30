@@ -469,31 +469,32 @@ func TestIntegration_QueueEnqueueDequeue(t *testing.T) {
 		return recordStore.SyncMetadata(ctx, tr, dir, []string{"TaskMessage"})
 	})
 
-	// 1. Enqueue three tasks sequentially in separate transactions to ensure distinct versionstamps
-	task1 := &store.TaskMessage{QueueName: "test_queue", ShardId: 1, Payload: []byte("task 1")}
+	// 1. Enqueue three tasks sequentially in separate transactions with out-of-order ShardIds (3, 1, 2)
+	// to verify global FIFO ordering by versionstamp rather than shard_id.
+	task1 := &store.TaskMessage{QueueName: "test_queue", ShardId: 3, Payload: []byte("task 1")}
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		return taskRepo.Enqueue(ctx, tr, dir, task1)
 	})
 
-	task2 := &store.TaskMessage{QueueName: "test_queue", ShardId: 2, Payload: []byte("task 2")}
+	task2 := &store.TaskMessage{QueueName: "test_queue", ShardId: 1, Payload: []byte("task 2")}
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		return taskRepo.Enqueue(ctx, tr, dir, task2)
 	})
 
-	task3 := &store.TaskMessage{QueueName: "test_queue", ShardId: 3, Payload: []byte("task 3")}
+	task3 := &store.TaskMessage{QueueName: "test_queue", ShardId: 2, Payload: []byte("task 3")}
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		return taskRepo.Enqueue(ctx, tr, dir, task3)
 	})
 
-	// 2. Dequeue tasks and verify FIFO order
+	// 2. Dequeue tasks and verify FIFO order across shards
 	var dequeued1 *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
 		dequeued1, err = taskRepo.Dequeue(ctx, tr, dir, "test_queue")
 		return err
 	})
-	if dequeued1 == nil || string(dequeued1.Payload) != "task 1" {
-		t.Fatalf("expected 'task 1', got %+v", dequeued1)
+	if dequeued1 == nil || string(dequeued1.Payload) != "task 1" || dequeued1.ShardId != 3 {
+		t.Fatalf("expected 'task 1' (ShardId 3), got %+v", dequeued1)
 	}
 
 	var dequeued2 *store.TaskMessage
@@ -502,8 +503,8 @@ func TestIntegration_QueueEnqueueDequeue(t *testing.T) {
 		dequeued2, err = taskRepo.Dequeue(ctx, tr, dir, "test_queue")
 		return err
 	})
-	if dequeued2 == nil || string(dequeued2.Payload) != "task 2" {
-		t.Fatalf("expected 'task 2', got %+v", dequeued2)
+	if dequeued2 == nil || string(dequeued2.Payload) != "task 2" || dequeued2.ShardId != 1 {
+		t.Fatalf("expected 'task 2' (ShardId 1), got %+v", dequeued2)
 	}
 
 	var dequeued3 *store.TaskMessage
@@ -512,8 +513,8 @@ func TestIntegration_QueueEnqueueDequeue(t *testing.T) {
 		dequeued3, err = taskRepo.Dequeue(ctx, tr, dir, "test_queue")
 		return err
 	})
-	if dequeued3 == nil || string(dequeued3.Payload) != "task 3" {
-		t.Fatalf("expected 'task 3', got %+v", dequeued3)
+	if dequeued3 == nil || string(dequeued3.Payload) != "task 3" || dequeued3.ShardId != 2 {
+		t.Fatalf("expected 'task 3' (ShardId 2), got %+v", dequeued3)
 	}
 
 	// 3. Dequeue on empty queue should return nil, nil

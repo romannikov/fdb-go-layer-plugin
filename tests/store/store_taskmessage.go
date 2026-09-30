@@ -38,7 +38,7 @@ func (r *taskmessageRepository) Enqueue(ctx context.Context, tr fdblayer.Transac
 		return err
 	}
 
-	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.QueueName, uint64(entity.ShardId), tuple.IncompleteVersionstamp(r.store.NextUserVersion())})
+	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.QueueName, tuple.IncompleteVersionstamp(r.store.NextUserVersion()), uint64(entity.ShardId)})
 	if err != nil {
 		return err
 	}
@@ -89,8 +89,8 @@ func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transac
 	}
 
 	if tpl, unpackErr := dir.Unpack(keyToDelete); unpackErr == nil {
-		if len(tpl) > 2+2 {
-			if vs, ok := tpl[2+2].(tuple.Versionstamp); ok {
+		if len(tpl) > 1+2 {
+			if vs, ok := tpl[1+2].(tuple.Versionstamp); ok {
 				entity.Versionstamp = vs.Bytes()
 			}
 		}

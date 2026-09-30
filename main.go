@@ -334,6 +334,10 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 		return nil
 	}
 
+	if isQueue {
+		primaryKeyFields = ReorderQueuePrimaryKeyFields(primaryKeyFields)
+	}
+
 	return &Message{
 		Name:             msgName,
 		Fields:           fields,
@@ -341,6 +345,25 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) *Messag
 		SecondaryIndexes: secondaryIndexes,
 		IsQueue:          isQueue,
 	}
+}
+
+func ReorderQueuePrimaryKeyFields(pkFields []Field) []Field {
+	if len(pkFields) <= 2 {
+		return pkFields
+	}
+	reordered := make([]Field, 0, len(pkFields))
+	reordered = append(reordered, pkFields[0])
+	for _, f := range pkFields[1:] {
+		if f.IsVersionstamp {
+			reordered = append(reordered, f)
+		}
+	}
+	for _, f := range pkFields[1:] {
+		if !f.IsVersionstamp {
+			reordered = append(reordered, f)
+		}
+	}
+	return reordered
 }
 
 func FieldGoType(field *protogen.Field) string {
