@@ -5,7 +5,6 @@ package store
 
 import (
 	"context"
-
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -34,7 +33,6 @@ type UserRepository interface {
 
 	BatchGetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error)
 	ListUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
-
 	GetUserByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error)
 }
 
@@ -84,7 +82,6 @@ func (r *userRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir di
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
 	valueFuture := tr.Get(key)
-
 	value := valueFuture.MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("user not found")
@@ -185,7 +182,6 @@ func (r *userRepository) BatchGetUser(ctx context.Context, tr fdb.ReadTransactio
 		copy(keyTpl[2:], id)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
-
 	}
 
 	for i, future := range futures {
@@ -201,7 +197,6 @@ func (r *userRepository) BatchGetUser(ctx context.Context, tr fdb.ReadTransactio
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
-
 		result[ids[i].String()] = entity
 	}
 
@@ -300,7 +295,6 @@ func (r *userRepository) GetUserByEmail(ctx context.Context, tr fdb.ReadTransact
 	}
 	kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
 	futures := make([]fdb.FutureByteSlice, len(kvs))
-
 	for i, kv := range kvs {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -320,7 +314,6 @@ func (r *userRepository) GetUserByEmail(ctx context.Context, tr fdb.ReadTransact
 		copy(keyTpl[2:], pkTuple)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
-
 	}
 	for _, future := range futures {
 		if err := ctx.Err(); err != nil {
@@ -338,7 +331,6 @@ func (r *userRepository) GetUserByEmail(ctx context.Context, tr fdb.ReadTransact
 		if err != nil {
 			return nil, err
 		}
-
 		entities = append(entities, entity)
 	}
 	return entities, nil
