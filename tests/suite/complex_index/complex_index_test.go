@@ -117,7 +117,7 @@ func TestVersionstampedPrimaryKey(t *testing.T) {
 		TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
 		UserVersion:        0,
 	}
-	expectedKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "email_queue", uint64(1), dummyVS})
+	expectedKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "email_queue", dummyVS, uint64(1)})
 
 	if !kv.HasKey(expectedKey) {
 		t.Fatalf("Expected key not found in mock store: %v", expectedKey)
@@ -137,7 +137,7 @@ func TestVersionstampedPrimaryKey(t *testing.T) {
 		TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
 		UserVersion:        1,
 	}
-	expectedKey2 := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "email_queue", uint64(1), dummyVS2})
+	expectedKey2 := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "email_queue", dummyVS2, uint64(1)})
 	if !kv.HasKey(expectedKey2) {
 		t.Fatalf("Expected second versionstamped key with UserVersion=1 not found in mock store: %v", expectedKey2)
 	}

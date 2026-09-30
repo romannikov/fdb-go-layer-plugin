@@ -133,10 +133,10 @@ This example shows how to create a user and enqueue a "send email" task in the *
 message Task {
     option (annotations.is_queue) = true;
     option (annotations.primary_key) = "queue_name";
-    option (annotations.primary_key) = "shard_id";
     option (annotations.primary_key) = "versionstamp";
+    option (annotations.primary_key) = "shard_id";
     string queue_name = 1;
-    uint32 shard_id = 2; // Used for sharding to avoid contention
+    uint32 shard_id = 2; // Tie-breaker / shard identifier
     bytes versionstamp = 3 [(annotations.is_versionstamp) = true];
     bytes payload = 4;
 }

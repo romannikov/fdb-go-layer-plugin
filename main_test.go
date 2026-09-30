@@ -118,3 +118,17 @@ func TestFieldEqualityAndMapKeyHelpers(t *testing.T) {
 	}
 }
 
+func TestReorderQueuePrimaryKeyFields(t *testing.T) {
+	input := []Field{
+		{Name: "QueueName", Type: "string"},
+		{Name: "ShardId", Type: "uint32", IsUnsigned: true},
+		{Name: "Versionstamp", Type: "[]byte", IsVersionstamp: true},
+	}
+	reordered := ReorderQueuePrimaryKeyFields(input)
+	if len(reordered) != 3 {
+		t.Fatalf("expected 3 fields, got %d", len(reordered))
+	}
+	if reordered[0].Name != "QueueName" || reordered[1].Name != "Versionstamp" || reordered[2].Name != "ShardId" {
+		t.Fatalf("unexpected field order: [%s, %s, %s]", reordered[0].Name, reordered[1].Name, reordered[2].Name)
+	}
+}
