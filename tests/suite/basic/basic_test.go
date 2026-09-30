@@ -2,6 +2,7 @@ package basic_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -150,6 +151,40 @@ func TestCreateProduct_Success(t *testing.T) {
 	}
 	if got.Price != 42 {
 		t.Fatalf("expected price 42, got %d", got.Price)
+	}
+}
+
+func TestCreateUser_AlreadyExists(t *testing.T) {
+	ctx := context.Background()
+	recordStore, tr, dir, kv := tests.SyncAndSetup()
+	repo := store.NewUserRepository(recordStore)
+
+	first := &store.User{Id: "u1", Name: "Alice", Email: "alice@example.com"}
+	if err := repo.Create(ctx, tr, dir, first); err != nil {
+		t.Fatalf("initial Create failed: %v", err)
+	}
+
+	// Attempting to Create a second time with the same PK and a different email
+	// must fail with fdblayer.ErrAlreadyExists and leave both the primary record
+	// and secondary index untouched.
+	duplicate := &store.User{Id: "u1", Name: "Bob", Email: "bob@example.com"}
+	err := repo.Create(ctx, tr, dir, duplicate)
+	if !errors.Is(err, fdblayer.ErrAlreadyExists) {
+		t.Fatalf("expected ErrAlreadyExists on duplicate Create, got: %v", err)
+	}
+
+	got, err := repo.Get(ctx, tr, dir, "u1")
+	if err != nil {
+		t.Fatalf("Get after rejected Create failed: %v", err)
+	}
+	if got.Name != "Alice" || got.Email != "alice@example.com" {
+		t.Fatalf("existing record was overwritten by duplicate Create: %+v", got)
+	}
+
+	typeID := recordStore.Metadata()["User"]
+	bobIdx := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(2324124615), "bob@example.com", "u1"}.Pack()
+	if kv.HasKey(bobIdx) {
+		t.Fatal("duplicate Create must not write secondary index entry")
 	}
 }
 

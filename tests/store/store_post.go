@@ -56,6 +56,9 @@ func (r *postRepository) Create(ctx context.Context, tr fdblayer.Transaction, di
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
+	if existing := tr.Get(key).MustGet(); existing != nil {
+		return fmt.Errorf("post %w", fdblayer.ErrAlreadyExists)
+	}
 
 	value, err := proto.Marshal(entity)
 	if err != nil {

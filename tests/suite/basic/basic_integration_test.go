@@ -4,6 +4,7 @@ package basic_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -130,6 +131,40 @@ func TestIntegration_CreateAndGetUser(t *testing.T) {
 	})
 	if user.Name != "Alice" || user.Email != "alice@test.com" {
 		t.Fatalf("unexpected user: %+v", user)
+	}
+}
+
+func TestIntegration_CreateUser_AlreadyExists(t *testing.T) {
+	ctx := context.Background()
+	db := fdb.MustOpenDefault()
+	dir, cleanup := tests.TestDir(t, db)
+	defer cleanup()
+
+	recordStore := fdblayer.NewRecordStore()
+	userRepo := store.NewUserRepository(recordStore)
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
+			return err
+		}
+		return userRepo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
+	})
+
+	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+		return nil, userRepo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Bob", Email: "bob@test.com"})
+	})
+	if !errors.Is(err, fdblayer.ErrAlreadyExists) {
+		t.Fatalf("expected ErrAlreadyExists on duplicate Create, got: %v", err)
+	}
+
+	var byBob []*store.User
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		byBob, err = userRepo.GetUserByEmail(ctx, tr, dir, "bob@test.com")
+		return err
+	})
+	if len(byBob) != 0 {
+		t.Fatalf("expected 0 users for bob@test.com after rejected Create, got %d", len(byBob))
 	}
 }
 
