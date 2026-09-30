@@ -42,10 +42,10 @@ Assume we have a `User` message with `TypeID = 1` and a `Task` message with `Typ
 - *Note*: The plugin does NOT store the whole record in the index. It stores a **reference** to the record (the primary key `"u123"`) within the index key itself.
 - *Example*: Searching for `user@example.com` will find this index key, and the trailing `"u123"` tells the plugin which record to fetch.
 #### 4. Queue Message
-- **Purpose**: Stores messages in a queue.
-- **Key**: `[Data Subspace] + (2, 0, queue_name, shard_id, versionstamp)` (Uses namespace constant `0` for data)
+- **Purpose**: Stores messages in a FIFO queue ordered by commit versionstamp.
+- **Key**: `[Data Subspace] + (2, 0, queue_name, versionstamp, shard_id)` (Uses namespace constant `0` for data; `versionstamp` is placed immediately after `queue_name` to guarantee global FIFO order)
 - **Value**: `[Serialized Task Protobuf Blob]`
-- *Example*: A task in the `"high-priority"` queue (queue_name) might be stored at `app_data/2/0/"high-priority"/1/versionstamp`.
+- *Example*: A task in the `"high-priority"` queue (`queue_name`) with `shard_id = 1` is stored at `app_data/2/0/"high-priority"/versionstamp/1`.
 #### 5. Atomic Field Record
 - **Purpose**: Stores atomic mutation field values.
 - **Key**: `[Data Subspace] + (1, 2, "u123", field_number)` (Uses namespace constant `2` for fields)
@@ -86,13 +86,14 @@ import (
 	"fmt"
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
+	fdblayer "github.com/romannikov/fdb-go-layer-plugin/fdb-layer"
 	"your/package/generated"
 )
 func main() {
 	fdb.MustAPIVersion(730)
 	db := fdb.MustOpenDefault()
 	ctx := context.Background()
-	store := generated.NewRecordStore()
+	store := fdblayer.NewRecordStore()
 	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
 	metaDir, _ := directory.CreateOrOpen(db, []string{"app_data", "_meta"}, nil)
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
@@ -136,7 +137,7 @@ message Task {
     option (annotations.primary_key) = "versionstamp";
     option (annotations.primary_key) = "shard_id";
     string queue_name = 1;
-    uint32 shard_id = 2; // Tie-breaker / shard identifier
+    uint32 shard_id = 2; // Tie-breaker / producer shard identifier
     bytes versionstamp = 3 [(annotations.is_versionstamp) = true];
     bytes payload = 4;
 }
@@ -150,13 +151,14 @@ import (
 	"math/rand"
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
+	fdblayer "github.com/romannikov/fdb-go-layer-plugin/fdb-layer"
 	"your/package/generated"
 )
 func main() {
 	fdb.MustAPIVersion(730)
 	db := fdb.MustOpenDefault()
 	ctx := context.Background()
-	store := generated.NewRecordStore()
+	store := fdblayer.NewRecordStore()
 	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
 	metaDir, _ := directory.CreateOrOpen(db, []string{"app_data", "_meta"}, nil)
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
@@ -175,9 +177,10 @@ func main() {
 		// Enqueue a task to send a welcome email
 		task := &generated.Task{
 			QueueName: "send-email",
-			// shard_id can be set randomly to distribute load across multiple
-			// writers and avoid contention on the queue tail.
-			ShardId:   uint32(rand.Intn(10)), 
+			// shard_id is stored after the commit versionstamp as a tie-breaker / producer tag.
+			// (To partition a high-throughput queue across independent shards, include the shard
+			// in QueueName, e.g. fmt.Sprintf("send-email-%d", rand.Intn(10))).
+			ShardId:   uint32(rand.Intn(10)),
 			Payload:   []byte("u123"), // Reference the user ID in payload
 		}
 		err = taskRepo.Enqueue(ctx, tr, dataDir, task)
@@ -202,13 +205,14 @@ import (
 	"fmt"
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
+	fdblayer "github.com/romannikov/fdb-go-layer-plugin/fdb-layer"
 	"your/package/generated"
 )
 func main() {
 	fdb.MustAPIVersion(730)
 	db := fdb.MustOpenDefault()
 	ctx := context.Background()
-	store := generated.NewRecordStore()
+	store := fdblayer.NewRecordStore()
 	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
 	metaDir, _ := directory.CreateOrOpen(db, []string{"app_data", "_meta"}, nil)
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
