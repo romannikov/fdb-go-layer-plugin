@@ -108,18 +108,14 @@ func (r *userRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 		return err
 	}
 
+	var old *User
+
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
 
-	// Clear stale index entries from the old version of the entity
-	oldValue := tr.Get(key).MustGet()
-	if oldValue != nil {
-		old := &User{}
-		if unmarshalErr := proto.Unmarshal(oldValue, old); unmarshalErr == nil {
-			// Standard index (only clear if indexed field value changed)
-			if old.Email != entity.Email {
-				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, old.Email, old.Id}))
-			}
-
+	if oldValue := tr.Get(key).MustGet(); oldValue != nil {
+		var unmarshaled User
+		if unmarshalErr := proto.Unmarshal(oldValue, &unmarshaled); unmarshalErr == nil {
+			old = &unmarshaled
 		}
 	}
 
@@ -131,7 +127,12 @@ func (r *userRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 	tr.Set(key, value)
 
 	// Standard index
-	tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, entity.Email, entity.Id}), []byte{})
+	if old == nil || old.Email != entity.Email {
+		if old != nil {
+			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, old.Email, old.Id}))
+		}
+		tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, entity.Email, entity.Id}), []byte{})
+	}
 
 	return nil
 }

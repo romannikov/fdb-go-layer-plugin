@@ -274,6 +274,34 @@ func TestSetUser_IndexUpdated(t *testing.T) {
 	}
 }
 
+func TestSetUser_UnchangedIndexSkipsIndexWrite(t *testing.T) {
+	ctx := context.Background()
+	recordStore, tr, dir, kv := tests.SyncAndSetup()
+	typeID := recordStore.Metadata()["User"]
+
+	repo := store.NewUserRepository(recordStore)
+	if err := repo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "same@test.com"}); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	tr.ResetLog()
+	// Update Name only while keeping Email unchanged
+	if err := repo.Set(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice Updated", Email: "same@test.com"}); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	if len(tr.ClearCalls) != 0 {
+		t.Fatalf("expected 0 Clear calls when indexed field is unchanged, got %d", len(tr.ClearCalls))
+	}
+	if len(tr.SetCalls) != 1 {
+		t.Fatalf("expected 1 Set call (primary record only) when indexed field is unchanged, got %d", len(tr.SetCalls))
+	}
+	idxKey := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(2324124615), "same@test.com", "u1"}.Pack()
+	if !kv.HasKey(idxKey) {
+		t.Fatal("existing index key should remain present")
+	}
+}
+
 func TestSetProduct_UpdatePrice(t *testing.T) {
 	ctx := context.Background()
 	recordStore, tr, dir, _ := tests.SyncAndSetup()

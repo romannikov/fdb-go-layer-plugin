@@ -96,3 +96,25 @@ func TestJoinFieldNames_Various(t *testing.T) {
 		})
 	}
 }
+
+func TestFieldEqualityAndMapKeyHelpers(t *testing.T) {
+	strField := Field{Name: "Email", Type: "string"}
+	bytesField := Field{Name: "RawHash", Type: "[]byte"}
+
+	if got := FieldNotEqual("old.Email", "entity.Email", strField); got != "old.Email != entity.Email" {
+		t.Errorf("FieldNotEqual(string) = %q", got)
+	}
+	if got := FieldNotEqual("old.RawHash", "entity.RawHash", bytesField); got != "!bytes.Equal(old.RawHash, entity.RawHash)" {
+		t.Errorf("FieldNotEqual([]byte) = %q", got)
+	}
+	if got := FieldEqual("old.RawHash", "entity.RawHash", bytesField); got != "bytes.Equal(old.RawHash, entity.RawHash)" {
+		t.Errorf("FieldEqual([]byte) = %q", got)
+	}
+	if got := MapKeyType(bytesField); got != "string" {
+		t.Errorf("MapKeyType([]byte) = %q, want \"string\"", got)
+	}
+	if got := MapKeyExpr("item", bytesField); got != "string(item)" {
+		t.Errorf("MapKeyExpr([]byte) = %q, want \"string(item)\"", got)
+	}
+}
+

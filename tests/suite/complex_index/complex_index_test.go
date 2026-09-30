@@ -43,6 +43,55 @@ func TestFanOutIndex(t *testing.T) {
 	}
 }
 
+func TestFanOutIndex_SetDeltaUpdates(t *testing.T) {
+	ctx := context.Background()
+	recordStore, tr, dir, kv := tests.SyncAndSetup()
+
+	postRepo := store.NewPostRepository(recordStore)
+
+	post := &store.Post{
+		Id:   "post1",
+		Tags: []string{"tag1", "tag2", "tag3"},
+	}
+
+	if err := postRepo.Create(ctx, tr, dir, post); err != nil {
+		t.Fatal(err)
+	}
+
+	tr.ResetLog()
+	// Update Tags: remove "tag1", keep "tag2" and "tag3", add "tag4"
+	updatedPost := &store.Post{
+		Id:   "post1",
+		Tags: []string{"tag2", "tag3", "tag4"},
+	}
+	if err := postRepo.Set(ctx, tr, dir, updatedPost); err != nil {
+		t.Fatal(err)
+	}
+
+	typeID := recordStore.Metadata()["Post"]
+
+	// Only "tag1" should have been cleared (1 Clear call instead of 3)
+	if len(tr.ClearCalls) != 1 {
+		t.Fatalf("expected exactly 1 Clear call for removed tag1, got %d", len(tr.ClearCalls))
+	}
+	// Only primary record + "tag4" index should have been set (2 Set calls instead of 4)
+	if len(tr.SetCalls) != 2 {
+		t.Fatalf("expected exactly 2 Set calls (primary key + new tag4 index), got %d", len(tr.SetCalls))
+	}
+
+	removedKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(4095142816), "tag1", post.Id})
+	if kv.HasKey(removedKey) {
+		t.Errorf("Removed tag1 index entry still present")
+	}
+
+	for _, tag := range updatedPost.Tags {
+		indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(4095142816), tag, post.Id})
+		if !kv.HasKey(indexKey) {
+			t.Errorf("Missing index entry for tag %s", tag)
+		}
+	}
+}
+
 func TestVersionstampedPrimaryKey(t *testing.T) {
 	ctx := context.Background()
 	recordStore, tr, dir, kv := tests.SyncAndSetup()

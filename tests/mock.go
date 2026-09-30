@@ -169,15 +169,24 @@ func (ri *MockRangeIterator) MustGet() fdb.KeyValue {
 // MockTransaction – implements the generated Transaction interface.
 // Embeds MockReadTransaction for the fdb.ReadTransaction requirement.
 type MockTransaction struct {
-	kv *MockKV
+	kv         *MockKV
+	SetCalls   []fdb.Key
+	ClearCalls []fdb.Key
 }
 
 func NewMockTransaction(kv *MockKV) *MockTransaction {
 	return &MockTransaction{kv: kv}
 }
 
+func (m *MockTransaction) ResetLog() {
+	m.SetCalls = nil
+	m.ClearCalls = nil
+}
+
 func (m *MockTransaction) Set(key fdb.KeyConvertible, value []byte) {
-	m.kv.Set(key.FDBKey(), value)
+	k := key.FDBKey()
+	m.SetCalls = append(m.SetCalls, append(fdb.Key(nil), k...))
+	m.kv.Set(k, value)
 }
 
 func (m *MockTransaction) SetVersionstampedKey(key fdb.KeyConvertible, value []byte) {
@@ -201,7 +210,9 @@ func (m *MockTransaction) SetVersionstampedKey(key fdb.KeyConvertible, value []b
 }
 
 func (m *MockTransaction) Clear(key fdb.KeyConvertible) {
-	m.kv.Clear(key.FDBKey())
+	k := key.FDBKey()
+	m.ClearCalls = append(m.ClearCalls, append(fdb.Key(nil), k...))
+	m.kv.Clear(k)
 }
 
 func (m *MockTransaction) Add(key fdb.KeyConvertible, param []byte) {
