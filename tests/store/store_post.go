@@ -5,7 +5,6 @@ package store
 
 import (
 	"context"
-
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -34,7 +33,6 @@ type PostRepository interface {
 
 	BatchGetPost(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Post, error)
 	ListPost(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PostPaginationOptions) (*PostPaginatedResult, error)
-
 	GetPostByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string) ([]*Post, error)
 }
 
@@ -89,7 +87,6 @@ func (r *postRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir di
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
 	valueFuture := tr.Get(key)
-
 	value := valueFuture.MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("post not found")
@@ -222,7 +219,6 @@ func (r *postRepository) BatchGetPost(ctx context.Context, tr fdb.ReadTransactio
 		copy(keyTpl[2:], id)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
-
 	}
 
 	for i, future := range futures {
@@ -238,7 +234,6 @@ func (r *postRepository) BatchGetPost(ctx context.Context, tr fdb.ReadTransactio
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
-
 		result[ids[i].String()] = entity
 	}
 
@@ -337,7 +332,6 @@ func (r *postRepository) GetPostByTags(ctx context.Context, tr fdb.ReadTransacti
 	}
 	kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
 	futures := make([]fdb.FutureByteSlice, len(kvs))
-
 	for i, kv := range kvs {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -357,7 +351,6 @@ func (r *postRepository) GetPostByTags(ctx context.Context, tr fdb.ReadTransacti
 		copy(keyTpl[2:], pkTuple)
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
-
 	}
 	for _, future := range futures {
 		if err := ctx.Err(); err != nil {
@@ -375,7 +368,6 @@ func (r *postRepository) GetPostByTags(ctx context.Context, tr fdb.ReadTransacti
 		if err != nil {
 			return nil, err
 		}
-
 		entities = append(entities, entity)
 	}
 	return entities, nil

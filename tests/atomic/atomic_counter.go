@@ -34,11 +34,8 @@ type CounterRepository interface {
 
 	BatchGetCounter(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Counter, error)
 	ListCounter(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts CounterPaginationOptions) (*CounterPaginatedResult, error)
-
 	AddCounterValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
-
 	MaxCounterMaxValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
-
 	MinCounterMinValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
 }
 
@@ -76,7 +73,6 @@ func (r *counterRepository) Create(ctx context.Context, tr fdblayer.Transaction,
 	entity.Value = atomic_Value
 	entity.MaxValue = atomic_MaxValue
 	entity.MinValue = atomic_MinValue
-
 	if err != nil {
 		return err
 	}
@@ -183,7 +179,6 @@ func (r *counterRepository) Set(ctx context.Context, tr fdblayer.Transaction, di
 	entity.Value = atomic_Value
 	entity.MaxValue = atomic_MaxValue
 	entity.MinValue = atomic_MinValue
-
 	if err != nil {
 		return err
 	}
@@ -204,7 +199,6 @@ func (r *counterRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
-
 	tr.Clear(key)
 
 	// Clear atomic fields
@@ -220,7 +214,6 @@ func (r *counterRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 4})
 		tr.Clear(fieldKey)
 	}
-
 	return nil
 }
 
