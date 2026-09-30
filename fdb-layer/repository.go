@@ -2,6 +2,7 @@ package fdblayer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,9 @@ import (
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 )
+
+// ErrAlreadyExists is returned by Create when an entity with the same primary key already exists.
+var ErrAlreadyExists = errors.New("already exists")
 
 // Partition namespaces under the typeID prefix.
 const (

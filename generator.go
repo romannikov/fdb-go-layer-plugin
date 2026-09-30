@@ -258,6 +258,9 @@ func generateCreate(g *protogen.GeneratedFile, msg Message) {
 		g.P("	}")
 	} else {
 		g.P("	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, ", pkTupleArgsFromEntity(msg, "entity"), "})")
+		g.P("	if existing := tr.Get(key).MustGet(); existing != nil {")
+		g.P(`		return fmt.Errorf("`, lowerName, ` %w", fdblayer.ErrAlreadyExists)`)
+		g.P("	}")
 	}
 	g.P()
 

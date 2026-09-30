@@ -59,6 +59,9 @@ func (r *counterRepository) Create(ctx context.Context, tr fdblayer.Transaction,
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
+	if existing := tr.Get(key).MustGet(); existing != nil {
+		return fmt.Errorf("counter %w", fdblayer.ErrAlreadyExists)
+	}
 
 	// Save atomic fields and zero them out for marshaling
 	atomic_Value := entity.Value
