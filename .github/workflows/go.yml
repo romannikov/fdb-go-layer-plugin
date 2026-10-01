@@ -35,15 +35,10 @@ jobs:
         go build -o protoc-gen-fdb-rust ./compiler/cmd/protoc-gen-fdb-rust
         protoc -I proto -I tests/proto \
           --plugin=protoc-gen-fdb-go=./protoc-gen-fdb-go \
-          --fdb-go_out=tests/go/store --fdb-go_opt=paths=source_relative \
           --plugin=protoc-gen-fdb-rust=./protoc-gen-fdb-rust \
-          --fdb-rust_out=tests/rust/src/gen \
-          tests/proto/store.proto
-        protoc -I proto -I tests/proto \
-          --plugin=protoc-gen-fdb-go=./protoc-gen-fdb-go \
-          --fdb-go_out=tests/go/atomic --fdb-go_opt=paths=source_relative \
-          --plugin=protoc-gen-fdb-rust=./protoc-gen-fdb-rust \
-          --fdb-rust_out=tests/rust/src/gen \
+          --fdb-go_out=. --fdb-go_opt=module=github.com/romannikov/fdb-layer \
+          --fdb-rust_out=tests/rust/src/gen --fdb-rust_opt=generate_messages=true \
+          tests/proto/store.proto \
           tests/proto/atomic.proto
         rm -f protoc-gen-fdb-go protoc-gen-fdb-rust
         git diff --exit-code tests/go/ tests/rust/
