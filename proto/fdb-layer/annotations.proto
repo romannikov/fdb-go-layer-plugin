@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package annotations;
+
+option go_package = "github.com/romannikov/fdb-layer/proto/fdb-layer;fdblayer";
+
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.MessageOptions {
+  // List of field names that constitute the primary key.
+  repeated string primary_key = 50001;
+  // List of composite or fan-out secondary indexes.
+  repeated SecondaryIndex secondary_index = 50002;
+  // Marks this message as a versionstamp-ordered FIFO queue.
+  bool is_queue = 50005;
+}
+
+message SecondaryIndex {
+  repeated string fields = 1;
+  // Optional explicit index ID. If 0, computed as FNV-1a 32-bit hash of lowercase comma-joined field names.
+  uint32 id = 2;
+}
+
+enum MutationType {
+  MUTATION_NONE = 0;
+  MUTATION_ADD = 1;
+  MUTATION_MAX = 2;
+  MUTATION_MIN = 3;
+}
+
+extend google.protobuf.FieldOptions {
+  MutationType mutation = 50003;
+  bool is_versionstamp = 50004;
+}

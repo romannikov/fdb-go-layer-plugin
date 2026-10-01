@@ -1,17 +1,13 @@
-# This workflow will build a golang project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
-
-name: Go
+name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "feat/**" ]
   pull_request:
     branches: [ "main" ]
 
 jobs:
-
-  build:
+  build-and-test:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -21,21 +17,28 @@ jobs:
       with:
         go-version-file: 'go.mod'
 
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+
     - name: Install FoundationDB client and protoc
       run: |
-        sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev
+        go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.35.1
         curl -LO https://github.com/apple/foundationdb/releases/download/7.3.43/foundationdb-clients_7.3.43-1_amd64.deb
         sudo dpkg -i foundationdb-clients_7.3.43-1_amd64.deb
 
-    - name: Build
+    - name: Build Go packages
       run: go build -v ./...
 
-    - name: Verify generated repository code is up-to-date
+    - name: Verify generated Go and Rust repository code is up-to-date
       run: |
-        go build -o protoc-gen-fdb-go-layer .
-        protoc --plugin=protoc-gen-fdb=./protoc-gen-fdb-go-layer --fdb_out=. --fdb_opt=paths=source_relative tests/store/store.proto tests/atomic/atomic.proto
-        rm -f protoc-gen-fdb-go-layer
-        git diff --exit-code tests/store/ tests/atomic/
+        ./update_protos.sh
+        git diff --exit-code proto/ tests/go/ tests/rust/
 
-    - name: Run unit tests
+    - name: Run Go unit tests
       run: go test -race -v ./...
+
+    - name: Check Rust runtime and generated repositories
+      run: |
+        cargo check --manifest-path runtimes/rust/Cargo.toml
+        cargo check --manifest-path tests/rust/Cargo.toml --tests

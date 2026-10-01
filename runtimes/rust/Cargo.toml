@@ -1,0 +1,15 @@
+[package]
+name = "fdb-layer"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+doctest = false
+
+[dependencies]
+async-trait = "0.1"
+foundationdb = { version = "0.9", features = ["fdb-7_3", "embedded-fdb-include"] }
+foundationdb-tuple = { version = "0.9", features = ["num-bigint"] }
+futures = "0.3"
+num-bigint = "0.4"
+prost = "0.13"
