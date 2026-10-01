@@ -233,7 +233,7 @@ mod generated {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _network = fdb_layer::foundationdb::boot();
+    let _network = unsafe { fdb_layer::foundationdb::boot() };
     let db = Database::default()?;
 
     let store = Arc::new(RecordStore::new());
@@ -366,7 +366,7 @@ mod generated {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _network = fdb_layer::foundationdb::boot();
+    let _network = unsafe { fdb_layer::foundationdb::boot() };
     let db = Database::default()?;
 
     let store = Arc::new(RecordStore::new());

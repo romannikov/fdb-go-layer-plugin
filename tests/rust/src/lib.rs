@@ -21,7 +21,9 @@ mod tests {
 
     fn init_fdb() -> Database {
         INIT.call_once(|| {
-            std::mem::forget(fdb_layer::foundationdb::boot());
+            #[allow(unused_unsafe)]
+            let network = unsafe { fdb_layer::foundationdb::boot() };
+            std::mem::forget(network);
         });
         Database::default().expect("failed to open default FDB database")
     }

@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let _network = fdb_layer::foundationdb::boot();
+    #[allow(unused_unsafe)]
+    let _network = unsafe { fdb_layer::foundationdb::boot() };
     let db = Database::default().expect("failed to open FDB database");
     let dir = Subspace::all().subspace(&("conformance_v1",));
 
