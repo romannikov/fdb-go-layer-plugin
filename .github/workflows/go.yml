@@ -23,7 +23,6 @@ jobs:
     - name: Install FoundationDB client and protoc
       run: |
         sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev
-        go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.35.1
         curl -LO https://github.com/apple/foundationdb/releases/download/7.3.43/foundationdb-clients_7.3.43-1_amd64.deb
         sudo dpkg -i foundationdb-clients_7.3.43-1_amd64.deb
 
@@ -32,8 +31,22 @@ jobs:
 
     - name: Verify generated Go and Rust repository code is up-to-date
       run: |
-        ./update_protos.sh
-        git diff --exit-code proto/ tests/go/ tests/rust/
+        go build -o protoc-gen-fdb-go ./compiler/cmd/protoc-gen-fdb-go
+        go build -o protoc-gen-fdb-rust ./compiler/cmd/protoc-gen-fdb-rust
+        protoc -I proto -I tests/proto \
+          --plugin=protoc-gen-fdb-go=./protoc-gen-fdb-go \
+          --fdb-go_out=tests/go/store --fdb-go_opt=paths=source_relative \
+          --plugin=protoc-gen-fdb-rust=./protoc-gen-fdb-rust \
+          --fdb-rust_out=tests/rust/src/gen \
+          tests/proto/store.proto
+        protoc -I proto -I tests/proto \
+          --plugin=protoc-gen-fdb-go=./protoc-gen-fdb-go \
+          --fdb-go_out=tests/go/atomic --fdb-go_opt=paths=source_relative \
+          --plugin=protoc-gen-fdb-rust=./protoc-gen-fdb-rust \
+          --fdb-rust_out=tests/rust/src/gen \
+          tests/proto/atomic.proto
+        rm -f protoc-gen-fdb-go protoc-gen-fdb-rust
+        git diff --exit-code tests/go/ tests/rust/
 
     - name: Run Go unit tests
       run: go test -race -v ./...
