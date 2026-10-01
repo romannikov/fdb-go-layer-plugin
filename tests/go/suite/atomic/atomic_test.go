@@ -149,4 +149,59 @@ func TestAtomicMutations(t *testing.T) {
 	if retrievedZero.MinValue != 42 {
 		t.Fatalf("expected min_value 42 on zero-initialized counter, got %d", retrievedZero.MinValue)
 	}
+
+	// 8. Verify negative int64 values on Create and Max/Min/Add mutations
+	err = counterRepo.Create(ctx, tr, dir, &atomic.Counter{
+		Id:       "c_neg",
+		Value:    -10,
+		MaxValue: -100,
+		MinValue: -5,
+	})
+	if err != nil {
+		t.Fatalf("failed to create negative counter: %v", err)
+	}
+	retrievedNeg, err := counterRepo.Get(ctx, tr, dir, "c_neg")
+	if err != nil {
+		t.Fatalf("failed to get c_neg: %v", err)
+	}
+	if retrievedNeg.Value != -10 || retrievedNeg.MaxValue != -100 || retrievedNeg.MinValue != -5 {
+		t.Fatalf("unexpected initial negative state: %+v", retrievedNeg)
+	}
+
+	// Max: -200 < -100 (should stay -100), -50 > -100 (should become -50)
+	_ = counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_neg", -200)
+	retrievedNeg, _ = counterRepo.Get(ctx, tr, dir, "c_neg")
+	if retrievedNeg.MaxValue != -100 {
+		t.Fatalf("expected max_value -100 after -200, got %d", retrievedNeg.MaxValue)
+	}
+	_ = counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_neg", -50)
+	retrievedNeg, _ = counterRepo.Get(ctx, tr, dir, "c_neg")
+	if retrievedNeg.MaxValue != -50 {
+		t.Fatalf("expected max_value -50 after -50, got %d", retrievedNeg.MaxValue)
+	}
+
+	// Min: -2 > -5 (should stay -5), -20 < -5 (should become -20)
+	_ = counterRepo.MinCounterMinValue(ctx, tr, dir, "c_neg", -2)
+	retrievedNeg, _ = counterRepo.Get(ctx, tr, dir, "c_neg")
+	if retrievedNeg.MinValue != -5 {
+		t.Fatalf("expected min_value -5 after -2, got %d", retrievedNeg.MinValue)
+	}
+	_ = counterRepo.MinCounterMinValue(ctx, tr, dir, "c_neg", -20)
+	retrievedNeg, _ = counterRepo.Get(ctx, tr, dir, "c_neg")
+	if retrievedNeg.MinValue != -20 {
+		t.Fatalf("expected min_value -20 after -20, got %d", retrievedNeg.MinValue)
+	}
+
+	// Negative Max on positive counter c1 (currently MaxValue=150) must NOT overwrite 150
+	_ = counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c1", -1)
+	retrievedC1, _ := counterRepo.Get(ctx, tr, dir, "c1")
+	if retrievedC1.MaxValue != 150 {
+		t.Fatalf("expected c1 max_value to stay 150 after Max(-1), got %d", retrievedC1.MaxValue)
+	}
+	// Negative Min on positive counter c1 (currently MinValue=2) MUST update to -10
+	_ = counterRepo.MinCounterMinValue(ctx, tr, dir, "c1", -10)
+	retrievedC1, _ = counterRepo.Get(ctx, tr, dir, "c1")
+	if retrievedC1.MinValue != -10 {
+		t.Fatalf("expected c1 min_value to become -10 after Min(-10), got %d", retrievedC1.MinValue)
+	}
 }

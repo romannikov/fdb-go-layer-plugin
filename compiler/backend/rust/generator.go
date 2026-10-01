@@ -392,7 +392,7 @@ func generateCreate(g Printer, msg ir.MessageSpec) {
 				ident := FieldIdent(f)
 				g.P("        if entity.", ident, " != 0 {")
 				g.P("            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, ", pkArgs, ", ", f.Number, "i64));")
-				g.P("            let buf = (entity.", ident, " as u64).to_le_bytes();")
+				g.P("            let buf = ", encodeAtomicRustExpr("entity."+ident, f), ".to_le_bytes();")
 				g.P("            tr.atomic_op(&field_key, &buf, fdb_layer::MutationType::", MutationEnumVariant(f.Mutation), ");")
 				g.P("        }")
 			}
@@ -778,7 +778,7 @@ func generateList(g Printer, msg ir.MessageSpec) {
 		g.P("                match field_num {")
 		for _, f := range msg.Fields {
 			if f.Mutation != ir.MutationNone {
-				g.P("                    ", f.Number, " => entity.", FieldIdent(f), " = raw_u64 as ", FieldRustType(f), ",")
+				g.P("                    ", f.Number, " => entity.", FieldIdent(f), " = ", decodeAtomicRustExpr("raw_u64", f), ",")
 			}
 		}
 		g.P("                    _ => {}")
@@ -889,12 +889,32 @@ func generateAtomicMutators(g Printer, msg ir.MessageSpec) {
 		g.P("    ) -> Result<(), fdb_layer::FdbLayerError> {")
 		g.P(`        let type_id = self.store.get_type_id("`, msg.Name, `")?;`)
 		g.P("        let key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, ", pkArgsStr, ", ", f.Number, "i64));")
-		g.P("        let buf = (val as u64).to_le_bytes();")
+		g.P("        let buf = ", encodeAtomicRustExpr("val", f), ".to_le_bytes();")
 		g.P("        tr.atomic_op(&key, &buf, fdb_layer::MutationType::", MutationEnumVariant(f.Mutation), ");")
 		g.P("        Ok(())")
 		g.P("    }")
 		g.P()
 	}
+}
+
+func encodeAtomicRustExpr(expr string, f ir.FieldSpec) string {
+	if !f.IsUnsigned && (f.Mutation == ir.MutationMax || f.Mutation == ir.MutationMin) {
+		if FieldRustType(f) == "i64" {
+			return fmt.Sprintf("((%s as u64) ^ (1u64 << 63))", expr)
+		}
+		return fmt.Sprintf("((%s as i64 as u64) ^ (1u64 << 63))", expr)
+	}
+	return fmt.Sprintf("(%s as u64)", expr)
+}
+
+func decodeAtomicRustExpr(rawVar string, f ir.FieldSpec) string {
+	if !f.IsUnsigned && (f.Mutation == ir.MutationMax || f.Mutation == ir.MutationMin) {
+		if FieldRustType(f) == "i64" {
+			return fmt.Sprintf("(%s ^ (1u64 << 63)) as i64", rawVar)
+		}
+		return fmt.Sprintf("((%s ^ (1u64 << 63)) as i64) as %s", rawVar, FieldRustType(f))
+	}
+	return fmt.Sprintf("%s as %s", rawVar, FieldRustType(f))
 }
 
 func generateEncodeWithZeroedAtomics(g Printer, msg ir.MessageSpec, indent string) {
@@ -930,7 +950,7 @@ func generateUnmarshalAtomicFields(g Printer, msg ir.MessageSpec, sliceExpr stri
 	g.P(indent, "    match field_num {")
 	for _, f := range msg.Fields {
 		if f.Mutation != ir.MutationNone {
-			g.P(indent, "        ", f.Number, " => entity.", FieldIdent(f), " = raw_u64 as ", FieldRustType(f), ",")
+			g.P(indent, "        ", f.Number, " => entity.", FieldIdent(f), " = ", decodeAtomicRustExpr("raw_u64", f), ",")
 		}
 	}
 	g.P(indent, "        _ => {}")

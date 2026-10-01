@@ -172,4 +172,59 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	if retrieved.MinValue != 42 {
 		t.Fatalf("expected min_value 42 on zero-initialized counter, got %d", retrieved.MinValue)
 	}
+
+	// 9. Verify negative int64 values on Create and Max/Min mutations against live FDB
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return counterRepo.Create(ctx, tr, dir, &atomic.Counter{
+			Id:       "c_neg",
+			Value:    -10,
+			MaxValue: -100,
+			MinValue: -5,
+		})
+	})
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		retrieved, err = counterRepo.Get(ctx, tr, dir, "c_neg")
+		return err
+	})
+	if retrieved.Value != -10 || retrieved.MaxValue != -100 || retrieved.MinValue != -5 {
+		t.Fatalf("unexpected initial negative state: %+v", retrieved)
+	}
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if err := counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_neg", -200); err != nil {
+			return err
+		}
+		if err := counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_neg", -50); err != nil {
+			return err
+		}
+		if err := counterRepo.MinCounterMinValue(ctx, tr, dir, "c_neg", -2); err != nil {
+			return err
+		}
+		if err := counterRepo.MinCounterMinValue(ctx, tr, dir, "c_neg", -20); err != nil {
+			return err
+		}
+		if err := counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c1", -1); err != nil {
+			return err
+		}
+		return counterRepo.MinCounterMinValue(ctx, tr, dir, "c1", -10)
+	})
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		retrieved, err = counterRepo.Get(ctx, tr, dir, "c_neg")
+		return err
+	})
+	if retrieved.MaxValue != -50 || retrieved.MinValue != -20 {
+		t.Fatalf("unexpected c_neg after negative Max/Min: %+v", retrieved)
+	}
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
+		return err
+	})
+	if retrieved.MaxValue != 150 || retrieved.MinValue != -10 {
+		t.Fatalf("unexpected c1 after negative Max/Min: %+v", retrieved)
+	}
 }

@@ -283,7 +283,7 @@ func generateCreate(g *protogen.GeneratedFile, msg ir.MessageSpec) {
 				g.P("	if atomic_", f.GoName, " != 0 {")
 				g.P("		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, ", pkArgs, ", ", f.Number, "})")
 				g.P("		buf := make([]byte, 8)")
-				g.P("		binary.LittleEndian.PutUint64(buf, uint64(atomic_", f.GoName, "))")
+				g.P("		binary.LittleEndian.PutUint64(buf, ", encodeAtomicUint64Expr("atomic_"+f.GoName, f), ")")
 				g.P("		tr.", MutationVerb(f.Mutation), "(fieldKey, buf)")
 				g.P("	}")
 			}
@@ -737,7 +737,7 @@ func generateList(g *protogen.GeneratedFile, msg ir.MessageSpec) {
 		for _, f := range msg.Fields {
 			if f.Mutation != ir.MutationNone {
 				g.P("			case ", f.Number, ":")
-				g.P("				entity.", f.GoName, " = ", FieldGoType(f), "(binary.LittleEndian.Uint64(fkv.Value))")
+				g.P("				entity.", f.GoName, " = ", decodeAtomicGoExpr("fkv.Value", f))
 			}
 		}
 		g.P("			}")
@@ -867,13 +867,33 @@ func generateAtomicMutators(g *protogen.GeneratedFile, msg ir.MessageSpec) {
 		g.P("	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, ", pkArgsStr, ", ", f.Number, "})")
 		g.P()
 		g.P("	buf := make([]byte, 8)")
-		g.P("	binary.LittleEndian.PutUint64(buf, uint64(val))")
+		g.P("	binary.LittleEndian.PutUint64(buf, ", encodeAtomicUint64Expr("val", f), ")")
 		g.P()
 		g.P("	tr.", verb, "(key, buf)")
 		g.P("	return nil")
 		g.P("}")
 		g.P()
 	}
+}
+
+func encodeAtomicUint64Expr(expr string, f ir.FieldSpec) string {
+	if !f.IsUnsigned && (f.Mutation == ir.MutationMax || f.Mutation == ir.MutationMin) {
+		if FieldGoType(f) == "int64" {
+			return fmt.Sprintf("uint64(%s)^(1<<63)", expr)
+		}
+		return fmt.Sprintf("uint64(int64(%s))^(1<<63)", expr)
+	}
+	return fmt.Sprintf("uint64(%s)", expr)
+}
+
+func decodeAtomicGoExpr(sliceExpr string, f ir.FieldSpec) string {
+	if !f.IsUnsigned && (f.Mutation == ir.MutationMax || f.Mutation == ir.MutationMin) {
+		if FieldGoType(f) == "int64" {
+			return fmt.Sprintf("int64(binary.LittleEndian.Uint64(%s) ^ (1 << 63))", sliceExpr)
+		}
+		return fmt.Sprintf("%s(int64(binary.LittleEndian.Uint64(%s) ^ (1 << 63)))", FieldGoType(f), sliceExpr)
+	}
+	return fmt.Sprintf("%s(binary.LittleEndian.Uint64(%s))", FieldGoType(f), sliceExpr)
 }
 
 func generateMarshalWithZeroedAtomics(g *protogen.GeneratedFile, msg ir.MessageSpec) {
@@ -920,7 +940,7 @@ func generateUnmarshalAtomicFields(g *protogen.GeneratedFile, msg ir.MessageSpec
 	for _, f := range msg.Fields {
 		if f.Mutation != ir.MutationNone {
 			g.P(indent, "	case ", f.Number, ":")
-			g.P(indent, "		entity.", f.GoName, " = ", FieldGoType(f), "(binary.LittleEndian.Uint64(fkv.Value))")
+			g.P(indent, "		entity.", f.GoName, " = ", decodeAtomicGoExpr("fkv.Value", f))
 		}
 	}
 	g.P(indent, "	}")

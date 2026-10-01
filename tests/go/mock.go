@@ -232,8 +232,8 @@ func (m *MockTransaction) Max(key fdb.KeyConvertible, param []byte) {
 		currentVal = binary.LittleEndian.Uint64(current)
 	}
 	val := binary.LittleEndian.Uint64(param)
-	if val > currentVal {
-		m.kv.data[string(k)] = param
+	if len(current) < 8 || val > currentVal {
+		m.kv.data[string(k)] = append([]byte(nil), param...)
 	}
 }
 
@@ -250,8 +250,8 @@ func (m *MockTransaction) Min(key fdb.KeyConvertible, param []byte) {
 		currentVal = ^uint64(0)
 	}
 	val := binary.LittleEndian.Uint64(param)
-	if val < currentVal {
-		m.kv.data[string(k)] = param
+	if len(current) < 8 || val < currentVal {
+		m.kv.data[string(k)] = append([]byte(nil), param...)
 	}
 }
 

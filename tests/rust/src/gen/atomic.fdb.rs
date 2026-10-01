@@ -56,12 +56,12 @@ impl CounterRepository {
         }
         if entity.max_value != 0 {
             let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &entity.id, 3i64));
-            let buf = (entity.max_value as u64).to_le_bytes();
+            let buf = ((entity.max_value as u64) ^ (1u64 << 63)).to_le_bytes();
             tr.atomic_op(&field_key, &buf, fdb_layer::MutationType::Max);
         }
         if entity.min_value != 0 {
             let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &entity.id, 4i64));
-            let buf = (entity.min_value as u64).to_le_bytes();
+            let buf = ((entity.min_value as u64) ^ (1u64 << 63)).to_le_bytes();
             tr.atomic_op(&field_key, &buf, fdb_layer::MutationType::Min);
         }
         Ok(())
@@ -100,8 +100,8 @@ impl CounterRepository {
             let raw_u64 = u64::from_le_bytes(raw_bytes);
             match field_num {
                 2 => entity.value = raw_u64 as i64,
-                3 => entity.max_value = raw_u64 as i64,
-                4 => entity.min_value = raw_u64 as i64,
+                3 => entity.max_value = (raw_u64 ^ (1u64 << 63)) as i64,
+                4 => entity.min_value = (raw_u64 ^ (1u64 << 63)) as i64,
                 _ => {}
             }
         }
@@ -200,8 +200,8 @@ impl CounterRepository {
                 let raw_u64 = u64::from_le_bytes(raw_bytes);
                 match field_num {
                     2 => entity.value = raw_u64 as i64,
-                    3 => entity.max_value = raw_u64 as i64,
-                    4 => entity.min_value = raw_u64 as i64,
+                    3 => entity.max_value = (raw_u64 ^ (1u64 << 63)) as i64,
+                    4 => entity.min_value = (raw_u64 ^ (1u64 << 63)) as i64,
                     _ => {}
                 }
             }
@@ -294,8 +294,8 @@ impl CounterRepository {
                 let entity = &mut result.items[item_idx];
                 match field_num {
                     2 => entity.value = raw_u64 as i64,
-                    3 => entity.max_value = raw_u64 as i64,
-                    4 => entity.min_value = raw_u64 as i64,
+                    3 => entity.max_value = (raw_u64 ^ (1u64 << 63)) as i64,
+                    4 => entity.min_value = (raw_u64 ^ (1u64 << 63)) as i64,
                     _ => {}
                 }
             }
@@ -326,7 +326,7 @@ impl CounterRepository {
     ) -> Result<(), fdb_layer::FdbLayerError> {
         let type_id = self.store.get_type_id("Counter")?;
         let key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &id, 3i64));
-        let buf = (val as u64).to_le_bytes();
+        let buf = ((val as u64) ^ (1u64 << 63)).to_le_bytes();
         tr.atomic_op(&key, &buf, fdb_layer::MutationType::Max);
         Ok(())
     }
@@ -340,7 +340,7 @@ impl CounterRepository {
     ) -> Result<(), fdb_layer::FdbLayerError> {
         let type_id = self.store.get_type_id("Counter")?;
         let key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &id, 4i64));
-        let buf = (val as u64).to_le_bytes();
+        let buf = ((val as u64) ^ (1u64 << 63)).to_le_bytes();
         tr.atomic_op(&key, &buf, fdb_layer::MutationType::Min);
         Ok(())
     }

@@ -539,6 +539,41 @@ mod tests {
             assert_eq!(cz.min_value, 42);
         }
 
+        // Verify negative i64 values on Create and Max/Min mutations
+        {
+            let tr = db.create_trx().unwrap();
+            repo.create(
+                &tr,
+                &dir,
+                &Counter {
+                    id: "c_neg".into(),
+                    value: -10,
+                    max_value: -100,
+                    min_value: -5,
+                },
+            )
+            .await
+            .unwrap();
+            tr.commit().await.unwrap();
+        }
+        {
+            let tr = db.create_trx().unwrap();
+            repo.max_counter_max_value(&tr, &dir, "c_neg", -200).await.unwrap();
+            repo.max_counter_max_value(&tr, &dir, "c_neg", -50).await.unwrap();
+            repo.min_counter_min_value(&tr, &dir, "c_neg", -2).await.unwrap();
+            repo.min_counter_min_value(&tr, &dir, "c_neg", -20).await.unwrap();
+            repo.max_counter_max_value(&tr, &dir, "c1", -1).await.unwrap();
+            repo.min_counter_min_value(&tr, &dir, "c1", -10).await.unwrap();
+            tr.commit().await.unwrap();
+        }
+        {
+            let tr = db.create_trx().unwrap();
+            let c_neg = repo.get(&tr, &dir, "c_neg").await.unwrap();
+            assert_eq!((c_neg.value, c_neg.max_value, c_neg.min_value), (-10, -50, -20));
+            let c1 = repo.get(&tr, &dir, "c1").await.unwrap();
+            assert_eq!((c1.value, c1.max_value, c1.min_value), (15, 150, -10));
+        }
+
         // Verify GenericRepository trait implementation
         {
             let tr = db.create_trx().unwrap();

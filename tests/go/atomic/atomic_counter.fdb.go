@@ -92,13 +92,13 @@ func (r *counterRepository) Create(ctx context.Context, tr fdblayer.Transaction,
 	if atomic_MaxValue != 0 {
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 3})
 		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, uint64(atomic_MaxValue))
+		binary.LittleEndian.PutUint64(buf, uint64(atomic_MaxValue)^(1<<63))
 		tr.Max(fieldKey, buf)
 	}
 	if atomic_MinValue != 0 {
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 4})
 		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, uint64(atomic_MinValue))
+		binary.LittleEndian.PutUint64(buf, uint64(atomic_MinValue)^(1<<63))
 		tr.Min(fieldKey, buf)
 	}
 
@@ -149,9 +149,9 @@ func (r *counterRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir
 		case 2:
 			entity.Value = int64(binary.LittleEndian.Uint64(fkv.Value))
 		case 3:
-			entity.MaxValue = int64(binary.LittleEndian.Uint64(fkv.Value))
+			entity.MaxValue = int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63))
 		case 4:
-			entity.MinValue = int64(binary.LittleEndian.Uint64(fkv.Value))
+			entity.MinValue = int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63))
 		}
 	}
 	return entity, nil
@@ -284,9 +284,9 @@ func (r *counterRepository) BatchGetCounter(ctx context.Context, tr fdb.ReadTran
 			case 2:
 				entity.Value = int64(binary.LittleEndian.Uint64(fkv.Value))
 			case 3:
-				entity.MaxValue = int64(binary.LittleEndian.Uint64(fkv.Value))
+				entity.MaxValue = int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63))
 			case 4:
-				entity.MinValue = int64(binary.LittleEndian.Uint64(fkv.Value))
+				entity.MinValue = int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63))
 			}
 		}
 		result[ids[i].String()] = entity
@@ -402,9 +402,9 @@ func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransact
 			case 2:
 				entity.Value = int64(binary.LittleEndian.Uint64(fkv.Value))
 			case 3:
-				entity.MaxValue = int64(binary.LittleEndian.Uint64(fkv.Value))
+				entity.MaxValue = int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63))
 			case 4:
-				entity.MinValue = int64(binary.LittleEndian.Uint64(fkv.Value))
+				entity.MinValue = int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63))
 			}
 		}
 	}
@@ -442,7 +442,7 @@ func (r *counterRepository) MaxCounterMaxValue(ctx context.Context, tr fdblayer.
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 3})
 
 	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, uint64(val))
+	binary.LittleEndian.PutUint64(buf, uint64(val)^(1<<63))
 
 	tr.Max(key, buf)
 	return nil
@@ -460,7 +460,7 @@ func (r *counterRepository) MinCounterMinValue(ctx context.Context, tr fdblayer.
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 4})
 
 	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, uint64(val))
+	binary.LittleEndian.PutUint64(buf, uint64(val)^(1<<63))
 
 	tr.Min(key, buf)
 	return nil
