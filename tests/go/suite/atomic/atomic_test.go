@@ -306,3 +306,112 @@ func TestReadZerosAtomicFieldsBeforeFieldNamespace(t *testing.T) {
 	}
 }
 
+func TestDeleteCounter_ClearsFieldNamespace(t *testing.T) {
+	ctx := context.Background()
+	kv := tests.NewMockKV()
+	tr := tests.NewMockTransaction(kv)
+	dir := &tests.MockDirectorySubspace{}
+	recordStore := fdblayer.NewRecordStore()
+	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"}); err != nil {
+		t.Fatalf("failed to sync metadata: %v", err)
+	}
+	counterRepo := atomic.NewCounterRepository(recordStore)
+
+	c := &atomic.Counter{
+		Id:       "c_del",
+		Value:    100,
+		MaxValue: 500,
+		MinValue: 10,
+		U64Max:   900,
+		I32Min:   -20,
+		U32Add:   40,
+	}
+	if err := counterRepo.Create(ctx, tr, dir, c); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := counterRepo.AddCounterValue(ctx, tr, dir, "c_del", 50); err != nil {
+		t.Fatalf("AddCounterValue failed: %v", err)
+	}
+
+	if err := counterRepo.Delete(ctx, tr, dir, "c_del"); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	// Re-create the same primary key with zero values — stale FieldNamespace keys must not leak!
+	if err := counterRepo.Create(ctx, tr, dir, &atomic.Counter{Id: "c_del"}); err != nil {
+		t.Fatalf("re-Create failed: %v", err)
+	}
+	got, err := counterRepo.Get(ctx, tr, dir, "c_del")
+	if err != nil {
+		t.Fatalf("Get after re-Create failed: %v", err)
+	}
+	if got.Value != 0 || got.MaxValue != 0 || got.MinValue != 0 || got.U64Max != 0 || got.I32Min != 0 || got.U32Add != 0 {
+		t.Fatalf("Delete did not clear FieldNamespace; stale atomic fields leaked into re-created counter: %+v", got)
+	}
+}
+
+func TestAtomicMutations_UnsignedAnd32Bit(t *testing.T) {
+	ctx := context.Background()
+	kv := tests.NewMockKV()
+	tr := tests.NewMockTransaction(kv)
+	dir := &tests.MockDirectorySubspace{}
+	recordStore := fdblayer.NewRecordStore()
+	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"}); err != nil {
+		t.Fatalf("failed to sync metadata: %v", err)
+	}
+	counterRepo := atomic.NewCounterRepository(recordStore)
+
+	c := &atomic.Counter{
+		Id:     "c_types",
+		U64Max: 1000,
+		I32Min: -50,
+		U32Add: 10,
+	}
+	if err := counterRepo.Create(ctx, tr, dir, c); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	// 1. uint64 Max including values > math.MaxInt64 (high bit set)
+	const highU64 uint64 = 1<<63 + 12345
+	if err := counterRepo.MaxCounterU64Max(ctx, tr, dir, "c_types", 500); err != nil {
+		t.Fatalf("MaxCounterU64Max(500) failed: %v", err)
+	}
+	got, _ := counterRepo.Get(ctx, tr, dir, "c_types")
+	if got.U64Max != 1000 {
+		t.Fatalf("expected U64Max 1000, got %d", got.U64Max)
+	}
+	if err := counterRepo.MaxCounterU64Max(ctx, tr, dir, "c_types", highU64); err != nil {
+		t.Fatalf("MaxCounterU64Max(highU64) failed: %v", err)
+	}
+	got, _ = counterRepo.Get(ctx, tr, dir, "c_types")
+	if got.U64Max != highU64 {
+		t.Fatalf("expected U64Max %d, got %d", highU64, got.U64Max)
+	}
+
+	// 2. int32 Min with negative values
+	if err := counterRepo.MinCounterI32Min(ctx, tr, dir, "c_types", -10); err != nil {
+		t.Fatalf("MinCounterI32Min(-10) failed: %v", err)
+	}
+	got, _ = counterRepo.Get(ctx, tr, dir, "c_types")
+	if got.I32Min != -50 {
+		t.Fatalf("expected I32Min -50, got %d", got.I32Min)
+	}
+	if err := counterRepo.MinCounterI32Min(ctx, tr, dir, "c_types", -200); err != nil {
+		t.Fatalf("MinCounterI32Min(-200) failed: %v", err)
+	}
+	got, _ = counterRepo.Get(ctx, tr, dir, "c_types")
+	if got.I32Min != -200 {
+		t.Fatalf("expected I32Min -200, got %d", got.I32Min)
+	}
+
+	// 3. uint32 Add
+	if err := counterRepo.AddCounterU32Add(ctx, tr, dir, "c_types", 25); err != nil {
+		t.Fatalf("AddCounterU32Add(25) failed: %v", err)
+	}
+	got, _ = counterRepo.Get(ctx, tr, dir, "c_types")
+	if got.U32Add != 35 {
+		t.Fatalf("expected U32Add 35, got %d", got.U32Add)
+	}
+}
+
+

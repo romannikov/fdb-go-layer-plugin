@@ -647,3 +647,183 @@ func TestIntegration_QueueSameTransactionEnqueue(t *testing.T) {
 		t.Fatalf("expected second task with 12-byte versionstamp, got %+v", d2)
 	}
 }
+
+func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
+	ctx := context.Background()
+	db := fdb.MustOpenDefault()
+	dir, cleanup := tests.TestDir(t, db)
+	defer cleanup()
+
+	recordStore := fdblayer.NewRecordStore()
+	orderRepo := store.NewOrderRepository(recordStore)
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"Order"})
+	})
+
+	order1 := &store.Order{
+		TenantId:         "acme",
+		OrderSeq:         101,
+		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
+		CreatedAt:        1700000000,
+		ReceiptHash:      []byte{0xAA, 0xBB, 0x01},
+		AttachmentHashes: [][]byte{{0x10, 0x20}, {0x30, 0x40}},
+		Priority:         store.Order_PRIORITY_HIGH,
+		Address: &store.Order_ShippingAddress{
+			City:    "Zurich",
+			Country: "Switzerland",
+		},
+	}
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return orderRepo.Create(ctx, tr, dir, order1)
+	})
+
+	pk := store.OrderPrimaryKey{TenantId: "acme", OrderSeq: 101}
+	var got *store.Order
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		got, err = orderRepo.Get(ctx, tr, dir, pk)
+		return err
+	})
+	if got.Priority != store.Order_PRIORITY_HIGH || got.Address.GetCity() != "Zurich" {
+		t.Fatalf("unexpected Order after Get: %+v", got)
+	}
+
+	// Compound index lookup
+	var byStatus []*store.Order
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		byStatus, err = orderRepo.GetOrderByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000)
+		return err
+	})
+	if len(byStatus) != 1 || byStatus[0].OrderSeq != 101 {
+		t.Fatalf("GetOrderByStatusAndCreatedAt failed: %+v", byStatus)
+	}
+
+	// Scalar bytes index lookup
+	var byReceipt []*store.Order
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		byReceipt, err = orderRepo.GetOrderByReceiptHash(ctx, tr, dir, []byte{0xAA, 0xBB, 0x01})
+		return err
+	})
+	if len(byReceipt) != 1 || byReceipt[0].OrderSeq != 101 {
+		t.Fatalf("GetOrderByReceiptHash failed: %+v", byReceipt)
+	}
+
+	// Fan-out repeated bytes index lookup
+	var byAttach []*store.Order
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		byAttach, err = orderRepo.GetOrderByAttachmentHashes(ctx, tr, dir, []byte{0x10, 0x20})
+		return err
+	})
+	if len(byAttach) != 1 || byAttach[0].OrderSeq != 101 {
+		t.Fatalf("GetOrderByAttachmentHashes failed: %+v", byAttach)
+	}
+
+	// Update via Set
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return orderRepo.Set(ctx, tr, dir, &store.Order{
+			TenantId:         "acme",
+			OrderSeq:         101,
+			Status:           store.OrderStatus_ORDER_STATUS_SHIPPED,
+			CreatedAt:        1700000000,
+			ReceiptHash:      []byte{0xCC, 0xDD, 0x02},
+			AttachmentHashes: [][]byte{{0x30, 0x40}, {0x50, 0x60}},
+			Priority:         store.Order_PRIORITY_LOW,
+		})
+	})
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		byStatus, err = orderRepo.GetOrderByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000)
+		return err
+	})
+	if len(byStatus) != 0 {
+		t.Fatalf("stale compound index after Set: %+v", byStatus)
+	}
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		byAttach, err = orderRepo.GetOrderByAttachmentHashes(ctx, tr, dir, []byte{0x50, 0x60})
+		return err
+	})
+	if len(byAttach) != 1 || byAttach[0].OrderSeq != 101 {
+		t.Fatalf("missing new fan-out bytes index after Set: %+v", byAttach)
+	}
+
+	// Delete
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return orderRepo.Delete(ctx, tr, dir, pk)
+	})
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		byStatus, err = orderRepo.GetOrderByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000)
+		return err
+	})
+	if len(byStatus) != 0 {
+		t.Fatalf("compound index not cleared after Delete: %+v", byStatus)
+	}
+}
+
+func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
+	ctx := context.Background()
+	db := fdb.MustOpenDefault()
+	dir, cleanup := tests.TestDir(t, db)
+	defer cleanup()
+
+	recordStore := fdblayer.NewRecordStore()
+	auditRepo := store.NewAuditLogRepository(recordStore)
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"AuditLog"})
+	})
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if err := auditRepo.Create(ctx, tr, dir, &store.AuditLog{
+			Actor: "alice",
+		}); err != nil {
+			return err
+		}
+		return auditRepo.Create(ctx, tr, dir, &store.AuditLog{
+			Actor: "bob",
+		})
+	})
+
+	var listed *store.AuditLogPaginatedResult
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		listed, err = auditRepo.ListAuditLog(ctx, tr, dir, store.AuditLogPaginationOptions{Limit: 10})
+		return err
+	})
+	if len(listed.Items) != 2 || len(listed.Items[0].LogId) != 12 {
+		t.Fatalf("expected 2 AuditLogs with 12-byte LogId, got %+v", listed)
+	}
+
+	firstID := listed.Items[0].LogId
+	var got *store.AuditLog
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		got, err = auditRepo.Get(ctx, tr, dir, firstID)
+		return err
+	})
+	if got.Actor != "alice" {
+		t.Fatalf("unexpected AuditLog from Get: %+v", got)
+	}
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return auditRepo.Delete(ctx, tr, dir, firstID)
+	})
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		listed, err = auditRepo.ListAuditLog(ctx, tr, dir, store.AuditLogPaginationOptions{Limit: 10})
+		return err
+	})
+	if len(listed.Items) != 1 || listed.Items[0].Actor != "bob" {
+		t.Fatalf("expected 1 AuditLog after Delete, got %+v", listed)
+	}
+}
+
+

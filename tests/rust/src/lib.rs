@@ -433,6 +433,9 @@ mod tests {
                     value: 10,
                     max_value: 100,
                     min_value: 5,
+                    u64_max: 1000,
+                    i32_min: -20,
+                    u32_add: 10,
                 },
             )
             .await
@@ -440,6 +443,7 @@ mod tests {
             tr.commit().await.unwrap();
         }
 
+        const HIGH_U64: u64 = (1u64 << 63) + 12345;
         {
             let tr = db.create_trx().unwrap();
             repo.add_counter_value(&tr, &dir, "c1", 5).await.unwrap();
@@ -447,6 +451,9 @@ mod tests {
             repo.max_counter_max_value(&tr, &dir, "c1", 150).await.unwrap();
             repo.min_counter_min_value(&tr, &dir, "c1", 10).await.unwrap();
             repo.min_counter_min_value(&tr, &dir, "c1", 2).await.unwrap();
+            repo.max_counter_u64_max(&tr, &dir, "c1", HIGH_U64).await.unwrap();
+            repo.min_counter_i32_min(&tr, &dir, "c1", -100).await.unwrap();
+            repo.add_counter_u32_add(&tr, &dir, "c1", 25).await.unwrap();
             tr.commit().await.unwrap();
         }
 
@@ -456,6 +463,9 @@ mod tests {
             assert_eq!(c.value, 15);
             assert_eq!(c.max_value, 150);
             assert_eq!(c.min_value, 2);
+            assert_eq!(c.u64_max, HIGH_U64);
+            assert_eq!(c.i32_min, -100);
+            assert_eq!(c.u32_add, 35);
 
             // Verify batch_get_counter populates atomics
             let batch = repo
@@ -496,9 +506,7 @@ mod tests {
                 &dir,
                 &Counter {
                     id: "c1".into(),
-                    value: 0,
-                    max_value: 0,
-                    min_value: 0,
+                    ..Default::default()
                 },
             )
             .await
@@ -520,9 +528,7 @@ mod tests {
                 &dir,
                 &Counter {
                     id: "c_zero".into(),
-                    value: 0,
-                    max_value: 0,
-                    min_value: 0,
+                    ..Default::default()
                 },
             )
             .await
@@ -550,6 +556,7 @@ mod tests {
                     value: -10,
                     max_value: -100,
                     min_value: -5,
+                    ..Default::default()
                 },
             )
             .await
@@ -587,5 +594,155 @@ mod tests {
             .unwrap();
             assert_eq!(gen_c.value, 15);
         }
+
+        // Verify Delete clears FIELD_NAMESPACE so re-creating with zeros does not leak stale atomics
+        {
+            let tr = db.create_trx().unwrap();
+            repo.delete(&tr, &dir, "c1").await.unwrap();
+            tr.commit().await.unwrap();
+        }
+        {
+            let tr = db.create_trx().unwrap();
+            repo.create(
+                &tr,
+                &dir,
+                &Counter {
+                    id: "c1".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            tr.commit().await.unwrap();
+        }
+        {
+            let tr = db.create_trx().unwrap();
+            let c1_recreated = repo.get(&tr, &dir, "c1").await.unwrap();
+            assert_eq!(
+                (
+                    c1_recreated.value,
+                    c1_recreated.max_value,
+                    c1_recreated.min_value,
+                    c1_recreated.u64_max,
+                    c1_recreated.i32_min,
+                    c1_recreated.u32_add
+                ),
+                (0, 0, 0, 0, 0, 0)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_order_compound_pk_bytes_and_nested_types() {
+        let db = init_fdb();
+        let dir = test_subspace("order_and_audit");
+        let store = Arc::new(RecordStore::new());
+        let order_repo = OrderRepository::new(store.clone());
+        let audit_repo = AuditLogRepository::new(store.clone());
+
+        {
+            let tr = db.create_trx().unwrap();
+            store
+                .sync_metadata(&tr, &dir, &["Order", "AuditLog"])
+                .await
+                .unwrap();
+            order_repo
+                .create(
+                    &tr,
+                    &dir,
+                    &Order {
+                        tenant_id: "acme".into(),
+                        order_seq: 101,
+                        status: OrderStatus::Pending as i32,
+                        created_at: 1700000000,
+                        receipt_hash: vec![0xAA, 0xBB, 0x01],
+                        attachment_hashes: vec![vec![0x10, 0x20], vec![0x30, 0x40]],
+                        priority: order::Priority::High as i32,
+                        address: Some(order::ShippingAddress {
+                            city: "Zurich".into(),
+                            country: "Switzerland".into(),
+                        }),
+                        history: vec![order::ShippingAddress {
+                            city: "Basel".into(),
+                            country: "Switzerland".into(),
+                        }],
+                    },
+                )
+                .await
+                .unwrap();
+            audit_repo
+                .create(
+                    &tr,
+                    &dir,
+                    &AuditLog {
+                        log_id: vec![],
+                        actor: "order_created".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            tr.commit().await.unwrap();
+        }
+
+        // Verify compound PK get, compound index, bytes index, fan-out bytes index, and nested fields
+        {
+            let tr = db.create_trx().unwrap();
+            let ord = order_repo
+                .get(
+                    &tr,
+                    &dir,
+                    OrderPrimaryKey {
+                        tenant_id: "acme".into(),
+                        order_seq: 101,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(ord.priority, order::Priority::High as i32);
+            assert_eq!(ord.address.as_ref().unwrap().city, "Zurich");
+            assert_eq!(ord.history.len(), 1);
+
+            let by_status = order_repo
+                .get_order_by_status_and_created_at(&tr, &dir, OrderStatus::Pending, 1700000000)
+                .await
+                .unwrap();
+            assert_eq!(by_status.len(), 1);
+            assert_eq!(by_status[0].order_seq, 101);
+
+            let by_receipt = order_repo
+                .get_order_by_receipt_hash(&tr, &dir, &[0xAA, 0xBB, 0x01])
+                .await
+                .unwrap();
+            assert_eq!(by_receipt.len(), 1);
+
+            let by_attach = order_repo
+                .get_order_by_attachment_hashes(&tr, &dir, &[0x10, 0x20])
+                .await
+                .unwrap();
+            assert_eq!(by_attach.len(), 1);
+
+            // Verify AuditLog non-queue versionstamp PK via list + get + delete
+            let logs = audit_repo
+                .list_audit_log(
+                    &tr,
+                    &dir,
+                    PaginationOptions {
+                        begin: vec![],
+                        limit: 10,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(logs.items.len(), 1);
+            assert_eq!(logs.items[0].log_id.len(), 12);
+
+            let fetched_log = audit_repo
+                .get(&tr, &dir, &logs.items[0].log_id)
+                .await
+                .unwrap();
+            assert_eq!(fetched_log.actor, "order_created");
+        }
     }
 }
+
+

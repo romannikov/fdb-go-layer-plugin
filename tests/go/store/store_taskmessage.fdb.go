@@ -70,7 +70,7 @@ func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transac
 	}
 
 	options := fdb.RangeOptions{Limit: 1}
-	rows := tr.GetRange(prefixRange, options).GetSliceOrPanic()
+	rows := fdblayer.GetRange(tr, prefixRange, options).GetSliceOrPanic()
 
 	if len(rows) == 0 {
 		return nil, nil

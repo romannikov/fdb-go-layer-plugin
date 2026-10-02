@@ -296,7 +296,7 @@ func (r *productRepository) GetProductByCategory(ctx context.Context, tr fdb.Rea
 	if err != nil {
 		return nil, err
 	}
-	kvs := tr.GetRange(indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
+	kvs := fdblayer.GetRange(tr, indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
 	futures := make([]fdb.FutureByteSlice, len(kvs))
 	for i, kv := range kvs {
 		if err := ctx.Err(); err != nil {

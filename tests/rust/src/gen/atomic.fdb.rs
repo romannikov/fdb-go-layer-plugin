@@ -12,6 +12,12 @@ pub struct Counter {
     pub max_value: i64,
     #[prost(int64, tag = "4")]
     pub min_value: i64,
+    #[prost(uint64, tag = "5")]
+    pub u64_max: u64,
+    #[prost(int32, tag = "6")]
+    pub i32_min: i32,
+    #[prost(uint32, tag = "7")]
+    pub u32_add: u32,
 }
 
 #[allow(dead_code)]
@@ -43,11 +49,14 @@ impl CounterRepository {
         if tr.get(&key, false).await?.is_some() {
             return Err(fdb_layer::FdbLayerError::AlreadyExists("counter"));
         }
-        let value = if entity.value != 0 || entity.max_value != 0 || entity.min_value != 0 {
+        let value = if entity.value != 0 || entity.max_value != 0 || entity.min_value != 0 || entity.u64_max != 0 || entity.i32_min != 0 || entity.u32_add != 0 {
             let mut clean_entity = entity.clone();
             clean_entity.value = 0;
             clean_entity.max_value = 0;
             clean_entity.min_value = 0;
+            clean_entity.u64_max = 0;
+            clean_entity.i32_min = 0;
+            clean_entity.u32_add = 0;
             fdb_layer::prost::Message::encode_to_vec(&clean_entity)
         } else {
             fdb_layer::prost::Message::encode_to_vec(entity)
@@ -67,6 +76,21 @@ impl CounterRepository {
             let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &entity.id, 4i64));
             let buf = ((entity.min_value as u64) ^ (1u64 << 63)).to_le_bytes();
             tr.atomic_op(&field_key, &buf, fdb_layer::MutationType::Min);
+        }
+        if entity.u64_max != 0 {
+            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &entity.id, 5i64));
+            let buf = (entity.u64_max as u64).to_le_bytes();
+            tr.atomic_op(&field_key, &buf, fdb_layer::MutationType::Max);
+        }
+        if entity.i32_min != 0 {
+            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &entity.id, 6i64));
+            let buf = ((entity.i32_min as i64 as u64) ^ (1u64 << 63)).to_le_bytes();
+            tr.atomic_op(&field_key, &buf, fdb_layer::MutationType::Min);
+        }
+        if entity.u32_add != 0 {
+            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &entity.id, 7i64));
+            let buf = (entity.u32_add as u64).to_le_bytes();
+            tr.atomic_op(&field_key, &buf, fdb_layer::MutationType::Add);
         }
         Ok(())
     }
@@ -90,6 +114,9 @@ impl CounterRepository {
         entity.value = 0;
         entity.max_value = 0;
         entity.min_value = 0;
+        entity.u64_max = 0;
+        entity.i32_min = 0;
+        entity.u32_add = 0;
         for fkv in &field_kvs {
             if fkv.value().len() < 8 {
                 continue;
@@ -109,6 +136,9 @@ impl CounterRepository {
                 2 => entity.value = raw_u64 as i64,
                 3 => entity.max_value = (raw_u64 ^ (1u64 << 63)) as i64,
                 4 => entity.min_value = (raw_u64 ^ (1u64 << 63)) as i64,
+                5 => entity.u64_max = raw_u64 as u64,
+                6 => entity.i32_min = ((raw_u64 ^ (1u64 << 63)) as i64) as i32,
+                7 => entity.u32_add = raw_u64 as u32,
                 _ => {}
             }
         }
@@ -123,11 +153,14 @@ impl CounterRepository {
     ) -> Result<(), fdb_layer::FdbLayerError> {
         let type_id = self.store.get_type_id("Counter")?;
         let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, &entity.id));
-        let value = if entity.value != 0 || entity.max_value != 0 || entity.min_value != 0 {
+        let value = if entity.value != 0 || entity.max_value != 0 || entity.min_value != 0 || entity.u64_max != 0 || entity.i32_min != 0 || entity.u32_add != 0 {
             let mut clean_entity = entity.clone();
             clean_entity.value = 0;
             clean_entity.max_value = 0;
             clean_entity.min_value = 0;
+            clean_entity.u64_max = 0;
+            clean_entity.i32_min = 0;
+            clean_entity.u32_add = 0;
             fdb_layer::prost::Message::encode_to_vec(&clean_entity)
         } else {
             fdb_layer::prost::Message::encode_to_vec(entity)
@@ -155,6 +188,18 @@ impl CounterRepository {
         }
         {
             let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, pk, 4i64));
+            tr.clear(&field_key);
+        }
+        {
+            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, pk, 5i64));
+            tr.clear(&field_key);
+        }
+        {
+            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, pk, 6i64));
+            tr.clear(&field_key);
+        }
+        {
+            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, pk, 7i64));
             tr.clear(&field_key);
         }
         Ok(())
@@ -197,6 +242,9 @@ impl CounterRepository {
             entity.value = 0;
             entity.max_value = 0;
             entity.min_value = 0;
+            entity.u64_max = 0;
+            entity.i32_min = 0;
+            entity.u32_add = 0;
             for fkv in &field_slices[i] {
                 if fkv.value().len() < 8 {
                     continue;
@@ -216,6 +264,9 @@ impl CounterRepository {
                     2 => entity.value = raw_u64 as i64,
                     3 => entity.max_value = (raw_u64 ^ (1u64 << 63)) as i64,
                     4 => entity.min_value = (raw_u64 ^ (1u64 << 63)) as i64,
+                    5 => entity.u64_max = raw_u64 as u64,
+                    6 => entity.i32_min = ((raw_u64 ^ (1u64 << 63)) as i64) as i32,
+                    7 => entity.u32_add = raw_u64 as u32,
                     _ => {}
                 }
             }
@@ -277,6 +328,9 @@ impl CounterRepository {
                 entity.value = 0;
                 entity.max_value = 0;
                 entity.min_value = 0;
+                entity.u64_max = 0;
+                entity.i32_min = 0;
+                entity.u32_add = 0;
                 let pk_bytes = fdb_layer::foundationdb_tuple::pack(&(&entity.id,));
                 idx_by_pk.insert(pk_bytes, idx);
             }
@@ -313,6 +367,9 @@ impl CounterRepository {
                     2 => entity.value = raw_u64 as i64,
                     3 => entity.max_value = (raw_u64 ^ (1u64 << 63)) as i64,
                     4 => entity.min_value = (raw_u64 ^ (1u64 << 63)) as i64,
+                    5 => entity.u64_max = raw_u64 as u64,
+                    6 => entity.i32_min = ((raw_u64 ^ (1u64 << 63)) as i64) as i32,
+                    7 => entity.u32_add = raw_u64 as u32,
                     _ => {}
                 }
             }
@@ -359,6 +416,48 @@ impl CounterRepository {
         let key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &id, 4i64));
         let buf = ((val as u64) ^ (1u64 << 63)).to_le_bytes();
         tr.atomic_op(&key, &buf, fdb_layer::MutationType::Min);
+        Ok(())
+    }
+
+    pub async fn max_counter_u64_max(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        id: &str,
+        val: u64,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("Counter")?;
+        let key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &id, 5i64));
+        let buf = (val as u64).to_le_bytes();
+        tr.atomic_op(&key, &buf, fdb_layer::MutationType::Max);
+        Ok(())
+    }
+
+    pub async fn min_counter_i32_min(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        id: &str,
+        val: i32,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("Counter")?;
+        let key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &id, 6i64));
+        let buf = ((val as i64 as u64) ^ (1u64 << 63)).to_le_bytes();
+        tr.atomic_op(&key, &buf, fdb_layer::MutationType::Min);
+        Ok(())
+    }
+
+    pub async fn add_counter_u32_add(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        id: &str,
+        val: u32,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("Counter")?;
+        let key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &id, 7i64));
+        let buf = (val as u64).to_le_bytes();
+        tr.atomic_op(&key, &buf, fdb_layer::MutationType::Add);
         Ok(())
     }
 

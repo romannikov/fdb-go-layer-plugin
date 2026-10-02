@@ -2,6 +2,15 @@
 // Source: store.proto
 
 #[allow(dead_code, clippy::all)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum OrderStatus {
+    Unspecified = 0,
+    Pending = 1,
+    Shipped = 2,
+}
+
+#[allow(dead_code, clippy::all)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct User {
     #[prost(string, tag = "1")]
@@ -849,5 +858,624 @@ impl TaskMessageRepository {
             entity.versionstamp = vs.as_bytes().to_vec();
         }
         Ok(Some(entity))
+    }
+}
+
+#[allow(dead_code, clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Order {
+    #[prost(string, tag = "1")]
+    pub tenant_id: String,
+    #[prost(int32, tag = "2")]
+    pub order_seq: i32,
+    #[prost(enumeration = "OrderStatus", tag = "3")]
+    pub status: i32,
+    #[prost(int64, tag = "4")]
+    pub created_at: i64,
+    #[prost(bytes = "vec", tag = "5")]
+    pub receipt_hash: Vec<u8>,
+    #[prost(bytes = "vec", repeated, tag = "6")]
+    pub attachment_hashes: Vec<Vec<u8>>,
+    #[prost(enumeration = "order::Priority", tag = "7")]
+    pub priority: i32,
+    #[prost(message, optional, tag = "8")]
+    pub address: ::core::option::Option<order::ShippingAddress>,
+    #[prost(message, repeated, tag = "9")]
+    pub history: Vec<order::ShippingAddress>,
+}
+
+#[allow(dead_code, clippy::all)]
+pub mod order {
+    #[allow(dead_code, clippy::all)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Priority {
+        Low = 0,
+        High = 1,
+    }
+
+    #[allow(dead_code, clippy::all)]
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct ShippingAddress {
+        #[prost(string, tag = "1")]
+        pub city: String,
+        #[prost(string, tag = "2")]
+        pub country: String,
+    }
+}
+
+#[allow(dead_code)]
+pub type OrderPaginationOptions = fdb_layer::PaginationOptions;
+#[allow(dead_code)]
+pub type OrderPaginatedResult = fdb_layer::PaginatedResult<Order>;
+
+/// Compound primary key for `Order`.
+#[allow(dead_code, clippy::all)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderPrimaryKey {
+    pub tenant_id: String,
+    pub order_seq: i32,
+}
+
+/// Repository for `Order` entities.
+#[allow(dead_code, clippy::all)]
+#[derive(Clone)]
+pub struct OrderRepository {
+    store: std::sync::Arc<fdb_layer::RecordStore>,
+}
+
+#[allow(dead_code, clippy::all)]
+impl OrderRepository {
+    pub fn new(store: std::sync::Arc<fdb_layer::RecordStore>) -> Self {
+        Self { store }
+    }
+
+    pub async fn create(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        entity: &Order,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("Order")?;
+        let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, &entity.tenant_id, (entity.order_seq as i64)));
+        if tr.get(&key, false).await?.is_some() {
+            return Err(fdb_layer::FdbLayerError::AlreadyExists("order"));
+        }
+        let value = fdb_layer::prost::Message::encode_to_vec(entity);
+        tr.set(&key, &value);
+        tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1001i64, (entity.status as i64), (entity.created_at as i64), &entity.tenant_id, (entity.order_seq as i64))), &[]);
+        tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4117767939i64, fdb_layer::Bytes::from(&entity.receipt_hash[..]), &entity.tenant_id, (entity.order_seq as i64))), &[]);
+        for item in &entity.attachment_hashes {
+            tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1605301564i64, fdb_layer::Bytes::from(&item[..]), &entity.tenant_id, (entity.order_seq as i64))), &[]);
+        }
+        Ok(())
+    }
+
+    pub async fn get(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        pk: OrderPrimaryKey,
+    ) -> Result<Order, fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("Order")?;
+        let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, &pk.tenant_id, (pk.order_seq as i64)));
+        let value_opt = tr.get(&key, false).await?;
+        let value = value_opt.ok_or(fdb_layer::FdbLayerError::NotFound("order"))?;
+        let entity = <Order as fdb_layer::prost::Message>::decode(value.as_ref())?;
+        Ok(entity)
+    }
+
+    pub async fn set(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        entity: &Order,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("Order")?;
+        let mut old: Option<Order> = None;
+        let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, &entity.tenant_id, (entity.order_seq as i64)));
+        if let Some(old_val) = tr.get(&key, false).await? {
+            old = Some(<Order as fdb_layer::prost::Message>::decode(old_val.as_ref())?);
+        }
+        let value = fdb_layer::prost::Message::encode_to_vec(entity);
+        tr.set(&key, &value);
+        let idx_changed = match old {
+            Some(ref old) => old.status != entity.status || old.created_at != entity.created_at,
+            None => true,
+        };
+        if idx_changed {
+            if let Some(ref old) = old {
+                tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1001i64, (old.status as i64), (old.created_at as i64), &old.tenant_id, (old.order_seq as i64))));
+            }
+            tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1001i64, (entity.status as i64), (entity.created_at as i64), &entity.tenant_id, (entity.order_seq as i64))), &[]);
+        }
+        let idx_changed = match old {
+            Some(ref old) => old.receipt_hash != entity.receipt_hash,
+            None => true,
+        };
+        if idx_changed {
+            if let Some(ref old) = old {
+                tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4117767939i64, fdb_layer::Bytes::from(&old.receipt_hash[..]), &old.tenant_id, (old.order_seq as i64))));
+            }
+            tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4117767939i64, fdb_layer::Bytes::from(&entity.receipt_hash[..]), &entity.tenant_id, (entity.order_seq as i64))), &[]);
+        }
+        if let Some(ref old) = old {
+            let old_set: std::collections::HashSet<_> = old.attachment_hashes.iter().collect();
+            let new_set: std::collections::HashSet<_> = entity.attachment_hashes.iter().collect();
+            for item in &old.attachment_hashes {
+                if !new_set.contains(item) {
+                    tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1605301564i64, fdb_layer::Bytes::from(&item[..]), &old.tenant_id, (old.order_seq as i64))));
+                }
+            }
+            for item in &entity.attachment_hashes {
+                if !old_set.contains(item) {
+                    tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1605301564i64, fdb_layer::Bytes::from(&item[..]), &entity.tenant_id, (entity.order_seq as i64))), &[]);
+                }
+            }
+        } else {
+            for item in &entity.attachment_hashes {
+                tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1605301564i64, fdb_layer::Bytes::from(&item[..]), &entity.tenant_id, (entity.order_seq as i64))), &[]);
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn delete(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        pk: OrderPrimaryKey,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("Order")?;
+        let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, &pk.tenant_id, (pk.order_seq as i64)));
+        if let Some(value) = tr.get(&key, false).await? {
+            let entity = <Order as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1001i64, (entity.status as i64), (entity.created_at as i64), &entity.tenant_id, (entity.order_seq as i64))));
+            tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4117767939i64, fdb_layer::Bytes::from(&entity.receipt_hash[..]), &entity.tenant_id, (entity.order_seq as i64))));
+            for item in &entity.attachment_hashes {
+                tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1605301564i64, fdb_layer::Bytes::from(&item[..]), &entity.tenant_id, (entity.order_seq as i64))));
+            }
+        }
+        tr.clear(&key);
+        Ok(())
+    }
+
+    pub async fn batch_get_order(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        ids: &[Vec<fdb_layer::Element<'_>>],
+    ) -> Result<std::collections::HashMap<String, Order>, fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("Order")?;
+        let mut result = std::collections::HashMap::new();
+        let mut val_futures = Vec::with_capacity(ids.len());
+        for id in ids {
+            let mut key_tpl = Vec::with_capacity(2 + id.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend(id.iter().cloned());
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        for (i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <Order as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            result.insert(fdb_layer::format_tuple(&ids[i]), entity);
+        }
+        Ok(result)
+    }
+
+    pub async fn list_order(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        opts: OrderPaginationOptions,
+    ) -> Result<OrderPaginatedResult, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("Order")?;
+        let mut result = OrderPaginatedResult::default();
+        let mut begin_tpl = Vec::with_capacity(2 + opts.begin.len());
+        begin_tpl.push(fdb_layer::Element::Int(type_id));
+        begin_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+        begin_tpl.extend(opts.begin.iter().cloned());
+        let begin = dir.pack(&begin_tpl);
+        let data_prefix = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE));
+        let (_, end) = fdb_layer::prefix_range(&data_prefix);
+        let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
+        let range_opt = fdb_layer::RangeOption {
+            begin: fdb_layer::KeySelector::first_greater_or_equal(begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(end),
+            limit,
+            reverse: false,
+            ..fdb_layer::RangeOption::default()
+        };
+        let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;
+        let mut next_key_raw: Option<Vec<u8>> = None;
+        for kv in &kvs {
+            let entity = <Order as fdb_layer::prost::Message>::decode(kv.value())?;
+            result.items.push(entity);
+            next_key_raw = Some(kv.key().to_vec());
+            if opts.limit > 0 && result.items.len() > opts.limit {
+                break;
+            }
+        }
+        result.has_more = opts.limit > 0 && result.items.len() > opts.limit;
+        if result.has_more {
+            if let Some(ref nk) = next_key_raw {
+                let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(nk)?;
+                result.next_key = tpl.into_iter().skip(2).map(|e| e.into_owned()).collect();
+            }
+            result.items.truncate(opts.limit);
+        }
+        Ok(result)
+    }
+
+    pub async fn get_order_by_status_and_created_at(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        status: i32, created_at: i64,
+    ) -> Result<Vec<Order>, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("Order")?;
+        let index_key_prefix = dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1001i64, (status as i64), (created_at as i64)));
+        let index_range = fdb_layer::prefix_range_option(&index_key_prefix, None);
+        let kvs: Vec<_> = tr.get_ranges_keyvalues(index_range, false).try_collect().await?;
+        let mut val_futures = Vec::with_capacity(kvs.len());
+        for kv in &kvs {
+            let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;
+            let pk_index_start = 3 + 2usize;
+            if tpl.len() <= pk_index_start {
+                continue;
+            }
+            let pk_tuple = &tpl[pk_index_start..];
+            let mut key_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend_from_slice(pk_tuple);
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        let mut entities = Vec::with_capacity(values.len());
+        for (_i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <Order as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            entities.push(entity);
+        }
+        Ok(entities)
+    }
+
+    pub async fn get_order_by_receipt_hash(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        receipt_hash: &[u8],
+    ) -> Result<Vec<Order>, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("Order")?;
+        let index_key_prefix = dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4117767939i64, fdb_layer::Bytes::from(&receipt_hash[..])));
+        let index_range = fdb_layer::prefix_range_option(&index_key_prefix, None);
+        let kvs: Vec<_> = tr.get_ranges_keyvalues(index_range, false).try_collect().await?;
+        let mut val_futures = Vec::with_capacity(kvs.len());
+        for kv in &kvs {
+            let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;
+            let pk_index_start = 3 + 1usize;
+            if tpl.len() <= pk_index_start {
+                continue;
+            }
+            let pk_tuple = &tpl[pk_index_start..];
+            let mut key_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend_from_slice(pk_tuple);
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        let mut entities = Vec::with_capacity(values.len());
+        for (_i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <Order as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            entities.push(entity);
+        }
+        Ok(entities)
+    }
+
+    pub async fn get_order_by_attachment_hashes(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        attachment_hashes: &[u8],
+    ) -> Result<Vec<Order>, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("Order")?;
+        let index_key_prefix = dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1605301564i64, fdb_layer::Bytes::from(&attachment_hashes[..])));
+        let index_range = fdb_layer::prefix_range_option(&index_key_prefix, None);
+        let kvs: Vec<_> = tr.get_ranges_keyvalues(index_range, false).try_collect().await?;
+        let mut val_futures = Vec::with_capacity(kvs.len());
+        for kv in &kvs {
+            let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;
+            let pk_index_start = 3 + 1usize;
+            if tpl.len() <= pk_index_start {
+                continue;
+            }
+            let pk_tuple = &tpl[pk_index_start..];
+            let mut key_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend_from_slice(pk_tuple);
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        let mut entities = Vec::with_capacity(values.len());
+        for (_i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <Order as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            entities.push(entity);
+        }
+        Ok(entities)
+    }
+
+}
+
+#[fdb_layer::async_trait]
+impl fdb_layer::GenericRepository<Order, OrderPrimaryKey> for OrderRepository {
+    async fn create(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        entity: &Order,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        Self::create(self, tr, dir, entity).await
+    }
+
+    async fn get(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        pk: OrderPrimaryKey,
+    ) -> Result<Order, fdb_layer::FdbLayerError> {
+        Self::get(self, tr, dir, pk).await
+    }
+
+    async fn set(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        entity: &Order,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        Self::set(self, tr, dir, entity).await
+    }
+
+    async fn delete(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        pk: OrderPrimaryKey,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        Self::delete(self, tr, dir, pk).await
+    }
+}
+
+#[allow(dead_code, clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AuditLog {
+    #[prost(bytes = "vec", tag = "1")]
+    pub log_id: Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub actor: String,
+}
+
+#[allow(dead_code)]
+pub type AuditLogPaginationOptions = fdb_layer::PaginationOptions;
+#[allow(dead_code)]
+pub type AuditLogPaginatedResult = fdb_layer::PaginatedResult<AuditLog>;
+
+/// Repository for `AuditLog` entities.
+#[allow(dead_code, clippy::all)]
+#[derive(Clone)]
+pub struct AuditLogRepository {
+    store: std::sync::Arc<fdb_layer::RecordStore>,
+}
+
+#[allow(dead_code, clippy::all)]
+impl AuditLogRepository {
+    pub fn new(store: std::sync::Arc<fdb_layer::RecordStore>) -> Self {
+        Self { store }
+    }
+
+    pub async fn create(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        entity: &AuditLog,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("AuditLog")?;
+        let key = dir.pack_with_versionstamp(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::Versionstamp::incomplete(self.store.next_user_version())));
+        let value = fdb_layer::prost::Message::encode_to_vec(entity);
+        tr.atomic_op(&key, &value, fdb_layer::MutationType::SetVersionstampedKey);
+        Ok(())
+    }
+
+    pub async fn get(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        pk: &[u8],
+    ) -> Result<AuditLog, fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("AuditLog")?;
+        let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::bytes_to_versionstamp(&pk[..])));
+        let value_opt = tr.get(&key, false).await?;
+        let value = value_opt.ok_or(fdb_layer::FdbLayerError::NotFound("auditlog"))?;
+        let mut entity = <AuditLog as fdb_layer::prost::Message>::decode(value.as_ref())?;
+        if let Ok(tpl) = dir.unpack::<Vec<fdb_layer::Element<'_>>>(&key) {
+            if let Some(vs) = tpl.get(2).and_then(|e| e.as_versionstamp()) {
+                entity.log_id = vs.as_bytes().to_vec();
+            }
+        }
+        Ok(entity)
+    }
+
+    pub async fn set(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        entity: &AuditLog,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("AuditLog")?;
+        if entity.log_id.iter().any(|&b| b != 0) {
+            let old_key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::bytes_to_versionstamp(&entity.log_id[..])));
+            tr.clear(&old_key);
+        }
+        let key = dir.pack_with_versionstamp(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::Versionstamp::incomplete(self.store.next_user_version())));
+        let value = fdb_layer::prost::Message::encode_to_vec(entity);
+        tr.atomic_op(&key, &value, fdb_layer::MutationType::SetVersionstampedKey);
+        Ok(())
+    }
+
+    pub async fn delete(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        pk: &[u8],
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("AuditLog")?;
+        let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::bytes_to_versionstamp(&pk[..])));
+        tr.clear(&key);
+        Ok(())
+    }
+
+    pub async fn batch_get_audit_log(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        ids: &[Vec<fdb_layer::Element<'_>>],
+    ) -> Result<std::collections::HashMap<String, AuditLog>, fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("AuditLog")?;
+        let mut result = std::collections::HashMap::new();
+        let mut val_futures = Vec::with_capacity(ids.len());
+        for id in ids {
+            let mut key_tpl = Vec::with_capacity(2 + id.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend(id.iter().cloned());
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        for (i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <AuditLog as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            result.insert(fdb_layer::format_tuple(&ids[i]), entity);
+        }
+        Ok(result)
+    }
+
+    pub async fn list_audit_log(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        opts: AuditLogPaginationOptions,
+    ) -> Result<AuditLogPaginatedResult, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("AuditLog")?;
+        let mut result = AuditLogPaginatedResult::default();
+        let mut begin_tpl = Vec::with_capacity(2 + opts.begin.len());
+        begin_tpl.push(fdb_layer::Element::Int(type_id));
+        begin_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+        begin_tpl.extend(opts.begin.iter().cloned());
+        let begin = dir.pack(&begin_tpl);
+        let data_prefix = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE));
+        let (_, end) = fdb_layer::prefix_range(&data_prefix);
+        let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
+        let range_opt = fdb_layer::RangeOption {
+            begin: fdb_layer::KeySelector::first_greater_or_equal(begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(end),
+            limit,
+            reverse: false,
+            ..fdb_layer::RangeOption::default()
+        };
+        let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;
+        let mut next_key_raw: Option<Vec<u8>> = None;
+        for kv in &kvs {
+            let mut entity = <AuditLog as fdb_layer::prost::Message>::decode(kv.value())?;
+            if let Ok(tpl) = dir.unpack::<Vec<fdb_layer::Element<'_>>>(kv.key()) {
+                if let Some(vs) = tpl.get(2).and_then(|e| e.as_versionstamp()) {
+                    entity.log_id = vs.as_bytes().to_vec();
+                }
+            }
+            result.items.push(entity);
+            next_key_raw = Some(kv.key().to_vec());
+            if opts.limit > 0 && result.items.len() > opts.limit {
+                break;
+            }
+        }
+        result.has_more = opts.limit > 0 && result.items.len() > opts.limit;
+        if result.has_more {
+            if let Some(ref nk) = next_key_raw {
+                let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(nk)?;
+                result.next_key = tpl.into_iter().skip(2).map(|e| e.into_owned()).collect();
+            }
+            result.items.truncate(opts.limit);
+        }
+        Ok(result)
+    }
+
+}
+
+#[fdb_layer::async_trait]
+impl fdb_layer::GenericRepository<AuditLog, Vec<u8>> for AuditLogRepository {
+    async fn create(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        entity: &AuditLog,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        Self::create(self, tr, dir, entity).await
+    }
+
+    async fn get(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        pk: Vec<u8>,
+    ) -> Result<AuditLog, fdb_layer::FdbLayerError> {
+        Self::get(self, tr, dir, &pk).await
+    }
+
+    async fn set(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        entity: &AuditLog,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        Self::set(self, tr, dir, entity).await
+    }
+
+    async fn delete(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        pk: Vec<u8>,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        Self::delete(self, tr, dir, &pk).await
     }
 }

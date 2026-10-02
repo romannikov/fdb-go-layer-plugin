@@ -83,6 +83,7 @@ func TestCrossLanguageConformance_GoAndRust(t *testing.T) {
 	productRepo := store.NewProductRepository(recordStore)
 	postRepo := store.NewPostRepository(recordStore)
 	taskRepo := store.NewTaskMessageRepository(recordStore)
+	orderRepo := store.NewOrderRepository(recordStore)
 	counterRepo := atomic.NewCounterRepository(recordStore)
 
 	// =========================================================================
@@ -90,7 +91,7 @@ func TestCrossLanguageConformance_GoAndRust(t *testing.T) {
 	// =========================================================================
 	withTx(t, db, func(tr fdb.Transaction) error {
 		return recordStore.SyncMetadata(ctx, tr, dir, []string{
-			"User", "Product", "Post", "TaskMessage", "Counter",
+			"User", "Product", "Post", "TaskMessage", "Order", "Counter",
 		})
 	})
 
@@ -115,8 +116,24 @@ func TestCrossLanguageConformance_GoAndRust(t *testing.T) {
 		}); err != nil {
 			return err
 		}
+		if err := orderRepo.Create(ctx, tr, dir, &store.Order{
+			TenantId:         "acme",
+			OrderSeq:         42,
+			Status:           store.OrderStatus_ORDER_STATUS_PENDING,
+			CreatedAt:        1700000000,
+			ReceiptHash:      []byte{0x01, 0x02, 0x03},
+			AttachmentHashes: [][]byte{{0xAA, 0xBB}, {0xCC, 0xDD}},
+			Priority:         store.Order_PRIORITY_HIGH,
+			Address: &store.Order_ShippingAddress{
+				City:    "Zurich",
+				Country: "Switzerland",
+			},
+		}); err != nil {
+			return err
+		}
 		return counterRepo.Create(ctx, tr, dir, &atomic.Counter{
 			Id: "cnt1", Value: 100, MaxValue: 500, MinValue: 20,
+			U64Max: 1000, I32Min: -10, U32Add: 5,
 		})
 	})
 
@@ -226,18 +243,37 @@ func TestCrossLanguageConformance_GoAndRust(t *testing.T) {
 		t.Fatalf("unexpected book product created by Rust: %+v", bookProducts)
 	}
 
-	// 5. Verify Counter cnt1 atomic mutations applied by Rust
+	// 5. Verify Order updated by Rust (compound PK, compound index, bytes index, fan-out bytes index, nested types)
+	var shippedOrders, attachOrders []*store.Order
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		shippedOrders, err = orderRepo.GetOrderByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000)
+		if err != nil {
+			return err
+		}
+		attachOrders, err = orderRepo.GetOrderByAttachmentHashes(ctx, tr, dir, []byte{0xEE, 0xFF})
+		return err
+	})
+	if len(shippedOrders) != 1 || shippedOrders[0].OrderSeq != 42 || shippedOrders[0].Address.GetCity() != "Geneva" {
+		t.Fatalf("unexpected shippedOrders after Rust update: %+v", shippedOrders)
+	}
+	if len(attachOrders) != 1 || attachOrders[0].OrderSeq != 42 {
+		t.Fatalf("unexpected attachOrders after Rust update: %+v", attachOrders)
+	}
+
+
+	// 6. Verify Counter cnt1 atomic mutations applied by Rust
 	var cnt1 *atomic.Counter
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
 		cnt1, err = counterRepo.Get(ctx, tr, dir, "cnt1")
 		return err
 	})
-	if cnt1.Value != 200 || cnt1.MaxValue != 1000 || cnt1.MinValue != 5 {
+	if cnt1.Value != 200 || cnt1.MaxValue != 1000 || cnt1.MinValue != 5 || cnt1.U64Max != 2000 || cnt1.I32Min != -50 || cnt1.U32Add != 15 {
 		t.Fatalf("unexpected counter state after Rust atomic ops: %+v", cnt1)
 	}
 
-	// 6. Verify Queue FIFO order across Go and Rust enqueues/dequeues
+	// 7. Verify Queue FIFO order across Go and Rust enqueues/dequeues
 	var nextTask1, nextTask2, emptyTask *store.TaskMessage
 	withTx(t, db, func(tr fdb.Transaction) error {
 		var err error
@@ -266,3 +302,4 @@ func TestCrossLanguageConformance_GoAndRust(t *testing.T) {
 		t.Fatalf("expected empty queue after dequeuing all items, got %+v", emptyTask)
 	}
 }
+

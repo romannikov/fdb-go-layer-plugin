@@ -321,19 +321,40 @@ func buildMessageSpecInternal(
 	isQueue bool,
 	allowUnannotated bool,
 ) (*MessageSpec, error) {
+	vsCount := 0
 	for _, f := range fields {
 		if err := ValidateFieldSpec(f, msgName); err != nil {
 			return nil, err
 		}
+		if f.IsVersionstamp {
+			vsCount++
+			if vsCount > 1 {
+				return nil, fmt.Errorf("message %s has multiple is_versionstamp=true fields", msgName)
+			}
+		}
 	}
 
+	pkSet := make(map[string]bool, len(primaryKey))
 	primaryKeyFields := make([]FieldSpec, 0, len(primaryKey))
 	for _, pkName := range primaryKey {
 		f, ok := fieldMap[pkName]
 		if !ok {
 			return nil, fmt.Errorf("primary key field %q not found in message %s", pkName, msgName)
 		}
+		if f.IsRepeated {
+			return nil, fmt.Errorf("primary key field %q in message %s cannot be repeated", pkName, msgName)
+		}
+		if f.Mutation != MutationNone {
+			return nil, fmt.Errorf("primary key field %q in message %s cannot have an atomic mutation", pkName, msgName)
+		}
+		pkSet[pkName] = true
 		primaryKeyFields = append(primaryKeyFields, f)
+	}
+
+	for _, f := range fields {
+		if f.IsVersionstamp && !pkSet[f.ProtoName] {
+			return nil, fmt.Errorf("field %q in message %s is marked is_versionstamp=true but is not in primary_key", f.ProtoName, msgName)
+		}
 	}
 
 	usedHashes := make(map[int64]string)
@@ -351,6 +372,9 @@ func buildMessageSpecInternal(
 	}
 
 	if isQueue {
+		if !MsgHasVersionstampPK(MessageSpec{PrimaryKeyFields: primaryKeyFields}) {
+			return nil, fmt.Errorf("queue message %s must have an is_versionstamp=true primary key field", msgName)
+		}
 		primaryKeyFields = ReorderQueuePrimaryKeyFields(primaryKeyFields)
 	}
 
@@ -502,6 +526,9 @@ func BuildSecondaryIndex(
 		f, ok := fieldMap[idxFieldName]
 		if !ok {
 			return SecondaryIndexSpec{}, fmt.Errorf("secondary index field %q not found in message %s", idxFieldName, msgName)
+		}
+		if f.Mutation != MutationNone {
+			return SecondaryIndexSpec{}, fmt.Errorf("secondary index field %q in message %s cannot have an atomic mutation", idxFieldName, msgName)
 		}
 		idxFields = append(idxFields, f)
 	}

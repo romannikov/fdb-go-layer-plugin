@@ -317,3 +317,16 @@ impl RecordStore {
         Ok(())
     }
 }
+
+/// Converts a 12-byte slice into a complete `Versionstamp`.
+pub fn bytes_to_versionstamp(b: &[u8]) -> Versionstamp {
+    let mut tr_version = [0u8; 10];
+    let copy_len = b.len().min(10);
+    tr_version[..copy_len].copy_from_slice(&b[..copy_len]);
+    let user_version = if b.len() >= 12 {
+        u16::from_be_bytes([b[10], b[11]])
+    } else {
+        0
+    };
+    Versionstamp::complete(tr_version, user_version)
+}

@@ -542,9 +542,22 @@ func generateGet(g Printer, msg ir.MessageSpec) {
 		g.P("        let value_opt = tr.get(&key, false).await?;")
 	}
 	g.P("        let value = value_opt.ok_or(fdb_layer::FdbLayerError::NotFound(\"", lowerName, "\"))?;")
-	if hasMut {
+	if hasMut || ir.MsgHasVersionstampPK(msg) {
 		g.P("        let mut entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(value.as_ref())?;")
-		generateUnmarshalAtomicFields(g, msg, "&field_kvs", "        ")
+		if ir.MsgHasVersionstampPK(msg) {
+			g.P("        if let Ok(tpl) = dir.unpack::<Vec<fdb_layer::Element<'_>>>(&key) {")
+			for i, f := range msg.PrimaryKeyFields {
+				if f.IsVersionstamp {
+					g.P("            if let Some(vs) = tpl.get(", i+2, ").and_then(|e| e.as_versionstamp()) {")
+					g.P("                entity.", FieldIdent(f), " = vs.as_bytes().to_vec();")
+					g.P("            }")
+				}
+			}
+			g.P("        }")
+		}
+		if hasMut {
+			generateUnmarshalAtomicFields(g, msg, "&field_kvs", "        ")
+		}
 	} else {
 		g.P("        let entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(value.as_ref())?;")
 	}
@@ -809,7 +822,20 @@ func generateList(g Printer, msg ir.MessageSpec) {
 	g.P("        let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;")
 	g.P("        let mut next_key_raw: Option<Vec<u8>> = None;")
 	g.P("        for kv in &kvs {")
-	g.P("            let entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(kv.value())?;")
+	if ir.MsgHasVersionstampPK(msg) {
+		g.P("            let mut entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(kv.value())?;")
+		g.P("            if let Ok(tpl) = dir.unpack::<Vec<fdb_layer::Element<'_>>>(kv.key()) {")
+		for i, f := range msg.PrimaryKeyFields {
+			if f.IsVersionstamp {
+				g.P("                if let Some(vs) = tpl.get(", i+2, ").and_then(|e| e.as_versionstamp()) {")
+				g.P("                    entity.", FieldIdent(f), " = vs.as_bytes().to_vec();")
+				g.P("                }")
+			}
+		}
+		g.P("            }")
+	} else {
+		g.P("            let entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(kv.value())?;")
+	}
 	g.P("            result.items.push(entity);")
 	g.P("            next_key_raw = Some(kv.key().to_vec());")
 	g.P("            if opts.limit > 0 && result.items.len() > opts.limit {")
@@ -1113,6 +1139,10 @@ func FieldRustParamType(f ir.FieldSpec) string {
 // compatibility with Go's PackField (signed ints/enums -> i64, unsigned ints -> u64,
 // bytes -> fdb_layer::Bytes (0x01 byte string)).
 func PackField(expr string, f ir.FieldSpec) string {
+	if f.IsVersionstamp {
+		clean := strings.TrimPrefix(expr, "&")
+		return fmt.Sprintf("fdb_layer::bytes_to_versionstamp(&%s[..])", clean)
+	}
 	if f.IsUnsigned || f.Kind == ir.KindUint32 || f.Kind == ir.KindFixed32 || f.Kind == ir.KindUint64 || f.Kind == ir.KindFixed64 {
 		return fmt.Sprintf("(%s as u64)", expr)
 	}

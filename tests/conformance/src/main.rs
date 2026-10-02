@@ -1,8 +1,8 @@
 use fdb_layer::{Database, Element, RecordStore, Subspace};
 use fdb_layer_tests::atomic::CounterRepository;
 use fdb_layer_tests::store::{
-    Post, PostRepository, Product, ProductRepository, TaskMessage, TaskMessageRepository, User,
-    UserRepository,
+    order, Order, OrderPrimaryKey, OrderRepository, OrderStatus, Post, PostRepository, Product,
+    ProductRepository, TaskMessage, TaskMessageRepository, User, UserRepository,
 };
 use std::sync::Arc;
 
@@ -18,16 +18,17 @@ async fn main() {
     let product_repo = ProductRepository::new(store.clone());
     let post_repo = PostRepository::new(store.clone());
     let task_repo = TaskMessageRepository::new(store.clone());
+    let order_repo = OrderRepository::new(store.clone());
     let counter_repo = CounterRepository::new(store.clone());
 
-    // 1. Sync metadata and verify all 5 types registered by Go exist
+    // 1. Sync metadata and verify all 6 types registered by Go exist
     {
         let tr = db.create_trx().unwrap();
         store
             .sync_metadata(
                 &tr,
                 &dir,
-                &["User", "Product", "Post", "TaskMessage", "Counter"],
+                &["User", "Product", "Post", "TaskMessage", "Order", "Counter"],
             )
             .await
             .expect("sync_metadata failed in Rust");
@@ -35,7 +36,7 @@ async fn main() {
     }
 
     let meta = store.metadata();
-    assert_eq!(meta.len(), 5, "expected 5 metadata entries, got {meta:?}");
+    assert_eq!(meta.len(), 6, "expected 6 metadata entries, got {meta:?}");
 
     // 2. Read and verify records written by Go
     {
@@ -83,6 +84,26 @@ async fn main() {
         assert_eq!(go_posts.len(), 1);
         assert_eq!(go_posts[0].id, "post1");
 
+        let ord = order_repo
+            .get(
+                &tr,
+                &dir,
+                OrderPrimaryKey {
+                    tenant_id: "acme".into(),
+                    order_seq: 42,
+                },
+            )
+            .await
+            .expect("failed to get Order written by Go");
+        assert_eq!(ord.priority, order::Priority::High as i32);
+        assert_eq!(ord.address.as_ref().unwrap().city, "Zurich");
+
+        let by_receipt = order_repo
+            .get_order_by_receipt_hash(&tr, &dir, &[0x01, 0x02, 0x03])
+            .await
+            .expect("get_order_by_receipt_hash failed");
+        assert_eq!(by_receipt.len(), 1);
+
         let cnt1 = counter_repo
             .get(&tr, &dir, "cnt1")
             .await
@@ -90,6 +111,9 @@ async fn main() {
         assert_eq!(cnt1.value, 125);
         assert_eq!(cnt1.max_value, 750);
         assert_eq!(cnt1.min_value, 10);
+        assert_eq!(cnt1.u64_max, 1000);
+        assert_eq!(cnt1.i32_min, -10);
+        assert_eq!(cnt1.u32_add, 5);
     }
 
     // 3. Dequeue the first task enqueued by Go
@@ -156,6 +180,30 @@ async fn main() {
             .await
             .unwrap();
 
+        // Update Order from Rust (updates compound index, bytes index, and fan-out bytes index)
+        order_repo
+            .set(
+                &tr,
+                &dir,
+                &Order {
+                    tenant_id: "acme".into(),
+                    order_seq: 42,
+                    status: OrderStatus::Shipped as i32,
+                    created_at: 1700000000,
+                    receipt_hash: vec![0x04, 0x05, 0x06],
+                    attachment_hashes: vec![vec![0xCC, 0xDD], vec![0xEE, 0xFF]],
+                    priority: order::Priority::Low as i32,
+                    address: Some(order::ShippingAddress {
+                        city: "Geneva".into(),
+                        country: "Switzerland".into(),
+                    }),
+                    history: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+
         // Apply atomic mutations on cnt1 from Rust
         counter_repo
             .add_counter_value(&tr, &dir, "cnt1", 75)
@@ -167,6 +215,18 @@ async fn main() {
             .unwrap();
         counter_repo
             .min_counter_min_value(&tr, &dir, "cnt1", 5)
+            .await
+            .unwrap();
+        counter_repo
+            .max_counter_u64_max(&tr, &dir, "cnt1", 2000)
+            .await
+            .unwrap();
+        counter_repo
+            .min_counter_i32_min(&tr, &dir, "cnt1", -50)
+            .await
+            .unwrap();
+        counter_repo
+            .add_counter_u32_add(&tr, &dir, "cnt1", 10)
             .await
             .unwrap();
 
@@ -188,3 +248,4 @@ async fn main() {
         tr.commit().await.unwrap();
     }
 }
+

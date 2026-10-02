@@ -147,3 +147,86 @@ func TestValidateFieldSpec_Errors(t *testing.T) {
 		t.Fatalf("expected atomic mutation type error, got %v", err)
 	}
 }
+
+func TestBuildMessageSpec_ValidationErrors(t *testing.T) {
+	fields := []FieldSpec{
+		{ProtoName: "id", GoName: "Id", Kind: KindString},
+		{ProtoName: "tags", GoName: "Tags", Kind: KindString, IsRepeated: true},
+		{ProtoName: "count", GoName: "Count", Kind: KindInt64, Mutation: MutationAdd},
+		{ProtoName: "vs1", GoName: "Vs1", Kind: KindBytes, IsVersionstamp: true},
+		{ProtoName: "vs2", GoName: "Vs2", Kind: KindBytes, IsVersionstamp: true},
+	}
+	fieldMap := make(map[string]FieldSpec)
+	for _, f := range fields {
+		fieldMap[f.ProtoName] = f
+	}
+
+	// 1. Multiple is_versionstamp = true fields in one message
+	_, err := BuildMessageSpec("InvalidMsg", fields, fieldMap, []string{"id", "vs1", "vs2"}, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "multiple is_versionstamp=true fields") {
+		t.Fatalf("expected multiple versionstamp error, got %v", err)
+	}
+
+	// Remove vs2 for subsequent tests
+	singleVsFields := fields[:4]
+	singleVsMap := map[string]FieldSpec{
+		"id":    fields[0],
+		"tags":  fields[1],
+		"count": fields[2],
+		"vs1":   fields[3],
+	}
+
+	// 2. Non-existent primary_key field
+	_, err = BuildMessageSpec("InvalidMsg", singleVsFields, singleVsMap, []string{"missing"}, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected missing primary key error, got %v", err)
+	}
+
+	// 3. Repeated primary_key field
+	_, err = BuildMessageSpec("InvalidMsg", singleVsFields, singleVsMap, []string{"tags", "vs1"}, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "cannot be repeated") {
+		t.Fatalf("expected repeated primary key error, got %v", err)
+	}
+
+	// 4. Atomic mutation field in primary_key
+	_, err = BuildMessageSpec("InvalidMsg", singleVsFields, singleVsMap, []string{"count", "vs1"}, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "cannot have an atomic mutation") {
+		t.Fatalf("expected atomic mutation primary key error, got %v", err)
+	}
+
+	// 5. Versionstamp field not in primary_key
+	_, err = BuildMessageSpec("InvalidMsg", singleVsFields, singleVsMap, []string{"id"}, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "is not in primary_key") {
+		t.Fatalf("expected versionstamp not in primary_key error, got %v", err)
+	}
+
+	// 6. Queue without versionstamp primary_key field
+	noVsFields := fields[:3]
+	noVsMap := map[string]FieldSpec{
+		"id":    fields[0],
+		"tags":  fields[1],
+		"count": fields[2],
+	}
+	_, err = BuildMessageSpec("InvalidQueue", noVsFields, noVsMap, []string{"id"}, nil, true)
+	if err == nil || !strings.Contains(err.Error(), "must have an is_versionstamp=true primary key field") {
+		t.Fatalf("expected queue missing versionstamp error, got %v", err)
+	}
+
+	// 7. Secondary index referencing non-existent field
+	_, err = BuildMessageSpec("InvalidMsg", noVsFields, noVsMap, []string{"id"}, []*annotationspb.SecondaryIndex{
+		{Fields: []string{"unknown_idx"}},
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected secondary index field not found error, got %v", err)
+	}
+
+	// 8. Secondary index referencing atomic mutation field
+	_, err = BuildMessageSpec("InvalidMsg", noVsFields, noVsMap, []string{"id"}, []*annotationspb.SecondaryIndex{
+		{Fields: []string{"count"}},
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "cannot have an atomic mutation") {
+		t.Fatalf("expected secondary index on atomic mutation field error, got %v", err)
+	}
+}
+
+

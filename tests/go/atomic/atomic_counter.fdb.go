@@ -37,6 +37,9 @@ type CounterRepository interface {
 	AddCounterValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
 	MaxCounterMaxValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
 	MinCounterMinValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
+	MaxCounterU64Max(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val uint64) error
+	MinCounterI32Min(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int32) error
+	AddCounterU32Add(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val uint32) error
 }
 
 type counterRepository struct {
@@ -65,7 +68,7 @@ func (r *counterRepository) Create(ctx context.Context, tr fdblayer.Transaction,
 
 	// Marshal without mutating the caller's struct in-place.
 	marshalTarget := entity
-	if entity.Value != 0 || entity.MaxValue != 0 || entity.MinValue != 0 {
+	if entity.Value != 0 || entity.MaxValue != 0 || entity.MinValue != 0 || entity.U64Max != 0 || entity.I32Min != 0 || entity.U32Add != 0 {
 		marshalTarget = &Counter{
 			Id: entity.Id,
 		}
@@ -95,6 +98,24 @@ func (r *counterRepository) Create(ctx context.Context, tr fdblayer.Transaction,
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(entity.MinValue)^(1<<63))
 		tr.Min(fieldKey, buf)
+	}
+	if entity.U64Max != 0 {
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 5})
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(entity.U64Max))
+		tr.Max(fieldKey, buf)
+	}
+	if entity.I32Min != 0 {
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 6})
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(int64(entity.I32Min))^(1<<63))
+		tr.Min(fieldKey, buf)
+	}
+	if entity.U32Add != 0 {
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 7})
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(entity.U32Add))
+		tr.Add(fieldKey, buf)
 	}
 
 	return nil
@@ -131,6 +152,9 @@ func (r *counterRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir
 	entity.Value = 0
 	entity.MaxValue = 0
 	entity.MinValue = 0
+	entity.U64Max = 0
+	entity.I32Min = 0
+	entity.U32Add = 0
 	for _, fkv := range fieldFuture.GetSliceOrPanic() {
 		if len(fkv.Value) < 8 {
 			continue
@@ -150,6 +174,12 @@ func (r *counterRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir
 			entity.MaxValue = int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63))
 		case 4:
 			entity.MinValue = int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63))
+		case 5:
+			entity.U64Max = uint64(binary.LittleEndian.Uint64(fkv.Value))
+		case 6:
+			entity.I32Min = int32(int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63)))
+		case 7:
+			entity.U32Add = uint32(binary.LittleEndian.Uint64(fkv.Value))
 		}
 	}
 	return entity, nil
@@ -169,7 +199,7 @@ func (r *counterRepository) Set(ctx context.Context, tr fdblayer.Transaction, di
 
 	// Marshal without mutating the caller's struct in-place.
 	marshalTarget := entity
-	if entity.Value != 0 || entity.MaxValue != 0 || entity.MinValue != 0 {
+	if entity.Value != 0 || entity.MaxValue != 0 || entity.MinValue != 0 || entity.U64Max != 0 || entity.I32Min != 0 || entity.U32Add != 0 {
 		marshalTarget = &Counter{
 			Id: entity.Id,
 		}
@@ -208,6 +238,18 @@ func (r *counterRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 	}
 	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 4})
+		tr.Clear(fieldKey)
+	}
+	{
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 5})
+		tr.Clear(fieldKey)
+	}
+	{
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 6})
+		tr.Clear(fieldKey)
+	}
+	{
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 7})
 		tr.Clear(fieldKey)
 	}
 	return nil
@@ -264,6 +306,9 @@ func (r *counterRepository) BatchGetCounter(ctx context.Context, tr fdb.ReadTran
 		entity.Value = 0
 		entity.MaxValue = 0
 		entity.MinValue = 0
+		entity.U64Max = 0
+		entity.I32Min = 0
+		entity.U32Add = 0
 		for _, fkv := range fieldFutures[i].GetSliceOrPanic() {
 			if len(fkv.Value) < 8 {
 				continue
@@ -283,6 +328,12 @@ func (r *counterRepository) BatchGetCounter(ctx context.Context, tr fdb.ReadTran
 				entity.MaxValue = int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63))
 			case 4:
 				entity.MinValue = int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63))
+			case 5:
+				entity.U64Max = uint64(binary.LittleEndian.Uint64(fkv.Value))
+			case 6:
+				entity.I32Min = int32(int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63)))
+			case 7:
+				entity.U32Add = uint32(binary.LittleEndian.Uint64(fkv.Value))
 			}
 		}
 		result[ids[i].String()] = entity
@@ -375,6 +426,9 @@ func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransact
 			entity.Value = 0
 			entity.MaxValue = 0
 			entity.MinValue = 0
+			entity.U64Max = 0
+			entity.I32Min = 0
+			entity.U32Add = 0
 			pkKey := tuple.Tuple{entity.Id}.String()
 			itemByPK[pkKey] = entity
 		}
@@ -403,6 +457,12 @@ func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransact
 				entity.MaxValue = int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63))
 			case 4:
 				entity.MinValue = int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63))
+			case 5:
+				entity.U64Max = uint64(binary.LittleEndian.Uint64(fkv.Value))
+			case 6:
+				entity.I32Min = int32(int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63)))
+			case 7:
+				entity.U32Add = uint32(binary.LittleEndian.Uint64(fkv.Value))
 			}
 		}
 	}
@@ -461,5 +521,59 @@ func (r *counterRepository) MinCounterMinValue(ctx context.Context, tr fdblayer.
 	binary.LittleEndian.PutUint64(buf, uint64(val)^(1<<63))
 
 	tr.Min(key, buf)
+	return nil
+}
+
+// MaxCounterU64Max applies an atomic mutation to the U64Max field of Counter.
+func (r *counterRepository) MaxCounterU64Max(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	typeID, err := r.store.GetTypeID("Counter")
+	if err != nil {
+		return err
+	}
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 5})
+
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, uint64(val))
+
+	tr.Max(key, buf)
+	return nil
+}
+
+// MinCounterI32Min applies an atomic mutation to the I32Min field of Counter.
+func (r *counterRepository) MinCounterI32Min(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int32) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	typeID, err := r.store.GetTypeID("Counter")
+	if err != nil {
+		return err
+	}
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 6})
+
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, uint64(int64(val))^(1<<63))
+
+	tr.Min(key, buf)
+	return nil
+}
+
+// AddCounterU32Add applies an atomic mutation to the U32Add field of Counter.
+func (r *counterRepository) AddCounterU32Add(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val uint32) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	typeID, err := r.store.GetTypeID("Counter")
+	if err != nil {
+		return err
+	}
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 7})
+
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, uint64(val))
+
+	tr.Add(key, buf)
 	return nil
 }

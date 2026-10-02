@@ -228,3 +228,67 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 		t.Fatalf("unexpected c1 after negative Max/Min: %+v", retrieved)
 	}
 }
+
+func TestIntegration_DeleteAndUnsigned32BitAtomic(t *testing.T) {
+	ctx := context.Background()
+	db := fdb.MustOpenDefault()
+	dir, cleanup := tests.TestDir(t, db)
+	defer cleanup()
+
+	recordStore := fdblayer.NewRecordStore()
+	counterRepo := atomic.NewCounterRepository(recordStore)
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"})
+	})
+
+	const highU64 uint64 = 1<<63 + 999
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return counterRepo.Create(ctx, tr, dir, &atomic.Counter{
+			Id:       "c_live",
+			Value:    42,
+			MaxValue: 100,
+			MinValue: 10,
+			U64Max:   500,
+			I32Min:   -10,
+			U32Add:   7,
+		})
+	})
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if err := counterRepo.MaxCounterU64Max(ctx, tr, dir, "c_live", highU64); err != nil {
+			return err
+		}
+		if err := counterRepo.MinCounterI32Min(ctx, tr, dir, "c_live", -300); err != nil {
+			return err
+		}
+		return counterRepo.AddCounterU32Add(ctx, tr, dir, "c_live", 13)
+	})
+
+	var got *atomic.Counter
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		got, err = counterRepo.Get(ctx, tr, dir, "c_live")
+		return err
+	})
+	if got.U64Max != highU64 || got.I32Min != -300 || got.U32Add != 20 {
+		t.Fatalf("unexpected unsigned/32-bit atomic values: %+v", got)
+	}
+
+	// Delete and re-create with zero values to verify FieldNamespace was cleared
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return counterRepo.Delete(ctx, tr, dir, "c_live")
+	})
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return counterRepo.Create(ctx, tr, dir, &atomic.Counter{Id: "c_live"})
+	})
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		got, err = counterRepo.Get(ctx, tr, dir, "c_live")
+		return err
+	})
+	if got.Value != 0 || got.MaxValue != 0 || got.MinValue != 0 || got.U64Max != 0 || got.I32Min != 0 || got.U32Add != 0 {
+		t.Fatalf("Delete did not clear FieldNamespace in live FDB: %+v", got)
+	}
+}
+
