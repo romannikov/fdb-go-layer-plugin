@@ -210,15 +210,14 @@ func generateQueueRepository(g Printer, msg ir.MessageSpec) {
 	g.P("        tr.clear(key_to_delete);")
 	g.P("        let mut entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(payload)?;")
 	if hasVS {
-		g.P("        if let Ok(tpl) = dir.unpack::<Vec<fdb_layer::Element<'_>>>(key_to_delete) {")
+		g.P("        let tpl = dir.unpack::<Vec<fdb_layer::Element<'_>>>(key_to_delete)?;")
 		for i, f := range msg.PrimaryKeyFields {
 			if f.IsVersionstamp {
-				g.P("            if let Some(vs) = tpl.get(", i+2, ").and_then(|e| e.as_versionstamp()) {")
-				g.P("                entity.", FieldIdent(f), " = vs.as_bytes().to_vec();")
-				g.P("            }")
+				g.P("        if let Some(vs) = tpl.get(", i+2, ").and_then(|e| e.as_versionstamp()) {")
+				g.P("            entity.", FieldIdent(f), " = vs.as_bytes().to_vec();")
+				g.P("        }")
 			}
 		}
-		g.P("        }")
 	}
 	g.P("        Ok(Some(entity))")
 	g.P("    }")
@@ -490,9 +489,7 @@ func generateSet(g Printer, msg ir.MessageSpec) {
 		g.P("        let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, ", pkArgsEntity, "));")
 		if len(msg.SecondaryIndexes) > 0 {
 			g.P("        if let Some(old_val) = tr.get(&key, false).await? {")
-			g.P("            if let Ok(decoded) = <", msg.Name, " as fdb_layer::prost::Message>::decode(old_val.as_ref()) {")
-			g.P("                old = Some(decoded);")
-			g.P("            }")
+			g.P("            old = Some(<", msg.Name, " as fdb_layer::prost::Message>::decode(old_val.as_ref())?);")
 			g.P("        }")
 		}
 	}
@@ -593,21 +590,20 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 	g.P("        let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, ", pkArgs, "));")
 	if len(msg.SecondaryIndexes) > 0 {
 		g.P("        if let Some(value) = tr.get(&key, false).await? {")
-		g.P("            if let Ok(entity) = <", msg.Name, " as fdb_layer::prost::Message>::decode(value.as_ref()) {")
+		g.P("            let entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(value.as_ref())?;")
 		for _, idx := range msg.SecondaryIndexes {
 			if idx.IsFanOut {
 				for i, f := range idx.Fields {
 					if f.IsRepeated {
-						g.P("                for item in &entity.", FieldIdent(f), " {")
-						emitFanOutIndexWrite(g, msg, idx, i, "entity", false, "                    ")
-						g.P("                }")
+						g.P("            for item in &entity.", FieldIdent(f), " {")
+						emitFanOutIndexWrite(g, msg, idx, i, "entity", false, "                ")
+						g.P("            }")
 					}
 				}
 			} else {
-				g.P("                tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, ", idx.IndexID, "i64, ", indexFieldTupleArgs(idx.Fields, "entity"), ", ", pkArgsEntity, ")));")
+				g.P("            tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, ", idx.IndexID, "i64, ", indexFieldTupleArgs(idx.Fields, "entity"), ", ", pkArgsEntity, ")));")
 			}
 		}
-		g.P("            }")
 		g.P("        }")
 	}
 	g.P("        tr.clear(&key);")

@@ -412,9 +412,10 @@ func generateSet(g *protogen.GeneratedFile, msg ir.MessageSpec) {
 			g.P()
 			g.P("	if oldValue := tr.Get(key).MustGet(); oldValue != nil {")
 			g.P("		var unmarshaled ", msg.Name)
-			g.P("		if unmarshalErr := proto.Unmarshal(oldValue, &unmarshaled); unmarshalErr == nil {")
-			g.P("			old = &unmarshaled")
+			g.P("		if err := proto.Unmarshal(oldValue, &unmarshaled); err != nil {")
+			g.P(`			return fmt.Errorf("failed to unmarshal existing `, lowerName, `: %w", err)`)
 			g.P("		}")
+			g.P("		old = &unmarshaled")
 			g.P("	}")
 		}
 	}
@@ -516,24 +517,24 @@ func generateDelete(g *protogen.GeneratedFile, msg ir.MessageSpec) {
 		g.P("	value := tr.Get(key).MustGet()")
 		g.P("	if value != nil {")
 		g.P("		entity := &", msg.Name, "{}")
-		g.P("		err := proto.Unmarshal(value, entity)")
-		g.P("		if err == nil {")
+		g.P("		if err := proto.Unmarshal(value, entity); err != nil {")
+		g.P(`			return fmt.Errorf("failed to unmarshal existing `, lowerName, `: %w", err)`)
+		g.P("		}")
 		for _, idx := range msg.SecondaryIndexes {
 			if idx.IsFanOut {
-				g.P("			// Fan-out index")
+				g.P("		// Fan-out index")
 				for i, f := range idx.Fields {
 					if f.IsRepeated {
-						g.P("			for _, item := range entity.", f.GoName, " {")
-						emitFanOutIndexWrite(g, msg, idx, i, "entity", false, "\t\t\t\t")
-						g.P("			}")
+						g.P("		for _, item := range entity.", f.GoName, " {")
+						emitFanOutIndexWrite(g, msg, idx, i, "entity", false, "\t\t\t")
+						g.P("		}")
 					}
 				}
 			} else {
-				g.P("			// Standard index")
-				g.P("			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, ", idx.IndexID, ", ", indexFieldTupleArgs(idx.Fields, "entity"), ", ", pkArgsEntity, "}))")
+				g.P("		// Standard index")
+				g.P("		tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, ", idx.IndexID, ", ", indexFieldTupleArgs(idx.Fields, "entity"), ", ", pkArgsEntity, "}))")
 			}
 		}
-		g.P("		}")
 		g.P("	}")
 	}
 	g.P("	tr.Clear(key)")

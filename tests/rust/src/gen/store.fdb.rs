@@ -71,9 +71,7 @@ impl UserRepository {
         let mut old: Option<User> = None;
         let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, &entity.id));
         if let Some(old_val) = tr.get(&key, false).await? {
-            if let Ok(decoded) = <User as fdb_layer::prost::Message>::decode(old_val.as_ref()) {
-                old = Some(decoded);
-            }
+            old = Some(<User as fdb_layer::prost::Message>::decode(old_val.as_ref())?);
         }
         let value = fdb_layer::prost::Message::encode_to_vec(entity);
         tr.set(&key, &value);
@@ -99,9 +97,8 @@ impl UserRepository {
         let type_id = self.store.get_type_id("User")?;
         let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, pk));
         if let Some(value) = tr.get(&key, false).await? {
-            if let Ok(entity) = <User as fdb_layer::prost::Message>::decode(value.as_ref()) {
-                tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 2324124615i64, &entity.email, &entity.id)));
-            }
+            let entity = <User as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 2324124615i64, &entity.email, &entity.id)));
         }
         tr.clear(&key);
         Ok(())
@@ -333,9 +330,7 @@ impl ProductRepository {
         let mut old: Option<Product> = None;
         let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, &entity.id));
         if let Some(old_val) = tr.get(&key, false).await? {
-            if let Ok(decoded) = <Product as fdb_layer::prost::Message>::decode(old_val.as_ref()) {
-                old = Some(decoded);
-            }
+            old = Some(<Product as fdb_layer::prost::Message>::decode(old_val.as_ref())?);
         }
         let value = fdb_layer::prost::Message::encode_to_vec(entity);
         tr.set(&key, &value);
@@ -361,9 +356,8 @@ impl ProductRepository {
         let type_id = self.store.get_type_id("Product")?;
         let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, pk));
         if let Some(value) = tr.get(&key, false).await? {
-            if let Ok(entity) = <Product as fdb_layer::prost::Message>::decode(value.as_ref()) {
-                tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 3475980913i64, &entity.category, &entity.id)));
-            }
+            let entity = <Product as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 3475980913i64, &entity.category, &entity.id)));
         }
         tr.clear(&key);
         Ok(())
@@ -593,9 +587,7 @@ impl PostRepository {
         let mut old: Option<Post> = None;
         let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, &entity.id));
         if let Some(old_val) = tr.get(&key, false).await? {
-            if let Ok(decoded) = <Post as fdb_layer::prost::Message>::decode(old_val.as_ref()) {
-                old = Some(decoded);
-            }
+            old = Some(<Post as fdb_layer::prost::Message>::decode(old_val.as_ref())?);
         }
         let value = fdb_layer::prost::Message::encode_to_vec(entity);
         tr.set(&key, &value);
@@ -629,10 +621,9 @@ impl PostRepository {
         let type_id = self.store.get_type_id("Post")?;
         let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, pk));
         if let Some(value) = tr.get(&key, false).await? {
-            if let Ok(entity) = <Post as fdb_layer::prost::Message>::decode(value.as_ref()) {
-                for item in &entity.tags {
-                    tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, item, &entity.id)));
-                }
+            let entity = <Post as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            for item in &entity.tags {
+                tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, item, &entity.id)));
             }
         }
         tr.clear(&key);
@@ -853,10 +844,9 @@ impl TaskMessageRepository {
         let payload = first_item.value();
         tr.clear(key_to_delete);
         let mut entity = <TaskMessage as fdb_layer::prost::Message>::decode(payload)?;
-        if let Ok(tpl) = dir.unpack::<Vec<fdb_layer::Element<'_>>>(key_to_delete) {
-            if let Some(vs) = tpl.get(3).and_then(|e| e.as_versionstamp()) {
-                entity.versionstamp = vs.as_bytes().to_vec();
-            }
+        let tpl = dir.unpack::<Vec<fdb_layer::Element<'_>>>(key_to_delete)?;
+        if let Some(vs) = tpl.get(3).and_then(|e| e.as_versionstamp()) {
+            entity.versionstamp = vs.as_bytes().to_vec();
         }
         Ok(Some(entity))
     }

@@ -119,9 +119,10 @@ func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 
 	if oldValue := tr.Get(key).MustGet(); oldValue != nil {
 		var unmarshaled Post
-		if unmarshalErr := proto.Unmarshal(oldValue, &unmarshaled); unmarshalErr == nil {
-			old = &unmarshaled
+		if err := proto.Unmarshal(oldValue, &unmarshaled); err != nil {
+			return fmt.Errorf("failed to unmarshal existing post: %w", err)
 		}
+		old = &unmarshaled
 	}
 
 	value, err := proto.Marshal(entity)
@@ -183,15 +184,15 @@ func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 	value := tr.Get(key).MustGet()
 	if value != nil {
 		entity := &Post{}
-		err := proto.Unmarshal(value, entity)
-		if err == nil {
-			// Fan-out index
-			for _, item := range entity.Tags {
-				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
-					item,
-					entity.Id,
-				}))
-			}
+		if err := proto.Unmarshal(value, entity); err != nil {
+			return fmt.Errorf("failed to unmarshal existing post: %w", err)
+		}
+		// Fan-out index
+		for _, item := range entity.Tags {
+			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+				item,
+				entity.Id,
+			}))
 		}
 	}
 	tr.Clear(key)

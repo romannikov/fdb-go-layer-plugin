@@ -658,3 +658,30 @@ func TestGenericRepository_User(t *testing.T) {
 		t.Fatal("expected error getting deleted user")
 	}
 }
+
+func TestSetAndDelete_CorruptedExistingRecordReturnsError(t *testing.T) {
+	ctx := context.Background()
+	recordStore, tr, dir, kv := tests.SyncAndSetup()
+	repo := store.NewUserRepository(recordStore)
+
+	typeID := recordStore.Metadata()["User"]
+	corruptedKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "corrupted-1"})
+	// Write invalid protobuf wire format bytes (field 0 is invalid in protobuf wire format)
+	tr.Set(corruptedKey, []byte{0x00, 0xff, 0xff})
+
+	// Set must return an unmarshal error rather than silently overwriting and orphaning indexes.
+	err := repo.Set(ctx, tr, dir, &store.User{Id: "corrupted-1", Name: "New", Email: "new@example.com"})
+	if err == nil {
+		t.Fatal("expected Set on corrupted existing record to return an error, got nil")
+	}
+
+	// Delete must return an unmarshal error rather than clearing primary key and orphaning indexes.
+	err = repo.Delete(ctx, tr, dir, "corrupted-1")
+	if err == nil {
+		t.Fatal("expected Delete on corrupted existing record to return an error, got nil")
+	}
+	if !kv.HasKey(corruptedKey) {
+		t.Fatal("Delete cleared primary key despite failing to unmarshal existing record")
+	}
+}
+

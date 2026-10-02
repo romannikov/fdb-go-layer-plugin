@@ -114,9 +114,10 @@ func (r *userRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 
 	if oldValue := tr.Get(key).MustGet(); oldValue != nil {
 		var unmarshaled User
-		if unmarshalErr := proto.Unmarshal(oldValue, &unmarshaled); unmarshalErr == nil {
-			old = &unmarshaled
+		if err := proto.Unmarshal(oldValue, &unmarshaled); err != nil {
+			return fmt.Errorf("failed to unmarshal existing user: %w", err)
 		}
+		old = &unmarshaled
 	}
 
 	value, err := proto.Marshal(entity)
@@ -151,11 +152,11 @@ func (r *userRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 	value := tr.Get(key).MustGet()
 	if value != nil {
 		entity := &User{}
-		err := proto.Unmarshal(value, entity)
-		if err == nil {
-			// Standard index
-			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, entity.Email, entity.Id}))
+		if err := proto.Unmarshal(value, entity); err != nil {
+			return fmt.Errorf("failed to unmarshal existing user: %w", err)
 		}
+		// Standard index
+		tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, entity.Email, entity.Id}))
 	}
 	tr.Clear(key)
 
