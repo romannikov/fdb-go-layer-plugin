@@ -703,7 +703,7 @@ mod tests {
             assert_eq!(ord.history.len(), 1);
 
             let by_status = order_repo
-                .get_order_by_status_and_created_at(&tr, &dir, OrderStatus::Pending, 1700000000)
+                .get_order_by_status_and_created_at(&tr, &dir, OrderStatus::Pending as i32, 1700000000)
                 .await
                 .unwrap();
             assert_eq!(by_status.len(), 1);
