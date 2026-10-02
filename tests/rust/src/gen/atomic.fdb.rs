@@ -43,11 +43,15 @@ impl CounterRepository {
         if tr.get(&key, false).await?.is_some() {
             return Err(fdb_layer::FdbLayerError::AlreadyExists("counter"));
         }
-        let mut clean_entity = entity.clone();
-        clean_entity.value = 0;
-        clean_entity.max_value = 0;
-        clean_entity.min_value = 0;
-        let value = fdb_layer::prost::Message::encode_to_vec(&clean_entity);
+        let value = if entity.value != 0 || entity.max_value != 0 || entity.min_value != 0 {
+            let mut clean_entity = entity.clone();
+            clean_entity.value = 0;
+            clean_entity.max_value = 0;
+            clean_entity.min_value = 0;
+            fdb_layer::prost::Message::encode_to_vec(&clean_entity)
+        } else {
+            fdb_layer::prost::Message::encode_to_vec(entity)
+        };
         tr.set(&key, &value);
         if entity.value != 0 {
             let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &entity.id, 2i64));
@@ -83,6 +87,9 @@ impl CounterRepository {
         let (value_opt, field_kvs) = fdb_layer::futures::future::try_join(val_fut, field_fut).await?;
         let value = value_opt.ok_or(fdb_layer::FdbLayerError::NotFound("counter"))?;
         let mut entity = <Counter as fdb_layer::prost::Message>::decode(value.as_ref())?;
+        entity.value = 0;
+        entity.max_value = 0;
+        entity.min_value = 0;
         for fkv in &field_kvs {
             if fkv.value().len() < 8 {
                 continue;
@@ -116,11 +123,15 @@ impl CounterRepository {
     ) -> Result<(), fdb_layer::FdbLayerError> {
         let type_id = self.store.get_type_id("Counter")?;
         let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, &entity.id));
-        let mut clean_entity = entity.clone();
-        clean_entity.value = 0;
-        clean_entity.max_value = 0;
-        clean_entity.min_value = 0;
-        let value = fdb_layer::prost::Message::encode_to_vec(&clean_entity);
+        let value = if entity.value != 0 || entity.max_value != 0 || entity.min_value != 0 {
+            let mut clean_entity = entity.clone();
+            clean_entity.value = 0;
+            clean_entity.max_value = 0;
+            clean_entity.min_value = 0;
+            fdb_layer::prost::Message::encode_to_vec(&clean_entity)
+        } else {
+            fdb_layer::prost::Message::encode_to_vec(entity)
+        };
         tr.set(&key, &value);
         Ok(())
     }
@@ -183,6 +194,9 @@ impl CounterRepository {
                 None => continue,
             };
             let mut entity = <Counter as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            entity.value = 0;
+            entity.max_value = 0;
+            entity.min_value = 0;
             for fkv in &field_slices[i] {
                 if fkv.value().len() < 8 {
                     continue;
@@ -259,7 +273,10 @@ impl CounterRepository {
             let field_end_prefix = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &last.id));
             let (_, field_end) = fdb_layer::prefix_range(&field_end_prefix);
             let mut idx_by_pk = std::collections::HashMap::with_capacity(result.items.len());
-            for (idx, entity) in result.items.iter().enumerate() {
+            for (idx, entity) in result.items.iter_mut().enumerate() {
+                entity.value = 0;
+                entity.max_value = 0;
+                entity.min_value = 0;
                 let pk_bytes = fdb_layer::foundationdb_tuple::pack(&(&entity.id,));
                 idx_by_pk.insert(pk_bytes, idx);
             }

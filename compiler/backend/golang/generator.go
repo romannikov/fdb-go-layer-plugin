@@ -280,10 +280,10 @@ func generateCreate(g *protogen.GeneratedFile, msg ir.MessageSpec) {
 		pkArgs := pkTupleArgsFromEntity(msg, "entity")
 		for _, f := range msg.Fields {
 			if f.Mutation != ir.MutationNone {
-				g.P("	if atomic_", f.GoName, " != 0 {")
+				g.P("	if entity.", f.GoName, " != 0 {")
 				g.P("		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, ", pkArgs, ", ", f.Number, "})")
 				g.P("		buf := make([]byte, 8)")
-				g.P("		binary.LittleEndian.PutUint64(buf, ", encodeAtomicUint64Expr("atomic_"+f.GoName, f), ")")
+				g.P("		binary.LittleEndian.PutUint64(buf, ", encodeAtomicUint64Expr("entity."+f.GoName, f), ")")
 				g.P("		tr.", MutationVerb(f.Mutation), "(fieldKey, buf)")
 				g.P("	}")
 			}
@@ -659,17 +659,16 @@ func generateList(g *protogen.GeneratedFile, msg ir.MessageSpec) {
 	g.P("		rangeOpts.Limit = opts.Limit + 1")
 	g.P("	}")
 	g.P()
-	g.P("	iter := tr.GetRange(fdb.KeyRange{")
+	g.P("	kvs := fdblayer.GetRange(tr, fdb.KeyRange{")
 	g.P("		Begin: begin,")
 	g.P("		End:   dataPrefixRange.End,")
-	g.P("	}, rangeOpts).Iterator()")
+	g.P("	}, rangeOpts).GetSliceOrPanic()")
 	g.P()
 	g.P("	var nextKey fdb.Key")
-	g.P("	for iter.Advance() {")
+	g.P("	for _, kv := range kvs {")
 	g.P("		if err := ctx.Err(); err != nil {")
 	g.P("			return nil, err")
 	g.P("		}")
-	g.P("		kv := iter.MustGet()")
 	g.P()
 	g.P("		entity := &", msg.Name, "{}")
 	g.P("		err = proto.Unmarshal(kv.Value, entity)")
@@ -712,6 +711,11 @@ func generateList(g *protogen.GeneratedFile, msg ir.MessageSpec) {
 		g.P("		}")
 		g.P("		itemByPK := make(map[string]*", msg.Name, ", len(result.Items))")
 		g.P("		for _, entity := range result.Items {")
+		for _, f := range msg.Fields {
+			if f.Mutation != ir.MutationNone {
+				g.P("			entity.", f.GoName, " = 0")
+			}
+		}
 		g.P("			pkKey := tuple.Tuple{", entityPKArgs, "}.String()")
 		g.P("			itemByPK[pkKey] = entity")
 		g.P("		}")
@@ -899,23 +903,26 @@ func decodeAtomicGoExpr(sliceExpr string, f ir.FieldSpec) string {
 func generateMarshalWithZeroedAtomics(g *protogen.GeneratedFile, msg ir.MessageSpec) {
 	hasMut := ir.HasMutationFields(msg)
 	if hasMut {
-		g.P("	// Save atomic fields and zero them out for marshaling")
+		var nonZeroChecks []string
 		for _, f := range msg.Fields {
 			if f.Mutation != ir.MutationNone {
-				g.P("	atomic_", f.GoName, " := entity.", f.GoName)
-				g.P("	entity.", f.GoName, " = 0")
+				nonZeroChecks = append(nonZeroChecks, fmt.Sprintf("entity.%s != 0", f.GoName))
 			}
 		}
-		g.P()
-	}
-	g.P("	value, err := proto.Marshal(entity)")
-	if hasMut {
-		g.P("	// Restore atomic fields")
+		g.P("	// Marshal without mutating the caller's struct in-place.")
+		g.P("	marshalTarget := entity")
+		g.P("	if ", strings.Join(nonZeroChecks, " || "), " {")
+		g.P("		marshalTarget = &", msg.Name, "{")
 		for _, f := range msg.Fields {
-			if f.Mutation != ir.MutationNone {
-				g.P("	entity.", f.GoName, " = atomic_", f.GoName)
+			if f.Mutation == ir.MutationNone {
+				g.P("			", f.GoName, ": entity.", f.GoName, ",")
 			}
 		}
+		g.P("		}")
+		g.P("	}")
+		g.P("	value, err := proto.Marshal(marshalTarget)")
+	} else {
+		g.P("	value, err := proto.Marshal(entity)")
 	}
 	g.P("	if err != nil {")
 	g.P("		return err")
@@ -924,6 +931,11 @@ func generateMarshalWithZeroedAtomics(g *protogen.GeneratedFile, msg ir.MessageS
 }
 
 func generateUnmarshalAtomicFields(g *protogen.GeneratedFile, msg ir.MessageSpec, sliceExpr string, indent string) {
+	for _, f := range msg.Fields {
+		if f.Mutation != ir.MutationNone {
+			g.P(indent, "entity.", f.GoName, " = 0")
+		}
+	}
 	g.P(indent, "for _, fkv := range ", sliceExpr, " {")
 	g.P(indent, "	if len(fkv.Value) < 8 {")
 	g.P(indent, "		continue")

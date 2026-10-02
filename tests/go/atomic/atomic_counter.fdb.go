@@ -63,19 +63,14 @@ func (r *counterRepository) Create(ctx context.Context, tr fdblayer.Transaction,
 		return fmt.Errorf("counter %w", fdblayer.ErrAlreadyExists)
 	}
 
-	// Save atomic fields and zero them out for marshaling
-	atomic_Value := entity.Value
-	entity.Value = 0
-	atomic_MaxValue := entity.MaxValue
-	entity.MaxValue = 0
-	atomic_MinValue := entity.MinValue
-	entity.MinValue = 0
-
-	value, err := proto.Marshal(entity)
-	// Restore atomic fields
-	entity.Value = atomic_Value
-	entity.MaxValue = atomic_MaxValue
-	entity.MinValue = atomic_MinValue
+	// Marshal without mutating the caller's struct in-place.
+	marshalTarget := entity
+	if entity.Value != 0 || entity.MaxValue != 0 || entity.MinValue != 0 {
+		marshalTarget = &Counter{
+			Id: entity.Id,
+		}
+	}
+	value, err := proto.Marshal(marshalTarget)
 	if err != nil {
 		return err
 	}
@@ -83,22 +78,22 @@ func (r *counterRepository) Create(ctx context.Context, tr fdblayer.Transaction,
 	tr.Set(key, value)
 
 	// Store non-zero initial atomic fields in separate keys
-	if atomic_Value != 0 {
+	if entity.Value != 0 {
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 2})
 		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, uint64(atomic_Value))
+		binary.LittleEndian.PutUint64(buf, uint64(entity.Value))
 		tr.Add(fieldKey, buf)
 	}
-	if atomic_MaxValue != 0 {
+	if entity.MaxValue != 0 {
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 3})
 		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, uint64(atomic_MaxValue)^(1<<63))
+		binary.LittleEndian.PutUint64(buf, uint64(entity.MaxValue)^(1<<63))
 		tr.Max(fieldKey, buf)
 	}
-	if atomic_MinValue != 0 {
+	if entity.MinValue != 0 {
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 4})
 		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, uint64(atomic_MinValue)^(1<<63))
+		binary.LittleEndian.PutUint64(buf, uint64(entity.MinValue)^(1<<63))
 		tr.Min(fieldKey, buf)
 	}
 
@@ -133,6 +128,9 @@ func (r *counterRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir
 		return nil, err
 	}
 
+	entity.Value = 0
+	entity.MaxValue = 0
+	entity.MinValue = 0
 	for _, fkv := range fieldFuture.GetSliceOrPanic() {
 		if len(fkv.Value) < 8 {
 			continue
@@ -169,19 +167,14 @@ func (r *counterRepository) Set(ctx context.Context, tr fdblayer.Transaction, di
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
 
-	// Save atomic fields and zero them out for marshaling
-	atomic_Value := entity.Value
-	entity.Value = 0
-	atomic_MaxValue := entity.MaxValue
-	entity.MaxValue = 0
-	atomic_MinValue := entity.MinValue
-	entity.MinValue = 0
-
-	value, err := proto.Marshal(entity)
-	// Restore atomic fields
-	entity.Value = atomic_Value
-	entity.MaxValue = atomic_MaxValue
-	entity.MinValue = atomic_MinValue
+	// Marshal without mutating the caller's struct in-place.
+	marshalTarget := entity
+	if entity.Value != 0 || entity.MaxValue != 0 || entity.MinValue != 0 {
+		marshalTarget = &Counter{
+			Id: entity.Id,
+		}
+	}
+	value, err := proto.Marshal(marshalTarget)
 	if err != nil {
 		return err
 	}
@@ -268,6 +261,9 @@ func (r *counterRepository) BatchGetCounter(ctx context.Context, tr fdb.ReadTran
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
+		entity.Value = 0
+		entity.MaxValue = 0
+		entity.MinValue = 0
 		for _, fkv := range fieldFutures[i].GetSliceOrPanic() {
 			if len(fkv.Value) < 8 {
 				continue
@@ -329,17 +325,16 @@ func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransact
 		rangeOpts.Limit = opts.Limit + 1
 	}
 
-	iter := tr.GetRange(fdb.KeyRange{
+	kvs := fdblayer.GetRange(tr, fdb.KeyRange{
 		Begin: begin,
 		End:   dataPrefixRange.End,
-	}, rangeOpts).Iterator()
+	}, rangeOpts).GetSliceOrPanic()
 
 	var nextKey fdb.Key
-	for iter.Advance() {
+	for _, kv := range kvs {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		kv := iter.MustGet()
 
 		entity := &Counter{}
 		err = proto.Unmarshal(kv.Value, entity)
@@ -377,6 +372,9 @@ func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransact
 		}
 		itemByPK := make(map[string]*Counter, len(result.Items))
 		for _, entity := range result.Items {
+			entity.Value = 0
+			entity.MaxValue = 0
+			entity.MinValue = 0
 			pkKey := tuple.Tuple{entity.Id}.String()
 			itemByPK[pkKey] = entity
 		}

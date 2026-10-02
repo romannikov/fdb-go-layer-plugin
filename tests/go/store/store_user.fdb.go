@@ -240,17 +240,16 @@ func (r *userRepository) ListUser(ctx context.Context, tr fdb.ReadTransaction, d
 		rangeOpts.Limit = opts.Limit + 1
 	}
 
-	iter := tr.GetRange(fdb.KeyRange{
+	kvs := fdblayer.GetRange(tr, fdb.KeyRange{
 		Begin: begin,
 		End:   dataPrefixRange.End,
-	}, rangeOpts).Iterator()
+	}, rangeOpts).GetSliceOrPanic()
 
 	var nextKey fdb.Key
-	for iter.Advance() {
+	for _, kv := range kvs {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		kv := iter.MustGet()
 
 		entity := &User{}
 		err = proto.Unmarshal(kv.Value, entity)

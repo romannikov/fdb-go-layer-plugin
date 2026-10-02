@@ -742,7 +742,12 @@ func generateList(g Printer, msg ir.MessageSpec) {
 		g.P("            let field_end_prefix = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, ", lastPKArgs, "));")
 		g.P("            let (_, field_end) = fdb_layer::prefix_range(&field_end_prefix);")
 		g.P("            let mut idx_by_pk = std::collections::HashMap::with_capacity(result.items.len());")
-		g.P("            for (idx, entity) in result.items.iter().enumerate() {")
+		g.P("            for (idx, entity) in result.items.iter_mut().enumerate() {")
+		for _, f := range msg.Fields {
+			if f.Mutation != ir.MutationNone {
+				g.P("                entity.", FieldIdent(f), " = 0;")
+			}
+		}
 		g.P("                let pk_bytes = fdb_layer::foundationdb_tuple::pack(&(", entityPKArgs, ",));")
 		g.P("                idx_by_pk.insert(pk_bytes, idx);")
 		g.P("            }")
@@ -919,19 +924,34 @@ func decodeAtomicRustExpr(rawVar string, f ir.FieldSpec) string {
 
 func generateEncodeWithZeroedAtomics(g Printer, msg ir.MessageSpec, indent string) {
 	if ir.HasMutationFields(msg) {
-		g.P(indent, "let mut clean_entity = entity.clone();")
+		var nonZeroChecks []string
 		for _, f := range msg.Fields {
 			if f.Mutation != ir.MutationNone {
-				g.P(indent, "clean_entity.", FieldIdent(f), " = 0;")
+				nonZeroChecks = append(nonZeroChecks, fmt.Sprintf("entity.%s != 0", FieldIdent(f)))
 			}
 		}
-		g.P(indent, "let value = fdb_layer::prost::Message::encode_to_vec(&clean_entity);")
+		g.P(indent, "let value = if ", strings.Join(nonZeroChecks, " || "), " {")
+		g.P(indent, "    let mut clean_entity = entity.clone();")
+		for _, f := range msg.Fields {
+			if f.Mutation != ir.MutationNone {
+				g.P(indent, "    clean_entity.", FieldIdent(f), " = 0;")
+			}
+		}
+		g.P(indent, "    fdb_layer::prost::Message::encode_to_vec(&clean_entity)")
+		g.P(indent, "} else {")
+		g.P(indent, "    fdb_layer::prost::Message::encode_to_vec(entity)")
+		g.P(indent, "};")
 	} else {
 		g.P(indent, "let value = fdb_layer::prost::Message::encode_to_vec(entity);")
 	}
 }
 
 func generateUnmarshalAtomicFields(g Printer, msg ir.MessageSpec, sliceExpr string, indent string) {
+	for _, f := range msg.Fields {
+		if f.Mutation != ir.MutationNone {
+			g.P(indent, "entity.", FieldIdent(f), " = 0;")
+		}
+	}
 	g.P(indent, "for fkv in ", sliceExpr, " {")
 	g.P(indent, "    if fkv.value().len() < 8 {")
 	g.P(indent, "        continue;")

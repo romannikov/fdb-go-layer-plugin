@@ -2,12 +2,14 @@ package atomic_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
 	tests "github.com/romannikov/fdb-layer/tests/go"
 	"github.com/romannikov/fdb-layer/tests/go/atomic"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestAtomicMutations(t *testing.T) {
@@ -205,3 +207,102 @@ func TestAtomicMutations(t *testing.T) {
 		t.Fatalf("expected c1 min_value to become -10 after Min(-10), got %d", retrievedC1.MinValue)
 	}
 }
+
+func TestConcurrentSetAndCreate_DoesNotMutateCallerStruct(t *testing.T) {
+	ctx := context.Background()
+	kv := tests.NewMockKV()
+	tr := tests.NewMockTransaction(kv)
+	dir := &tests.MockDirectorySubspace{}
+	recordStore := fdblayer.NewRecordStore()
+	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"}); err != nil {
+		t.Fatalf("failed to sync metadata: %v", err)
+	}
+	counterRepo := atomic.NewCounterRepository(recordStore)
+
+	shared := &atomic.Counter{
+		Id:       "shared-counter",
+		Value:    999,
+		MaxValue: 5000,
+		MinValue: 10,
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			localKV := tests.NewMockKV()
+			localTr := tests.NewMockTransaction(localKV)
+			for j := 0; j < 200; j++ {
+				_ = counterRepo.Set(ctx, localTr, dir, shared)
+				if shared.Value != 999 || shared.MaxValue != 5000 || shared.MinValue != 10 {
+					t.Errorf("caller struct mutated during concurrent Set: %+v", shared)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if shared.Value != 999 || shared.MaxValue != 5000 || shared.MinValue != 10 {
+		t.Fatalf("caller struct corrupted after concurrent Set: got %+v", shared)
+	}
+}
+
+func TestReadZerosAtomicFieldsBeforeFieldNamespace(t *testing.T) {
+	ctx := context.Background()
+	kv := tests.NewMockKV()
+	tr := tests.NewMockTransaction(kv)
+	dir := &tests.MockDirectorySubspace{}
+	recordStore := fdblayer.NewRecordStore()
+	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"}); err != nil {
+		t.Fatalf("failed to sync metadata: %v", err)
+	}
+	counterRepo := atomic.NewCounterRepository(recordStore)
+
+	// Simulate a legacy/external write where DataNamespace contains non-zero atomic fields
+	// in the protobuf blob while FieldNamespace has no keys.
+	typeID, err := recordStore.GetTypeID("Counter")
+	if err != nil {
+		t.Fatalf("failed to get typeID: %v", err)
+	}
+	rawBytes, err := proto.Marshal(&atomic.Counter{
+		Id:       "legacy",
+		Value:    777,
+		MaxValue: 888,
+		MinValue: 999,
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal legacy counter: %v", err)
+	}
+	dataKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "legacy"})
+	tr.Set(dataKey, rawBytes)
+
+	// Get must return 0 for all atomic fields since FieldNamespace is empty.
+	got, err := counterRepo.Get(ctx, tr, dir, "legacy")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if got.Value != 0 || got.MaxValue != 0 || got.MinValue != 0 {
+		t.Fatalf("Get did not zero atomic fields from DataNamespace blob: got %+v", got)
+	}
+
+	// BatchGetCounter must also return 0 for all atomic fields.
+	batchGot, err := counterRepo.BatchGetCounter(ctx, tr, dir, []tuple.Tuple{{"legacy"}})
+	if err != nil {
+		t.Fatalf("BatchGetCounter failed: %v", err)
+	}
+	if b := batchGot[`("legacy")`]; b == nil || b.Value != 0 || b.MaxValue != 0 || b.MinValue != 0 {
+		t.Fatalf("BatchGetCounter did not zero atomic fields from DataNamespace blob: got %+v", b)
+	}
+
+	// ListCounter must also return 0 for all atomic fields.
+	listGot, err := counterRepo.ListCounter(ctx, tr, dir, atomic.CounterPaginationOptions{})
+	if err != nil {
+		t.Fatalf("ListCounter failed: %v", err)
+	}
+	if len(listGot.Items) != 1 || listGot.Items[0].Value != 0 || listGot.Items[0].MaxValue != 0 || listGot.Items[0].MinValue != 0 {
+		t.Fatalf("ListCounter did not zero atomic fields from DataNamespace blob: got %+v", listGot.Items)
+	}
+}
+
