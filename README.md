@@ -71,7 +71,7 @@ protoc -I proto -I . \
   generated/store.proto
 ```
 
-- `--fdb-rust_opt=generate_messages=true`: Emits `#[derive(Clone, PartialEq, ::prost::Message)]` struct definitions alongside the generated Rust repositories in `*.fdb.rs`. Omit this flag (default `false`) if you already generate `prost` structs separately via `prost-build` and `include!()` the `.fdb.rs` file into the same module.
+- `--fdb-rust_opt=generate_messages=true`: Emits `#[derive(Clone, PartialEq, ::prost::Message)]` struct definitions, `#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]` enum definitions, and recursive `pub mod <snake_case>` modules for nested messages/enums alongside the generated Rust repositories in `*.fdb.rs`. Omit this flag (default `false`) if you already generate `prost` structs separately via `prost-build` and `include!()` the `.fdb.rs` file into the same module.
 - To regenerate all internal annotations and test schemas in this repository, run:
   ```bash
   ./update_protos.sh
@@ -106,6 +106,8 @@ To guarantee byte-for-byte identical keys between Go and Rust:
 2. **Integer & Enum Normalization**:
    - Signed integers (`int32`, `sint32`, `sfixed32`, `int64`, `sint64`, `sfixed64`) and `enum` values are widened to `int64` / `i64` before tuple packing.
    - Unsigned integers (`uint32`, `fixed32`, `uint64`, `fixed64`) are widened to `uint64` / `u64` before tuple packing.
+3. **Byte Strings (`bytes` fields)**:
+   - Protobuf `bytes` fields in primary keys and secondary/fan-out indexes are packed as raw FDB Tuple Byte Strings (type code `0x01`, via `[]byte` in Go and `fdb_layer::Bytes::from(&val[..])` in Rust).
 
 ### Key-Value Layout Examples
 
@@ -119,7 +121,7 @@ Assume `User` has `TypeID = 1`, `TaskMessage` has `TypeID = 2`, and `Counter` ha
 #### 2. Standard Data Record
 - **Purpose**: Stores the serialized Protobuf message.
 - **Key**: `[Data Subspace] + (1, 0, "u123")` (`TypeID = 1`, `DataNamespace = 0`, primary key `"u123"`)
-- **Value**: `[Serialized User Protobuf Bytes]` (any atomic `mutation` fields are zeroed before serialization so `Set` never overwrites atomic state).
+- **Value**: `[Serialized User Protobuf Bytes]` (any atomic `mutation` fields are zeroed on a shallow copy before serialization without mutating the caller's struct, and zeroed on read before overlaying `FieldNamespace` keys, so `Set` never overwrites atomic state).
 
 #### 3. Secondary & Fan-Out Index
 - **Purpose**: Enables fast lookups by non-primary-key scalar or `repeated` fields.
@@ -137,7 +139,9 @@ Assume `User` has `TypeID = 1`, `TaskMessage` has `TypeID = 2`, and `Counter` ha
 #### 5. Atomic Mutation Field Record
 - **Purpose**: Stores atomic counter fields (`MUTATION_ADD`, `MUTATION_MAX`, `MUTATION_MIN`).
 - **Key**: `[Data Subspace] + (3, 2, "cnt1", field_number)` (`TypeID = 3`, `FieldNamespace = 2`, primary key `"cnt1"`, `int64(field_number)`)
-- **Value**: 8-byte little-endian unsigned 64-bit integer (`uint64` / `u64::to_le_bytes()`).
+- **Value**:
+  - `MUTATION_ADD` (and `uint64` `MUTATION_MAX` / `MUTATION_MIN`): 8-byte little-endian unsigned 64-bit integer (`uint64` / `u64::to_le_bytes()`).
+  - Signed `int64` `MUTATION_MAX` / `MUTATION_MIN`: 8-byte little-endian sign-bit-flipped unsigned 64-bit integer (`uint64(val) ^ (1 << 63)` / `((val as u64) ^ (1u64 << 63)).to_le_bytes()`), preserving signed two's-complement ordering under FoundationDB's unsigned little-endian `MAX`/`MIN` atomic operations.
 
 ---
 
