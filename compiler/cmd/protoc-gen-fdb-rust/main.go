@@ -29,19 +29,33 @@ func main() {
 				continue
 			}
 
-			var annotated []ir.MessageSpec
+			var messages []ir.MessageSpec
+			hasRepo := false
 			for _, msg := range f.Messages {
-				spec, err := ir.ProcessMessage(msg, msg.Desc.Options())
+				spec, err := ir.ProcessMessageAll(msg, msg.Desc.Options())
 				if err != nil {
 					return fmt.Errorf("failed to parse message %s: %w", msg.Desc.Name(), err)
 				}
-				if spec != nil && len(spec.PrimaryKeyFields) > 0 {
-					annotated = append(annotated, *spec)
+				if spec == nil {
+					continue
+				}
+				if spec.HasRepository() {
+					hasRepo = true
+				}
+				if *generateMessages || spec.HasRepository() {
+					messages = append(messages, *spec)
 				}
 			}
 
-			if len(annotated) == 0 {
+			if !hasRepo {
 				continue
+			}
+
+			var topEnums []ir.EnumSpec
+			if *generateMessages {
+				for _, e := range f.Enums {
+					topEnums = append(topEnums, ir.ProcessEnum(e))
+				}
 			}
 
 			protoPath := f.Desc.Path()
@@ -50,8 +64,9 @@ func main() {
 			filename := stem + ".fdb.rs"
 
 			g := gen.NewGeneratedFile(filename, f.GoImportPath)
-			rust.GenerateFileWithOptions(g, protoPath, annotated, rust.GenerateOptions{
+			rust.GenerateFileWithOptions(g, protoPath, messages, rust.GenerateOptions{
 				GenerateMessages: *generateMessages,
+				Enums:            topEnums,
 			})
 		}
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"strings"
+	"unicode"
 
 	"google.golang.org/protobuf/compiler/protogen"
 	"google.golang.org/protobuf/proto"
@@ -58,21 +59,35 @@ const (
 	MutationMin  MutationType = 3
 )
 
+// EnumValueSpec describes a single value in a Protobuf enum.
+type EnumValueSpec struct {
+	ProtoName string // Original UPPER_SNAKE_CASE name in .proto
+	RustName  string // PascalCase variant name for prost::Enumeration
+	Number    int32  // Enum numeric value
+}
+
+// EnumSpec describes a Protobuf enum definition.
+type EnumSpec struct {
+	Name   string          // Protobuf enum name (e.g., "Role")
+	Values []EnumValueSpec // Enum values in declaration order
+}
+
 // FieldSpec describes a single Protobuf field in a language-neutral representation.
 type FieldSpec struct {
-	ProtoName      string       // Original snake_case name in .proto
-	GoName         string       // CamelCase name from protogen (for Go backend)
-	RustName       string       // snake_case / r#escaped name (for Rust backend)
-	Number         int32        // Protobuf field tag number
-	Kind           FieldKind
-	EnumGoName     string       // If Kind == KindEnum
-	EnumRustName   string       // If Kind == KindEnum
-	MessageGoName  string       // If Kind == KindMessage
-	IsRepeated     bool
-	IsUnsigned     bool         // uint32, fixed32, uint64, fixed64
-	IsEnum         bool
-	IsVersionstamp bool
-	Mutation       MutationType
+	ProtoName       string       // Original snake_case name in .proto
+	GoName          string       // CamelCase name from protogen (for Go backend)
+	RustName        string       // snake_case / r#escaped name (for Rust backend)
+	Number          int32        // Protobuf field tag number
+	Kind            FieldKind
+	EnumGoName      string       // If Kind == KindEnum
+	EnumRustName    string       // If Kind == KindEnum (Rust path from file root, e.g. "Role" or "user::Status")
+	MessageGoName   string       // If Kind == KindMessage
+	MessageRustName string       // If Kind == KindMessage (Rust path from file root, e.g. "Address" or "user::Profile")
+	IsRepeated      bool
+	IsUnsigned      bool         // uint32, fixed32, uint64, fixed64
+	IsEnum          bool
+	IsVersionstamp  bool
+	Mutation        MutationType
 }
 
 // SecondaryIndexSpec describes a secondary index on a message.
@@ -83,16 +98,23 @@ type SecondaryIndexSpec struct {
 	IndexID     int64
 }
 
-// MessageSpec describes an FDB-persisted Protobuf message or FIFO queue.
+// MessageSpec describes an FDB-persisted Protobuf message, FIFO queue, or helper message.
 type MessageSpec struct {
 	Name             string // Protobuf message name (e.g., "User")
 	Fields           []FieldSpec
 	PrimaryKeyFields []FieldSpec
 	SecondaryIndexes []SecondaryIndexSpec
+	NestedMessages   []MessageSpec
+	NestedEnums      []EnumSpec
 	IsQueue          bool
 	GoPackagePath    string
 	GoPackageName    string
 	FilePrefix       string
+}
+
+// HasRepository returns true if this message is annotated with a primary_key or is_queue.
+func (m MessageSpec) HasRepository() bool {
+	return len(m.PrimaryKeyFields) > 0 || m.IsQueue
 }
 
 // ParsePlugin extracts all annotated MessageSpecs from a protogen.Plugin.
@@ -130,7 +152,25 @@ func ParsePlugin(plugin *protogen.Plugin) ([]MessageSpec, error) {
 // ProcessMessage extracts and validates a language-neutral MessageSpec from a protogen.Message.
 // Returns (nil, nil) if the message has no primary_key and is not a queue.
 func ProcessMessage(message *protogen.Message, msgOptions proto.Message) (*MessageSpec, error) {
+	spec, err := ProcessMessageAll(message, msgOptions)
+	if err != nil || spec == nil {
+		return nil, err
+	}
+	if !spec.HasRepository() {
+		return nil, nil
+	}
+	return spec, nil
+}
+
+// ProcessMessageAll extracts a MessageSpec from a protogen.Message (including unannotated
+// helper messages, nested messages, and nested enums).
+func ProcessMessageAll(message *protogen.Message, msgOptions proto.Message) (*MessageSpec, error) {
 	msgName := message.GoIdent.GoName
+	if message.Desc != nil {
+		if _, isNested := message.Desc.Parent().(protoreflect.MessageDescriptor); isNested || msgName == "" {
+			msgName = string(message.Desc.Name())
+		}
+	}
 
 	fieldMap := make(map[string]FieldSpec, len(message.Fields))
 	fields := make([]FieldSpec, 0, len(message.Fields))
@@ -185,10 +225,82 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) (*Messa
 		}
 	}
 
-	return BuildMessageSpec(msgName, fields, fieldMap, primaryKey, rawIndexes, isQueue)
+	spec, err := buildMessageSpecInternal(msgName, fields, fieldMap, primaryKey, rawIndexes, isQueue, true)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, nestedEnum := range message.Enums {
+		spec.NestedEnums = append(spec.NestedEnums, ProcessEnum(nestedEnum))
+	}
+	for _, nestedMsg := range message.Messages {
+		if nestedMsg.Desc != nil && nestedMsg.Desc.IsMapEntry() {
+			continue
+		}
+		var nestedOpts proto.Message
+		if nestedMsg.Desc != nil {
+			nestedOpts = nestedMsg.Desc.Options()
+		}
+		nestedSpec, err := ProcessMessageAll(nestedMsg, nestedOpts)
+		if err != nil {
+			return nil, err
+		}
+		if nestedSpec != nil {
+			spec.NestedMessages = append(spec.NestedMessages, *nestedSpec)
+		}
+	}
+
+	return spec, nil
+}
+
+// ProcessEnum extracts a language-neutral EnumSpec from a protogen.Enum.
+func ProcessEnum(enum *protogen.Enum) EnumSpec {
+	enumName := string(enum.Desc.Name())
+	prefix := strings.ToUpper(toSnakeCase(enumName)) + "_"
+
+	rawNames := make([]string, len(enum.Values))
+	numbers := make([]int32, len(enum.Values))
+	strippedNames := make([]string, len(enum.Values))
+	seen := make(map[string]int)
+
+	for i, v := range enum.Values {
+		raw := string(v.Desc.Name())
+		rawNames[i] = raw
+		numbers[i] = int32(v.Desc.Number())
+
+		candidate := raw
+		if strings.HasPrefix(raw, prefix) {
+			rem := strings.TrimPrefix(raw, prefix)
+			if len(rem) > 0 && unicode.IsLetter(rune(rem[0])) {
+				candidate = rem
+			}
+		}
+		pascal := EscapeRustIdent(toPascalCase(candidate))
+		strippedNames[i] = pascal
+		seen[pascal]++
+	}
+
+	values := make([]EnumValueSpec, len(enum.Values))
+	for i := range enum.Values {
+		rustName := strippedNames[i]
+		if seen[rustName] > 1 {
+			rustName = EscapeRustIdent(toPascalCase(rawNames[i]))
+		}
+		values[i] = EnumValueSpec{
+			ProtoName: rawNames[i],
+			RustName:  rustName,
+			Number:    numbers[i],
+		}
+	}
+
+	return EnumSpec{
+		Name:   enumName,
+		Values: values,
+	}
 }
 
 // BuildMessageSpec validates and constructs a MessageSpec from extracted field specs and option values.
+// Returns (nil, nil) if the message has no primary_key and is not a queue.
 func BuildMessageSpec(
 	msgName string,
 	fields []FieldSpec,
@@ -196,6 +308,18 @@ func BuildMessageSpec(
 	primaryKey []string,
 	rawIndexes []*annotationspb.SecondaryIndex,
 	isQueue bool,
+) (*MessageSpec, error) {
+	return buildMessageSpecInternal(msgName, fields, fieldMap, primaryKey, rawIndexes, isQueue, false)
+}
+
+func buildMessageSpecInternal(
+	msgName string,
+	fields []FieldSpec,
+	fieldMap map[string]FieldSpec,
+	primaryKey []string,
+	rawIndexes []*annotationspb.SecondaryIndex,
+	isQueue bool,
+	allowUnannotated bool,
 ) (*MessageSpec, error) {
 	for _, f := range fields {
 		if err := ValidateFieldSpec(f, msgName); err != nil {
@@ -222,7 +346,7 @@ func BuildMessageSpec(
 		secondaryIndexes = append(secondaryIndexes, si)
 	}
 
-	if len(primaryKeyFields) == 0 && !isQueue {
+	if !allowUnannotated && len(primaryKeyFields) == 0 && !isQueue {
 		return nil, nil
 	}
 
@@ -283,34 +407,87 @@ func extractField(field *protogen.Field, msgName string) (FieldSpec, error) {
 	var enumGoName, enumRustName string
 	if protoKind == protoreflect.EnumKind && field.Enum != nil {
 		enumGoName = field.Enum.GoIdent.GoName
-		enumRustName = string(field.Enum.Desc.Name())
+		enumRustName = rustPathFromFileRoot(field.Enum.Desc)
 	}
 
-	var msgGoName string
+	var msgGoName, msgRustName string
 	if protoKind == protoreflect.MessageKind && field.Message != nil && !field.Desc.IsMap() {
 		msgGoName = field.Message.GoIdent.GoName
+		msgRustName = rustPathFromFileRoot(field.Message.Desc)
 	}
 
 	protoName := string(field.Desc.Name())
 	spec := FieldSpec{
-		ProtoName:      protoName,
-		GoName:         field.GoName,
-		RustName:       EscapeRustIdent(protoName),
-		Number:         int32(field.Desc.Number()),
-		Kind:           kind,
-		EnumGoName:     enumGoName,
-		EnumRustName:   enumRustName,
-		MessageGoName:  msgGoName,
-		IsRepeated:     field.Desc.IsList(),
-		IsUnsigned:     kind == KindUint32 || kind == KindFixed32 || kind == KindUint64 || kind == KindFixed64,
-		IsEnum:         kind == KindEnum,
-		IsVersionstamp: isVersionstamp,
-		Mutation:       mutation,
+		ProtoName:       protoName,
+		GoName:          field.GoName,
+		RustName:        EscapeRustIdent(protoName),
+		Number:          int32(field.Desc.Number()),
+		Kind:            kind,
+		EnumGoName:      enumGoName,
+		EnumRustName:    enumRustName,
+		MessageGoName:   msgGoName,
+		MessageRustName: msgRustName,
+		IsRepeated:      field.Desc.IsList(),
+		IsUnsigned:      kind == KindUint32 || kind == KindFixed32 || kind == KindUint64 || kind == KindFixed64,
+		IsEnum:          kind == KindEnum,
+		IsVersionstamp:  isVersionstamp,
+		Mutation:        mutation,
 	}
 	if err := ValidateFieldSpec(spec, msgName); err != nil {
 		return FieldSpec{}, err
 	}
 	return spec, nil
+}
+
+func rustPathFromFileRoot(desc protoreflect.Descriptor) string {
+	if desc == nil {
+		return ""
+	}
+	parts := []string{string(desc.Name())}
+	for p := desc.Parent(); p != nil; p = p.Parent() {
+		if msgDesc, ok := p.(protoreflect.MessageDescriptor); ok {
+			parts = append([]string{EscapeRustIdent(toSnakeCase(string(msgDesc.Name())))}, parts...)
+		} else {
+			break
+		}
+	}
+	return strings.Join(parts, "::")
+}
+
+func toSnakeCase(s string) string {
+	if s == "" {
+		return ""
+	}
+	var out strings.Builder
+	runes := []rune(s)
+	for i, r := range runes {
+		if unicode.IsUpper(r) {
+			if i > 0 && runes[i-1] != '_' && (unicode.IsLower(runes[i-1]) || (i+1 < len(runes) && unicode.IsLower(runes[i+1]))) {
+				out.WriteByte('_')
+			}
+			out.WriteRune(unicode.ToLower(r))
+		} else {
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
+}
+
+func toPascalCase(s string) string {
+	parts := strings.Split(s, "_")
+	var out strings.Builder
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		runes := []rune(strings.ToLower(part))
+		runes[0] = unicode.ToUpper(runes[0])
+		out.WriteString(string(runes))
+	}
+	if out.Len() == 0 {
+		return s
+	}
+	return out.String()
 }
 
 // BuildSecondaryIndex validates and constructs a SecondaryIndexSpec.
