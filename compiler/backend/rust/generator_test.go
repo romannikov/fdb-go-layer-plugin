@@ -84,3 +84,53 @@ func TestGenerateRustRepository_Queue(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateRustRepository_BytesPrimaryKeyAndSecondaryIndexes(t *testing.T) {
+	msg := ir.MessageSpec{
+		Name: "BlobRecord",
+		PrimaryKeyFields: []ir.FieldSpec{
+			{ProtoName: "raw_id", GoName: "RawId", Number: 1, Kind: ir.KindBytes},
+		},
+		Fields: []ir.FieldSpec{
+			{ProtoName: "raw_id", GoName: "RawId", Number: 1, Kind: ir.KindBytes},
+			{ProtoName: "hash", GoName: "Hash", Number: 2, Kind: ir.KindBytes},
+			{ProtoName: "chunks", GoName: "Chunks", Number: 3, Kind: ir.KindBytes, IsRepeated: true},
+		},
+		SecondaryIndexes: []ir.SecondaryIndexSpec{
+			{
+				Fields: []ir.FieldSpec{
+					{ProtoName: "hash", GoName: "Hash", Number: 2, Kind: ir.KindBytes},
+				},
+				IndexID: 101,
+			},
+			{
+				Fields: []ir.FieldSpec{
+					{ProtoName: "chunks", GoName: "Chunks", Number: 3, Kind: ir.KindBytes, IsRepeated: true},
+				},
+				IsFanOut:    true,
+				FanOutField: ir.FieldSpec{ProtoName: "chunks", GoName: "Chunks", Number: 3, Kind: ir.KindBytes, IsRepeated: true},
+				IndexID:     102,
+			},
+		},
+	}
+
+	var buf BufferPrinter
+	GenerateMessage(&buf, msg)
+	code := buf.String()
+
+	expectedSubstrings := []string{
+		"fdb_layer::Bytes::from(&entity.raw_id[..])",
+		"fdb_layer::Bytes::from(&pk[..])",
+		"fdb_layer::Bytes::from(&entity.hash[..])",
+		"fdb_layer::Bytes::from(&old.hash[..])",
+		"fdb_layer::Bytes::from(&hash[..])",
+		"fdb_layer::Bytes::from(&item[..])",
+	}
+
+	for _, exp := range expectedSubstrings {
+		if !strings.Contains(code, exp) {
+			t.Errorf("expected generated Rust code for bytes PK/indexes to contain %q, got:\n%s", exp, code)
+		}
+	}
+}
+

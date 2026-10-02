@@ -1016,7 +1016,8 @@ func FieldRustParamType(f ir.FieldSpec) string {
 }
 
 // PackField normalizes a Rust expression for FDB tuple packing to ensure 100% binary
-// compatibility with Go's PackField (signed ints/enums -> i64, unsigned ints -> u64).
+// compatibility with Go's PackField (signed ints/enums -> i64, unsigned ints -> u64,
+// bytes -> fdb_layer::Bytes (0x01 byte string)).
 func PackField(expr string, f ir.FieldSpec) string {
 	if f.IsUnsigned || f.Kind == ir.KindUint32 || f.Kind == ir.KindFixed32 || f.Kind == ir.KindUint64 || f.Kind == ir.KindFixed64 {
 		return fmt.Sprintf("(%s as u64)", expr)
@@ -1024,7 +1025,11 @@ func PackField(expr string, f ir.FieldSpec) string {
 	if f.IsEnum || f.Kind == ir.KindEnum || f.Kind == ir.KindInt32 || f.Kind == ir.KindSint32 || f.Kind == ir.KindSfixed32 || f.Kind == ir.KindInt64 || f.Kind == ir.KindSint64 || f.Kind == ir.KindSfixed64 {
 		return fmt.Sprintf("(%s as i64)", expr)
 	}
-	if f.Kind == ir.KindString || f.Kind == ir.KindBytes {
+	if f.Kind == ir.KindBytes {
+		clean := strings.TrimPrefix(expr, "&")
+		return fmt.Sprintf("fdb_layer::Bytes::from(&%s[..])", clean)
+	}
+	if f.Kind == ir.KindString {
 		if strings.HasPrefix(expr, "&") {
 			return expr
 		}
@@ -1091,7 +1096,7 @@ func pkTupleArgsFromEntity(msg ir.MessageSpec, varName string) string {
 func pkTupleArgsFromParam(msg ir.MessageSpec) string {
 	if len(msg.PrimaryKeyFields) == 1 {
 		f := msg.PrimaryKeyFields[0]
-		if f.Kind == ir.KindString || f.Kind == ir.KindBytes {
+		if f.Kind == ir.KindString {
 			return "pk"
 		}
 		return PackField("pk", f)
@@ -1140,8 +1145,10 @@ func emitFanOutIndexWrite(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSp
 	args = append(args, "type_id", "fdb_layer::INDEX_NAMESPACE", fmt.Sprintf("%di64", idx.IndexID))
 	for j, sf := range idx.Fields {
 		if j == repeatedIdx {
-			if sf.Kind == ir.KindString || sf.Kind == ir.KindBytes {
+			if sf.Kind == ir.KindString {
 				args = append(args, "item")
+			} else if sf.Kind == ir.KindBytes {
+				args = append(args, PackField("item", sf))
 			} else {
 				args = append(args, PackField("*item", sf))
 			}
