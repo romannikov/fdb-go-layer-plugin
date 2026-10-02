@@ -1,0 +1,12 @@
+[package]
+name = "fdb-layer-conformance"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+fdb-layer = { path = "../../runtimes/rust" }
+fdb-layer-tests = { path = "../rust" }
+prost = "0.13"
+tokio = { version = "1", features = ["rt", "macros"] }
+futures = "0.3"

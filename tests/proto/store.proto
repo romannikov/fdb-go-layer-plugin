@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package tests.store;
+
+option go_package = "github.com/romannikov/fdb-layer/tests/go/store;store";
+
+import "fdb-layer/annotations.proto";
+
+message User {
+    option (annotations.primary_key) = "id";
+    option (annotations.secondary_index) = {
+        fields: ["email"]
+    };
+
+    string id = 1;
+    string name = 2;
+    string email = 3;
+}
+
+message Product {
+    option (annotations.primary_key) = "id";
+    option (annotations.secondary_index) = {
+        fields: ["category"]
+    };
+
+    string id = 1;
+    string name = 2;
+    string category = 3;
+    int32 price = 4;
+}
+
+message Post {
+    option (annotations.primary_key) = "id";
+    option (annotations.secondary_index) = {
+        fields: ["tags"]
+    };
+
+    string id = 1;
+    repeated string tags = 2;
+}
+
+message TaskMessage {
+    option (annotations.is_queue) = true;
+    option (annotations.primary_key) = "queue_name";
+    option (annotations.primary_key) = "shard_id";
+    option (annotations.primary_key) = "versionstamp";
+
+    string queue_name = 1;
+    uint32 shard_id = 2;
+    bytes versionstamp = 3 [(annotations.is_versionstamp) = true];
+    bytes payload = 4;
+}
+
+enum OrderStatus {
+    ORDER_STATUS_UNSPECIFIED = 0;
+    ORDER_STATUS_PENDING = 1;
+    ORDER_STATUS_SHIPPED = 2;
+}
+
+message Order {
+    option (annotations.primary_key) = "tenant_id";
+    option (annotations.primary_key) = "order_seq";
+
+    option (annotations.secondary_index) = {
+        id: 1001
+        fields: ["status", "created_at"]
+    };
+    option (annotations.secondary_index) = {
+        fields: ["receipt_hash"]
+    };
+    option (annotations.secondary_index) = {
+        fields: ["attachment_hashes"]
+    };
+
+    enum Priority {
+        PRIORITY_LOW = 0;
+        PRIORITY_HIGH = 1;
+    }
+
+    message ShippingAddress {
+        string city = 1;
+        string country = 2;
+    }
+
+    string tenant_id = 1;
+    int32 order_seq = 2;
+    OrderStatus status = 3;
+    int64 created_at = 4;
+    bytes receipt_hash = 5;
+    repeated bytes attachment_hashes = 6;
+    Priority priority = 7;
+    ShippingAddress address = 8;
+    repeated ShippingAddress history = 9;
+}
+
+message AuditLog {
+    option (annotations.primary_key) = "log_id";
+
+    bytes log_id = 1 [(annotations.is_versionstamp) = true];
+    string actor = 2;
+}
