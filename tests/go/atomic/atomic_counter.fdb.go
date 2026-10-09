@@ -87,7 +87,7 @@ func (r *counterRepository) Create(ctx context.Context, tr fdblayer.Transaction,
 		binary.LittleEndian.PutUint64(buf, uint64(entity.Value))
 		tr.Add(fieldKey, buf)
 	}
-	if entity.MaxValue != 0 {
+	{
 		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 3})
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(entity.MaxValue)^(1<<63))
@@ -210,6 +210,43 @@ func (r *counterRepository) Set(ctx context.Context, tr fdblayer.Transaction, di
 	}
 
 	tr.Set(key, value)
+
+	if entity.Value != 0 {
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 2})
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(entity.Value))
+		tr.Set(fieldKey, buf)
+	}
+	if entity.MaxValue != 0 {
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 3})
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(entity.MaxValue)^(1<<63))
+		tr.Set(fieldKey, buf)
+	}
+	if entity.MinValue != 0 {
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 4})
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(entity.MinValue)^(1<<63))
+		tr.Set(fieldKey, buf)
+	}
+	if entity.U64Max != 0 {
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 5})
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(entity.U64Max))
+		tr.Set(fieldKey, buf)
+	}
+	if entity.I32Min != 0 {
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 6})
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(int64(entity.I32Min))^(1<<63))
+		tr.Set(fieldKey, buf)
+	}
+	if entity.U32Add != 0 {
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, entity.Id, 7})
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(entity.U32Add))
+		tr.Set(fieldKey, buf)
+	}
 
 	return nil
 }
@@ -381,10 +418,19 @@ func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransact
 		End:   dataPrefixRange.End,
 	}, rangeOpts).GetSliceOrPanic()
 
-	var nextKey fdb.Key
-	for _, kv := range kvs {
+	for i, kv := range kvs {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if opts.Limit > 0 && i == opts.Limit {
+			tpl, err := dir.Unpack(kv.Key)
+			if err != nil {
+				return nil, fmt.Errorf("failed to unpack next key: %w", err)
+			}
+			// Remove typeID and DataNamespace to return just the PK tuple
+			result.HasMore = true
+			result.NextKey = tpl[2:]
+			break
 		}
 
 		entity := &Counter{}
@@ -393,23 +439,6 @@ func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransact
 			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)
 		}
 		result.Items = append(result.Items, entity)
-		nextKey = kv.Key
-
-		// Stop once we have enough items for pagination check
-		if opts.Limit > 0 && len(result.Items) > opts.Limit {
-			break
-		}
-	}
-
-	result.HasMore = opts.Limit > 0 && len(result.Items) > opts.Limit
-	if result.HasMore {
-		tpl, err := dir.Unpack(nextKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unpack next key: %w", err)
-		}
-		// Remove typeID and DataNamespace to return just the PK tuple
-		result.NextKey = tpl[2:]
-		result.Items = result.Items[:opts.Limit]
 	}
 
 	// Populate atomic fields for all returned items in a single range read

@@ -235,6 +235,54 @@ func TestBuildMessageSpec_ValidationErrors(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "cannot be a versionstamp field") {
 		t.Fatalf("expected secondary index on versionstamp field error, got %v", err)
 	}
+
+	// 10. Duplicate primary key field
+	_, err = BuildMessageSpec("InvalidMsg", noVsFields, noVsMap, []string{"id", "id"}, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "duplicate primary key field") {
+		t.Fatalf("expected duplicate primary key field error, got %v", err)
+	}
+
+	// 11. Queue with only 1 primary key field (missing partition key)
+	_, err = BuildMessageSpec("InvalidQueue", singleVsFields, singleVsMap, []string{"vs1"}, nil, true)
+	if err == nil || !strings.Contains(err.Error(), "at least 2 primary key fields") {
+		t.Fatalf("expected queue with 1 PK field error, got %v", err)
+	}
+
+	// 12. Empty secondary index fields or duplicate secondary index fields
+	_, err = BuildMessageSpec("InvalidMsg", noVsFields, noVsMap, []string{"id"}, []*annotationspb.SecondaryIndex{
+		{Fields: []string{}},
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "must specify at least one field") {
+		t.Fatalf("expected empty secondary index error, got %v", err)
+	}
+	_, err = BuildMessageSpec("InvalidMsg", noVsFields, noVsMap, []string{"id"}, []*annotationspb.SecondaryIndex{
+		{Fields: []string{"id", "id"}},
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "duplicate field") {
+		t.Fatalf("expected duplicate secondary index field error, got %v", err)
+	}
+
+	// 13. Repeated versionstamp field in ValidateFieldSpec
+	err = ValidateFieldSpec(FieldSpec{
+		ProtoName:      "vs",
+		Kind:           KindBytes,
+		IsVersionstamp: true,
+		IsRepeated:     true,
+	}, "InvalidMsg")
+	if err == nil || !strings.Contains(err.Error(), "cannot be repeated") {
+		t.Fatalf("expected repeated versionstamp error, got %v", err)
+	}
+
+	// 14. ReorderQueuePrimaryKeyFields when versionstamp is first in 2-field and 3-field PKs
+	reordered2 := ReorderQueuePrimaryKeyFields([]FieldSpec{fields[3], fields[0]})
+	if reordered2[0].ProtoName != "id" || reordered2[1].ProtoName != "vs1" {
+		t.Fatalf("expected [id, vs1], got [%s, %s]", reordered2[0].ProtoName, reordered2[1].ProtoName)
+	}
+
+	// 15. EscapeRustIdent for non-rawable Rust keywords
+	for _, kw := range []string{"self", "Self", "super", "crate"} {
+		if got := EscapeRustIdent(kw); got != kw+"_" {
+			t.Fatalf("EscapeRustIdent(%q) = %q, want %q", kw, got, kw+"_")
+		}
+	}
 }
-
-

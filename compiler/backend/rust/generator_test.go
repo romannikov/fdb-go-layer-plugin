@@ -263,7 +263,7 @@ func TestGenerateRustRepository_NonQueueVersionstampWithIndexesAndAtomics(t *tes
 		"let idx_key = dir.pack_with_versionstamp(&(type_id, fdb_layer::INDEX_NAMESPACE, 1002i64, item, fdb_layer::Versionstamp::incomplete(user_version)));",
 		"entity.log_id = fdb_layer::bytes_to_versionstamp(pk).as_bytes().to_vec();",
 		"if !entity.log_id.is_empty() && entity.log_id.len() != 12 {",
-		"if !entity.log_id.iter().any(|&b| b != 0) {",
+		"if entity.log_id.is_empty() {",
 		"return self.create(tr, dir, entity).await;",
 		"decoded.log_id = entity.log_id.clone();",
 		"entity.log_id = pk.to_vec();",
@@ -279,5 +279,37 @@ func TestGenerateRustRepository_NonQueueVersionstampWithIndexesAndAtomics(t *tes
 	}
 }
 
+func TestGenerateRustRepository_SafeParamIdentsAndKeywords(t *testing.T) {
+	valPK := ir.FieldSpec{ProtoName: "val", GoName: "Val", RustName: "val", Number: 1, Kind: ir.KindString}
+	selfField := ir.FieldSpec{ProtoName: "self", GoName: "Self", RustName: "r#self", Number: 2, Kind: ir.KindString}
+	counter := ir.FieldSpec{ProtoName: "count", GoName: "Count", Number: 3, Kind: ir.KindInt64, Mutation: ir.MutationAdd}
 
+	msg := ir.MessageSpec{
+		Name:             "CollisionEntity",
+		PrimaryKeyFields: []ir.FieldSpec{valPK},
+		Fields:           []ir.FieldSpec{valPK, selfField, counter},
+		SecondaryIndexes: []ir.SecondaryIndexSpec{
+			{
+				Fields:  []ir.FieldSpec{selfField},
+				IndexID: 2001,
+			},
+		},
+	}
 
+	var buf BufferPrinter
+	GenerateMessage(&buf, msg)
+	code := buf.String()
+
+	for _, exp := range []string{
+		"self_: &str,",
+		"val_param: &str,",
+		"val: i64,",
+	} {
+		if !strings.Contains(code, exp) {
+			t.Errorf("expected generated Rust code to contain %q, got:\n%s", exp, code)
+		}
+	}
+	if strings.Contains(code, "r#self") {
+		t.Errorf("generated Rust code must not contain invalid raw identifier r#self:\n%s", code)
+	}
+}

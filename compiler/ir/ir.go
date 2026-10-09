@@ -129,10 +129,14 @@ func ParsePlugin(plugin *protogen.Plugin) ([]MessageSpec, error) {
 		goPackagePath := string(file.GoImportPath)
 		for _, message := range file.Messages {
 			msgName := message.GoIdent.GoName
-			if processedMessages[msgName] {
+			dedupKey := goPackagePath + "." + msgName
+			if message.Desc != nil {
+				dedupKey = string(message.Desc.FullName())
+			}
+			if processedMessages[dedupKey] {
 				continue
 			}
-			processedMessages[msgName] = true
+			processedMessages[dedupKey] = true
 
 			spec, err := ProcessMessage(message, message.Desc.Options())
 			if err != nil {
@@ -337,6 +341,9 @@ func buildMessageSpecInternal(
 	pkSet := make(map[string]bool, len(primaryKey))
 	primaryKeyFields := make([]FieldSpec, 0, len(primaryKey))
 	for _, pkName := range primaryKey {
+		if pkSet[pkName] {
+			return nil, fmt.Errorf("duplicate primary key field %q in message %s", pkName, msgName)
+		}
 		f, ok := fieldMap[pkName]
 		if !ok {
 			return nil, fmt.Errorf("primary key field %q not found in message %s", pkName, msgName)
@@ -346,6 +353,9 @@ func buildMessageSpecInternal(
 		}
 		if f.Mutation != MutationNone {
 			return nil, fmt.Errorf("primary key field %q in message %s cannot have an atomic mutation", pkName, msgName)
+		}
+		if f.Kind == KindMessage || f.Kind == KindUnknown {
+			return nil, fmt.Errorf("primary key field %q in message %s has unsupported kind %v", pkName, msgName, f.Kind)
 		}
 		pkSet[pkName] = true
 		primaryKeyFields = append(primaryKeyFields, f)
@@ -375,6 +385,9 @@ func buildMessageSpecInternal(
 		if !MsgHasVersionstampPK(MessageSpec{PrimaryKeyFields: primaryKeyFields}) {
 			return nil, fmt.Errorf("queue message %s must have an is_versionstamp=true primary key field", msgName)
 		}
+		if len(primaryKeyFields) < 2 {
+			return nil, fmt.Errorf("queue message %s must have at least 2 primary key fields (queue partition key and versionstamp)", msgName)
+		}
 		primaryKeyFields = ReorderQueuePrimaryKeyFields(primaryKeyFields)
 	}
 
@@ -391,6 +404,9 @@ func buildMessageSpecInternal(
 func ValidateFieldSpec(f FieldSpec, msgName string) error {
 	if f.IsVersionstamp && f.Kind != KindBytes {
 		return fmt.Errorf("field %q in message %s is marked is_versionstamp=true but is %v (must be bytes)", f.ProtoName, msgName, f.Kind)
+	}
+	if f.IsVersionstamp && f.IsRepeated {
+		return fmt.Errorf("field %q in message %s is marked is_versionstamp=true but cannot be repeated", f.ProtoName, msgName)
 	}
 	if f.Mutation != MutationNone && !f.Kind.IsInteger() {
 		return fmt.Errorf("field %q in message %s has atomic mutation %v but is not a 32-bit or 64-bit integer type", f.ProtoName, msgName, f.Mutation)
@@ -521,8 +537,16 @@ func BuildSecondaryIndex(
 	usedHashes map[int64]string,
 	msgName string,
 ) (SecondaryIndexSpec, error) {
+	if len(idx.GetFields()) == 0 {
+		return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s must specify at least one field", msgName)
+	}
+	seenFields := make(map[string]bool, len(idx.GetFields()))
 	idxFields := make([]FieldSpec, 0, len(idx.GetFields()))
 	for _, idxFieldName := range idx.GetFields() {
+		if seenFields[idxFieldName] {
+			return SecondaryIndexSpec{}, fmt.Errorf("duplicate field %q in secondary index of message %s", idxFieldName, msgName)
+		}
+		seenFields[idxFieldName] = true
 		f, ok := fieldMap[idxFieldName]
 		if !ok {
 			return SecondaryIndexSpec{}, fmt.Errorf("secondary index field %q not found in message %s", idxFieldName, msgName)
@@ -532,6 +556,9 @@ func BuildSecondaryIndex(
 		}
 		if f.IsVersionstamp {
 			return SecondaryIndexSpec{}, fmt.Errorf("secondary index field %q in message %s cannot be a versionstamp field", idxFieldName, msgName)
+		}
+		if f.Kind == KindMessage || f.Kind == KindUnknown {
+			return SecondaryIndexSpec{}, fmt.Errorf("secondary index field %q in message %s has unsupported kind %v", idxFieldName, msgName, f.Kind)
 		}
 		idxFields = append(idxFields, f)
 	}
@@ -552,7 +579,7 @@ func BuildSecondaryIndex(
 	for _, f := range idxFields {
 		name := f.GoName
 		if name == "" {
-			name = f.ProtoName
+			name = toPascalCase(f.ProtoName)
 		}
 		fieldNames = append(fieldNames, strings.ToLower(name))
 	}
@@ -585,21 +612,31 @@ func ComputeIndexID(signature string) int64 {
 	return int64(h.Sum32())
 }
 
-// ReorderQueuePrimaryKeyFields reorders queue primary keys when len > 2 to:
-// [pk[0] (queue_name), versionstamp_fields..., remaining_tie_breaker_fields...].
+// ReorderQueuePrimaryKeyFields reorders queue primary keys to:
+// [first_non_versionstamp_pk (queue_name), versionstamp_fields..., remaining_tie_breaker_fields...].
 func ReorderQueuePrimaryKeyFields(pkFields []FieldSpec) []FieldSpec {
-	if len(pkFields) <= 2 {
+	if len(pkFields) < 2 {
+		return pkFields
+	}
+	firstNonVS := -1
+	for i, f := range pkFields {
+		if !f.IsVersionstamp {
+			firstNonVS = i
+			break
+		}
+	}
+	if firstNonVS == -1 {
 		return pkFields
 	}
 	reordered := make([]FieldSpec, 0, len(pkFields))
-	reordered = append(reordered, pkFields[0])
-	for _, f := range pkFields[1:] {
+	reordered = append(reordered, pkFields[firstNonVS])
+	for _, f := range pkFields {
 		if f.IsVersionstamp {
 			reordered = append(reordered, f)
 		}
 	}
-	for _, f := range pkFields[1:] {
-		if !f.IsVersionstamp {
+	for i, f := range pkFields {
+		if i != firstNonVS && !f.IsVersionstamp {
 			reordered = append(reordered, f)
 		}
 	}
@@ -661,6 +698,9 @@ var rustKeywords = map[string]bool{
 
 // EscapeRustIdent escapes Rust reserved keywords with r# matching prost's field naming.
 func EscapeRustIdent(ident string) string {
+	if ident == "self" || ident == "Self" || ident == "super" || ident == "crate" {
+		return ident + "_"
+	}
 	if rustKeywords[ident] {
 		return "r#" + ident
 	}

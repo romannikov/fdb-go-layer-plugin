@@ -172,13 +172,7 @@ func (r *auditlogRepository) Set(ctx context.Context, tr fdblayer.Transaction, d
 	if len(entity.LogId) != 0 && len(entity.LogId) != 12 {
 		return fmt.Errorf("invalid versionstamp length %d for LogId: must be 0 or 12 bytes", len(entity.LogId))
 	}
-	hasOldVS := false
-	for _, b := range entity.LogId {
-		if b != 0 {
-			hasOldVS = true
-			break
-		}
-	}
+	hasOldVS := len(entity.LogId) == 12
 	if !hasOldVS {
 		return r.Create(ctx, tr, dir, entity)
 	}
@@ -215,6 +209,13 @@ func (r *auditlogRepository) Set(ctx context.Context, tr fdblayer.Transaction, d
 	}
 
 	tr.Set(key, value)
+
+	if entity.Views != 0 {
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, fdblayer.BytesToVersionstamp(entity.LogId), 4})
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(entity.Views))
+		tr.Set(fieldKey, buf)
+	}
 
 	// Standard index
 	if old == nil || old.Actor != entity.Actor {
@@ -454,11 +455,13 @@ func (r *auditlogRepository) ListAuditLog(ctx context.Context, tr fdb.ReadTransa
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)
 		}
-		if tpl, unpackErr := dir.Unpack(kv.Key); unpackErr == nil {
-			if len(tpl) > 0+2 {
-				if vs, ok := tpl[0+2].(tuple.Versionstamp); ok {
-					entity.LogId = vs.Bytes()
-				}
+		tpl, unpackErr := dir.Unpack(kv.Key)
+		if unpackErr != nil {
+			return nil, fmt.Errorf("failed to unpack key: %w", unpackErr)
+		}
+		if len(tpl) > 0+2 {
+			if vs, ok := tpl[0+2].(tuple.Versionstamp); ok {
+				entity.LogId = vs.Bytes()
 			}
 		}
 		result.Items = append(result.Items, entity)

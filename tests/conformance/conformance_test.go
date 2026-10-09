@@ -90,7 +90,15 @@ func TestCrossLanguageConformance_GoAndRust(t *testing.T) {
 	// =========================================================================
 	// Phase 1: Go writes metadata, entities, secondary indexes, atomics & queue
 	// =========================================================================
+	t.Cleanup(func() {
+		_, _ = db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+			tr.ClearRange(dir)
+			return nil, nil
+		})
+	})
+
 	withTx(t, db, func(tr fdb.Transaction) error {
+		tr.ClearRange(dir)
 		return recordStore.SyncMetadata(ctx, tr, dir, []string{
 			"User", "Product", "Post", "TaskMessage", "Order", "AuditLog", "Counter",
 		})

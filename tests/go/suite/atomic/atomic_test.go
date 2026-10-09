@@ -414,4 +414,46 @@ func TestAtomicMutations_UnsignedAnd32Bit(t *testing.T) {
 	}
 }
 
+func TestZeroInitializedMaxAndSetAtomicFields(t *testing.T) {
+	ctx := context.Background()
+	kv := tests.NewMockKV()
+	tr := tests.NewMockTransaction(kv)
+	dir := &tests.MockDirectorySubspace{}
+	recordStore := fdblayer.NewRecordStore()
+	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"}); err != nil {
+		t.Fatalf("failed to sync metadata: %v", err)
+	}
+	counterRepo := atomic.NewCounterRepository(recordStore)
 
+	// 1. Create with MaxValue=0 then MaxCounterMaxValue(-100) must stay 0 (not become -100)
+	if err := counterRepo.Create(ctx, tr, dir, &atomic.Counter{Id: "c_max_zero"}); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_max_zero", -100); err != nil {
+		t.Fatalf("MaxCounterMaxValue(-100) failed: %v", err)
+	}
+	gotZero, err := counterRepo.Get(ctx, tr, dir, "c_max_zero")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if gotZero.MaxValue != 0 {
+		t.Fatalf("expected MaxValue=0 after Max(-100) on 0-initialized Counter, got %d", gotZero.MaxValue)
+	}
+
+	// 2. Set upsert with non-zero atomic fields must persist them to FieldNamespace
+	if err := counterRepo.Set(ctx, tr, dir, &atomic.Counter{
+		Id:       "c_set_upsert",
+		Value:    42,
+		MaxValue: 100,
+		MinValue: 7,
+	}); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+	gotUpsert, err := counterRepo.Get(ctx, tr, dir, "c_set_upsert")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if gotUpsert.Value != 42 || gotUpsert.MaxValue != 100 || gotUpsert.MinValue != 7 {
+		t.Fatalf("expected Set to persist atomic fields {42, 100, 7}, got %+v", gotUpsert)
+	}
+}

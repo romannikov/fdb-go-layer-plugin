@@ -52,7 +52,7 @@ func generateHeader(g Printer, msg ir.MessageSpec) {
 func generateQueueRepository(g Printer, msg ir.MessageSpec) {
 	lowerName := strings.ToLower(msg.Name)
 	firstPK := msg.PrimaryKeyFields[0]
-	firstPKLower := strings.ToLower(firstPK.GoName)
+	firstPKLower := safeGoParamName(strings.ToLower(firstPK.GoName))
 
 	g.P("// ", msg.Name, "Repository defines the repository interface for the ", msg.Name, " queue.")
 	g.P("type ", msg.Name, "Repository interface {")
@@ -116,7 +116,7 @@ func generateEnqueue(g Printer, msg ir.MessageSpec) {
 func generateDequeue(g Printer, msg ir.MessageSpec) {
 	lowerName := strings.ToLower(msg.Name)
 	firstPK := msg.PrimaryKeyFields[0]
-	firstPKLower := strings.ToLower(firstPK.GoName)
+	firstPKLower := safeGoParamName(strings.ToLower(firstPK.GoName))
 
 	g.P("// Dequeue reads and removes the single oldest message from the queue.")
 	g.P("func (r *", lowerName, "Repository) Dequeue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, ", firstPKLower, " ", FieldGoType(firstPK), ") (*", msg.Name, ", error) {")
@@ -154,17 +154,19 @@ func generateDequeue(g Printer, msg ir.MessageSpec) {
 	g.P("	}")
 	g.P()
 	if ir.MsgHasVersionstampPK(msg) {
-		g.P("	if tpl, unpackErr := dir.Unpack(keyToDelete); unpackErr == nil {")
+		g.P("	tpl, unpackErr := dir.Unpack(keyToDelete)")
+		g.P("	if unpackErr != nil {")
+		g.P("		return nil, unpackErr")
+		g.P("	}")
 		for i, f := range msg.PrimaryKeyFields {
 			if f.IsVersionstamp {
-				g.P("		if len(tpl) > ", i, "+2 {")
-				g.P("			if vs, ok := tpl[", i, "+2].(tuple.Versionstamp); ok {")
-				g.P("				entity.", f.GoName, " = vs.Bytes()")
-				g.P("			}")
+				g.P("	if len(tpl) > ", i, "+2 {")
+				g.P("		if vs, ok := tpl[", i, "+2].(tuple.Versionstamp); ok {")
+				g.P("			entity.", f.GoName, " = vs.Bytes()")
 				g.P("		}")
+				g.P("	}")
 			}
 		}
-		g.P("	}")
 		g.P()
 	}
 	g.P("	return entity, nil")
@@ -284,7 +286,15 @@ func generateCreate(g Printer, msg ir.MessageSpec) {
 		vsPKArgs := versionstampedPKTupleArgsWithVar(msg, "userVersion")
 		for _, f := range msg.Fields {
 			if f.Mutation != ir.MutationNone {
-				g.P("	if entity.", f.GoName, " != 0 {")
+				// Signed MUTATION_MAX encodes 0 with sign-bit bias (1<<63), so 0 must be
+				// written to FieldNamespace to prevent negative Max(v) from overwriting 0.
+				// MUTATION_MIN and MUTATION_ADD omit 0 so default-zero Min fields can be
+				// initialized by their first positive Min(v) mutation.
+				if f.Mutation == ir.MutationMax && !f.IsUnsigned {
+					g.P("	{")
+				} else {
+					g.P("	if entity.", f.GoName, " != 0 {")
+				}
 				if hasVS {
 					g.P("		fieldKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.FieldNamespace, ", vsPKArgs, ", ", f.Number, "})")
 					g.P("		if err != nil {")
@@ -421,13 +431,7 @@ func generateSet(g Printer, msg ir.MessageSpec) {
 		g.P("	if len(entity.", vsFieldName, ") != 0 && len(entity.", vsFieldName, ") != 12 {")
 		g.P(`		return fmt.Errorf("invalid versionstamp length %d for `, vsFieldName, `: must be 0 or 12 bytes", len(entity.`, vsFieldName, `))`)
 		g.P("	}")
-		g.P("	hasOldVS := false")
-		g.P("	for _, b := range entity.", vsFieldName, " {")
-		g.P("		if b != 0 {")
-		g.P("			hasOldVS = true")
-		g.P("			break")
-		g.P("		}")
-		g.P("	}")
+		g.P("	hasOldVS := len(entity.", vsFieldName, ") == 12")
 		g.P("	if !hasOldVS {")
 		g.P("		return r.Create(ctx, tr, dir, entity)")
 		g.P("	}")
@@ -464,6 +468,20 @@ func generateSet(g Printer, msg ir.MessageSpec) {
 
 	g.P("	tr.Set(key, value)")
 	g.P()
+
+	if ir.HasMutationFields(msg) {
+		for _, f := range msg.Fields {
+			if f.Mutation != ir.MutationNone {
+				g.P("	if entity.", f.GoName, " != 0 {")
+				g.P("		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, ", pkArgsEntity, ", ", f.Number, "})")
+				g.P("		buf := make([]byte, 8)")
+				g.P("		binary.LittleEndian.PutUint64(buf, ", encodeAtomicUint64Expr("entity."+f.GoName, f), ")")
+				g.P("		tr.Set(fieldKey, buf)")
+				g.P("	}")
+			}
+		}
+		g.P()
+	}
 
 	for _, idx := range msg.SecondaryIndexes {
 		if idx.IsFanOut {
@@ -780,24 +798,35 @@ func generateList(g Printer, msg ir.MessageSpec) {
 		g.P("		if err != nil {")
 		g.P(`			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)`)
 		g.P("		}")
-		g.P("		if tpl, unpackErr := dir.Unpack(kv.Key); unpackErr == nil {")
+		g.P("		tpl, unpackErr := dir.Unpack(kv.Key)")
+		g.P("		if unpackErr != nil {")
+		g.P(`			return nil, fmt.Errorf("failed to unpack key: %w", unpackErr)`)
+		g.P("		}")
 		for i, f := range msg.PrimaryKeyFields {
 			if f.IsVersionstamp {
-				g.P("			if len(tpl) > ", i, "+2 {")
-				g.P("				if vs, ok := tpl[", i, "+2].(tuple.Versionstamp); ok {")
-				g.P("					entity.", f.GoName, " = vs.Bytes()")
-				g.P("				}")
+				g.P("		if len(tpl) > ", i, "+2 {")
+				g.P("			if vs, ok := tpl[", i, "+2].(tuple.Versionstamp); ok {")
+				g.P("				entity.", f.GoName, " = vs.Bytes()")
 				g.P("			}")
+				g.P("		}")
 			}
 		}
-		g.P("		}")
 		g.P("		result.Items = append(result.Items, entity)")
 		g.P("	}")
 	} else {
-		g.P("	var nextKey fdb.Key")
-		g.P("	for _, kv := range kvs {")
+		g.P("	for i, kv := range kvs {")
 		g.P("		if err := ctx.Err(); err != nil {")
 		g.P("			return nil, err")
+		g.P("		}")
+		g.P("		if opts.Limit > 0 && i == opts.Limit {")
+		g.P("			tpl, err := dir.Unpack(kv.Key)")
+		g.P("			if err != nil {")
+		g.P(`				return nil, fmt.Errorf("failed to unpack next key: %w", err)`)
+		g.P("			}")
+		g.P("			// Remove typeID and DataNamespace to return just the PK tuple")
+		g.P("			result.HasMore = true")
+		g.P("			result.NextKey = tpl[2:]")
+		g.P("			break")
 		g.P("		}")
 		g.P()
 		g.P("		entity := &", msg.Name, "{}")
@@ -806,23 +835,6 @@ func generateList(g Printer, msg ir.MessageSpec) {
 		g.P(`			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)`)
 		g.P("		}")
 		g.P("		result.Items = append(result.Items, entity)")
-		g.P("		nextKey = kv.Key")
-		g.P()
-		g.P("		// Stop once we have enough items for pagination check")
-		g.P("		if opts.Limit > 0 && len(result.Items) > opts.Limit {")
-		g.P("			break")
-		g.P("		}")
-		g.P("	}")
-		g.P()
-		g.P("	result.HasMore = opts.Limit > 0 && len(result.Items) > opts.Limit")
-		g.P("	if result.HasMore {")
-		g.P("		tpl, err := dir.Unpack(nextKey)")
-		g.P("		if err != nil {")
-		g.P(`			return nil, fmt.Errorf("failed to unpack next key: %w", err)`)
-		g.P("		}")
-		g.P("		// Remove typeID and DataNamespace to return just the PK tuple")
-		g.P("		result.NextKey = tpl[2:]")
-		g.P("		result.Items = result.Items[:opts.Limit]")
 		g.P("	}")
 	}
 	g.P()
@@ -1362,3 +1374,23 @@ func emitVersionstampedFanOutIndexWrite(g Printer, msg ir.MessageSpec, idx ir.Se
 	g.P(indent, "}")
 	g.P(indent, "tr.SetVersionstampedKey(idxKey, []byte{})")
 }
+
+var goKeywordsAndReservedLocals = map[string]bool{
+	"break": true, "default": true, "func": true, "interface": true, "select": true,
+	"case": true, "defer": true, "go": true, "map": true, "struct": true,
+	"chan": true, "else": true, "goto": true, "package": true, "switch": true,
+	"const": true, "fallthrough": true, "if": true, "range": true, "type": true,
+	"continue": true, "for": true, "import": true, "return": true, "var": true,
+	"r": true, "ctx": true, "tr": true, "dir": true, "typeID": true, "err": true,
+	"prefixTuple": true, "prefixRange": true, "options": true, "rows": true,
+	"firstItem": true, "keyToDelete": true, "payload": true, "entity": true,
+	"tpl": true, "unpackErr": true, "vs": true, "ok": true, "val": true,
+}
+
+func safeGoParamName(name string) string {
+	if goKeywordsAndReservedLocals[name] {
+		return name + "Param"
+	}
+	return name
+}
+

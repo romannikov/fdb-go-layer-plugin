@@ -80,9 +80,7 @@ type RecordStore struct {
 
 // NewRecordStore creates a new RecordStore instance.
 func NewRecordStore() *RecordStore {
-	return &RecordStore{
-		metadata: make(map[string]int64),
-	}
+	return &RecordStore{}
 }
 
 // NextUserVersion returns a monotonically increasing 16-bit user version so
@@ -98,7 +96,7 @@ func (s *RecordStore) GetTypeID(name string) (int64, error) {
 	defer s.mu.RUnlock()
 
 	if s.metadata == nil {
-		return 0, fmt.Errorf("metadata not initialized, call SyncMetadata first")
+		return 0, fmt.Errorf("metadata not initialized (type %s not found in metadata), call SyncMetadata first", name)
 	}
 	typeID, ok := s.metadata[name]
 	if !ok {
@@ -127,8 +125,8 @@ func (s *RecordStore) SyncMetadata(ctx context.Context, tr Transaction, metaDir 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	s.metadata = make(map[string]int64, len(messages))
-	kvs := tr.GetRange(metaDir, fdb.RangeOptions{}).GetSliceOrPanic()
+	newMeta := make(map[string]int64, len(messages))
+	kvs := GetRange(tr, metaDir, fdb.RangeOptions{}).GetSliceOrPanic()
 
 	maxID := int64(0)
 	for _, kv := range kvs {
@@ -151,7 +149,7 @@ func (s *RecordStore) SyncMetadata(ctx context.Context, tr Transaction, metaDir 
 		if !ok {
 			continue
 		}
-		s.metadata[msgName] = id
+		newMeta[msgName] = id
 		if id > maxID {
 			maxID = id
 		}
@@ -161,14 +159,14 @@ func (s *RecordStore) SyncMetadata(ctx context.Context, tr Transaction, metaDir 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if _, exists := s.metadata[msg]; exists {
+		if _, exists := newMeta[msg]; exists {
 			continue
 		}
 		key := metaDir.Pack(tuple.Tuple{msg})
 		if raw := tr.Get(key).MustGet(); raw != nil {
 			if valTpl, err := tuple.Unpack(raw); err == nil && len(valTpl) == 1 {
 				if id, ok := valTpl[0].(int64); ok {
-					s.metadata[msg] = id
+					newMeta[msg] = id
 					if id > maxID {
 						maxID = id
 					}
@@ -177,10 +175,11 @@ func (s *RecordStore) SyncMetadata(ctx context.Context, tr Transaction, metaDir 
 			}
 		}
 		maxID++
-		s.metadata[msg] = maxID
+		newMeta[msg] = maxID
 		val := tuple.Tuple{int64(maxID)}.Pack()
 		tr.Set(key, val)
 	}
+	s.metadata = newMeta
 	return nil
 }
 

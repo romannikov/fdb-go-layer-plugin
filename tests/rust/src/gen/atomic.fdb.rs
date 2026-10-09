@@ -67,7 +67,7 @@ impl CounterRepository {
             let buf = (entity.value as u64).to_le_bytes();
             tr.atomic_op(&field_key, &buf, fdb_layer::MutationType::Add);
         }
-        if entity.max_value != 0 {
+        {
             let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &entity.id, 3i64));
             let buf = ((entity.max_value as u64) ^ (1u64 << 63)).to_le_bytes();
             tr.atomic_op(&field_key, &buf, fdb_layer::MutationType::Max);
@@ -166,6 +166,36 @@ impl CounterRepository {
             fdb_layer::prost::Message::encode_to_vec(entity)
         };
         tr.set(&key, &value);
+        if entity.value != 0 {
+            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &entity.id, 2i64));
+            let buf = (entity.value as u64).to_le_bytes();
+            tr.set(&field_key, &buf);
+        }
+        if entity.max_value != 0 {
+            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &entity.id, 3i64));
+            let buf = ((entity.max_value as u64) ^ (1u64 << 63)).to_le_bytes();
+            tr.set(&field_key, &buf);
+        }
+        if entity.min_value != 0 {
+            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &entity.id, 4i64));
+            let buf = ((entity.min_value as u64) ^ (1u64 << 63)).to_le_bytes();
+            tr.set(&field_key, &buf);
+        }
+        if entity.u64_max != 0 {
+            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &entity.id, 5i64));
+            let buf = (entity.u64_max as u64).to_le_bytes();
+            tr.set(&field_key, &buf);
+        }
+        if entity.i32_min != 0 {
+            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &entity.id, 6i64));
+            let buf = ((entity.i32_min as i64 as u64) ^ (1u64 << 63)).to_le_bytes();
+            tr.set(&field_key, &buf);
+        }
+        if entity.u32_add != 0 {
+            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, &entity.id, 7i64));
+            let buf = (entity.u32_add as u64).to_le_bytes();
+            tr.set(&field_key, &buf);
+        }
         Ok(())
     }
 
@@ -301,21 +331,20 @@ impl CounterRepository {
         };
         let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;
         let mut next_key_raw: Option<Vec<u8>> = None;
-        for kv in &kvs {
-            let entity = <Counter as fdb_layer::prost::Message>::decode(kv.value())?;
-            result.items.push(entity);
-            next_key_raw = Some(kv.key().to_vec());
-            if opts.limit > 0 && result.items.len() > opts.limit {
+        for (i, kv) in kvs.iter().enumerate() {
+            if opts.limit > 0 && i == opts.limit {
+                next_key_raw = Some(kv.key().to_vec());
+                result.has_more = true;
                 break;
             }
+            let entity = <Counter as fdb_layer::prost::Message>::decode(kv.value())?;
+            result.items.push(entity);
         }
-        result.has_more = opts.limit > 0 && result.items.len() > opts.limit;
         if result.has_more {
             if let Some(ref nk) = next_key_raw {
                 let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(nk)?;
                 result.next_key = tpl.into_iter().skip(2).map(|e| e.into_owned()).collect();
             }
-            result.items.truncate(opts.limit);
         }
         if !result.items.is_empty() {
             let first = &result.items[0];

@@ -88,11 +88,13 @@ func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transac
 		return nil, err
 	}
 
-	if tpl, unpackErr := dir.Unpack(keyToDelete); unpackErr == nil {
-		if len(tpl) > 1+2 {
-			if vs, ok := tpl[1+2].(tuple.Versionstamp); ok {
-				entity.Versionstamp = vs.Bytes()
-			}
+	tpl, unpackErr := dir.Unpack(keyToDelete)
+	if unpackErr != nil {
+		return nil, unpackErr
+	}
+	if len(tpl) > 1+2 {
+		if vs, ok := tpl[1+2].(tuple.Versionstamp); ok {
+			entity.Versionstamp = vs.Bytes()
 		}
 	}
 

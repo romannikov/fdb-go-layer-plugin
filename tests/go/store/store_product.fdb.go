@@ -246,10 +246,19 @@ func (r *productRepository) ListProduct(ctx context.Context, tr fdb.ReadTransact
 		End:   dataPrefixRange.End,
 	}, rangeOpts).GetSliceOrPanic()
 
-	var nextKey fdb.Key
-	for _, kv := range kvs {
+	for i, kv := range kvs {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if opts.Limit > 0 && i == opts.Limit {
+			tpl, err := dir.Unpack(kv.Key)
+			if err != nil {
+				return nil, fmt.Errorf("failed to unpack next key: %w", err)
+			}
+			// Remove typeID and DataNamespace to return just the PK tuple
+			result.HasMore = true
+			result.NextKey = tpl[2:]
+			break
 		}
 
 		entity := &Product{}
@@ -258,23 +267,6 @@ func (r *productRepository) ListProduct(ctx context.Context, tr fdb.ReadTransact
 			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)
 		}
 		result.Items = append(result.Items, entity)
-		nextKey = kv.Key
-
-		// Stop once we have enough items for pagination check
-		if opts.Limit > 0 && len(result.Items) > opts.Limit {
-			break
-		}
-	}
-
-	result.HasMore = opts.Limit > 0 && len(result.Items) > opts.Limit
-	if result.HasMore {
-		tpl, err := dir.Unpack(nextKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unpack next key: %w", err)
-		}
-		// Remove typeID and DataNamespace to return just the PK tuple
-		result.NextKey = tpl[2:]
-		result.Items = result.Items[:opts.Limit]
 	}
 
 	return result, nil

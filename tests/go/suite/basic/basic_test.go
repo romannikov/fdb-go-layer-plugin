@@ -90,6 +90,28 @@ func TestSyncMetadata_TransactionRetry(t *testing.T) {
 	}
 }
 
+func TestSyncMetadata_IncrementalAndCancelSafe(t *testing.T) {
+	ctx := context.Background()
+	recordStore, tr, dir, _ := tests.SyncAndSetup()
+
+	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Order"}); err != nil {
+		t.Fatalf("incremental SyncMetadata failed: %v", err)
+	}
+	meta := recordStore.Metadata()
+	if meta["User"] != 1 || meta["Order"] != 5 {
+		t.Fatalf("expected User=1 and Order=5 after incremental SyncMetadata, got %v", meta)
+	}
+
+	cancelCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := recordStore.SyncMetadata(cancelCtx, tr, dir, []string{"AuditLog"}); err == nil {
+		t.Fatal("expected error for canceled context")
+	}
+	if recordStore.Metadata()["User"] != 1 || recordStore.Metadata()["Order"] != 5 {
+		t.Fatalf("canceled SyncMetadata corrupted existing metadata: %v", recordStore.Metadata())
+	}
+}
+
 // CRUD Tests
 
 // Create

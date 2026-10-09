@@ -45,6 +45,12 @@ func FieldSnake(f ir.FieldSpec) string {
 // FieldIdent returns the Rust identifier for a FieldSpec (escaping keywords with r#).
 func FieldIdent(f ir.FieldSpec) string {
 	if f.RustName != "" {
+		switch f.RustName {
+		case "self", "Self", "super", "crate":
+			return f.RustName + "_"
+		case "r#self", "r#Self", "r#super", "r#crate":
+			return strings.TrimPrefix(f.RustName, "r#") + "_"
+		}
 		return f.RustName
 	}
 	return RustIdent(FieldSnake(f))
@@ -249,7 +255,7 @@ func GenerateMessage(g Printer, msg ir.MessageSpec) {
 
 func generateQueueRepository(g Printer, msg ir.MessageSpec) {
 	firstPK := msg.PrimaryKeyFields[0]
-	firstPKSnake := FieldIdent(firstPK)
+	firstPKSnake := safeRustParamIdent(firstPK)
 	hasVS := ir.MsgHasVersionstampPK(msg)
 
 	g.P("/// Repository for the `", msg.Name, "` FIFO queue.")
@@ -488,7 +494,15 @@ func generateCreate(g Printer, msg ir.MessageSpec) {
 		for _, f := range msg.Fields {
 			if f.Mutation != ir.MutationNone {
 				ident := FieldIdent(f)
-				g.P("        if entity.", ident, " != 0 {")
+				// Signed MUTATION_MAX encodes 0 with sign-bit bias (1<<63), so 0 must be
+				// written to FIELD_NAMESPACE to prevent negative max(v) from overwriting 0.
+				// MUTATION_MIN and MUTATION_ADD omit 0 so default-zero Min fields can be
+				// initialized by their first positive min(v) mutation.
+				if f.Mutation == ir.MutationMax && !f.IsUnsigned {
+					g.P("        {")
+				} else {
+					g.P("        if entity.", ident, " != 0 {")
+				}
 				if hasVS {
 					g.P("            let field_key = dir.pack_with_versionstamp(&(type_id, fdb_layer::FIELD_NAMESPACE, ", versionstampedPKTupleArgsWithVar(msg, "user_version"), ", ", f.Number, "i64));")
 					g.P("            let buf = ", encodeAtomicRustExpr("entity."+ident, f), ".to_le_bytes();")
@@ -608,7 +622,7 @@ func generateSet(g Printer, msg ir.MessageSpec) {
 		g.P("        if !entity.", vsFieldIdent, ".is_empty() && entity.", vsFieldIdent, ".len() != 12 {")
 		g.P(`            return Err(fdb_layer::FdbLayerError::Custom("invalid versionstamp length: must be 0 or 12 bytes".into()));`)
 		g.P("        }")
-		g.P("        if !entity.", vsFieldIdent, ".iter().any(|&b| b != 0) {")
+		g.P("        if entity.", vsFieldIdent, ".is_empty() {")
 		g.P("            return self.create(tr, dir, entity).await;")
 		g.P("        }")
 	}
@@ -635,6 +649,18 @@ func generateSet(g Printer, msg ir.MessageSpec) {
 	generateEncodeWithZeroedAtomics(g, msg, "        ")
 
 	g.P("        tr.set(&key, &value);")
+	if ir.HasMutationFields(msg) {
+		for _, f := range msg.Fields {
+			if f.Mutation != ir.MutationNone {
+				ident := FieldIdent(f)
+				g.P("        if entity.", ident, " != 0 {")
+				g.P("            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, ", pkArgsEntity, ", ", f.Number, "i64));")
+				g.P("            let buf = ", encodeAtomicRustExpr("entity."+ident, f), ".to_le_bytes();")
+				g.P("            tr.set(&field_key, &buf);")
+				g.P("        }")
+			}
+		}
+	}
 
 	for _, idx := range msg.SecondaryIndexes {
 		if idx.IsFanOut {
@@ -918,34 +944,32 @@ func generateList(g Printer, msg ir.MessageSpec) {
 		g.P("                break;")
 		g.P("            }")
 		g.P("            let mut entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(kv.value())?;")
-		g.P("            if let Ok(tpl) = dir.unpack::<Vec<fdb_layer::Element<'_>>>(kv.key()) {")
+		g.P("            let tpl = dir.unpack::<Vec<fdb_layer::Element<'_>>>(kv.key())?;")
 		for i, f := range msg.PrimaryKeyFields {
 			if f.IsVersionstamp {
-				g.P("                if let Some(vs) = tpl.get(", i+2, ").and_then(|e| e.as_versionstamp()) {")
-				g.P("                    entity.", FieldIdent(f), " = vs.as_bytes().to_vec();")
-				g.P("                }")
+				g.P("            if let Some(vs) = tpl.get(", i+2, ").and_then(|e| e.as_versionstamp()) {")
+				g.P("                entity.", FieldIdent(f), " = vs.as_bytes().to_vec();")
+				g.P("            }")
 			}
 		}
-		g.P("            }")
 		g.P("            result.items.push(entity);")
 		g.P("        }")
 	} else {
 		g.P("        let mut next_key_raw: Option<Vec<u8>> = None;")
-		g.P("        for kv in &kvs {")
-		g.P("            let entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(kv.value())?;")
-		g.P("            result.items.push(entity);")
-		g.P("            next_key_raw = Some(kv.key().to_vec());")
-		g.P("            if opts.limit > 0 && result.items.len() > opts.limit {")
+		g.P("        for (i, kv) in kvs.iter().enumerate() {")
+		g.P("            if opts.limit > 0 && i == opts.limit {")
+		g.P("                next_key_raw = Some(kv.key().to_vec());")
+		g.P("                result.has_more = true;")
 		g.P("                break;")
 		g.P("            }")
+		g.P("            let entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(kv.value())?;")
+		g.P("            result.items.push(entity);")
 		g.P("        }")
-		g.P("        result.has_more = opts.limit > 0 && result.items.len() > opts.limit;")
 		g.P("        if result.has_more {")
 		g.P("            if let Some(ref nk) = next_key_raw {")
 		g.P("                let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(nk)?;")
 		g.P("                result.next_key = tpl.into_iter().skip(2).map(|e| e.into_owned()).collect();")
 		g.P("            }")
-		g.P("            result.items.truncate(opts.limit);")
 		g.P("        }")
 	}
 	if hasMut {
@@ -1022,7 +1046,7 @@ func generateGetByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec
 
 	var idxPackArgs []string
 	for _, f := range idx.Fields {
-		idxPackArgs = append(idxPackArgs, PackField(FieldIdent(f), f))
+		idxPackArgs = append(idxPackArgs, PackField(safeRustParamIdent(f), f))
 	}
 
 	g.P("    pub async fn get_", snakeMsg, "_by_", joinedSnake, "(")
@@ -1113,7 +1137,7 @@ func generateAtomicMutators(g Printer, msg ir.MessageSpec) {
 	snakeMsg := SnakeCase(msg.Name)
 	var pkPackArgs []string
 	for _, f := range msg.PrimaryKeyFields {
-		pkPackArgs = append(pkPackArgs, PackField(FieldIdent(f), f))
+		pkPackArgs = append(pkPackArgs, PackField(safeRustParamIdent(f), f))
 	}
 	pkArgsStr := strings.Join(pkPackArgs, ", ")
 
@@ -1394,10 +1418,22 @@ func indexFieldTupleArgs(fields []ir.FieldSpec, varName string) string {
 	return strings.Join(parts, ", ")
 }
 
+func safeRustParamIdent(f ir.FieldSpec) string {
+	ident := FieldIdent(f)
+	switch ident {
+	case "tr", "dir", "val", "type_id", "key", "buf", "prefix", "range_opt",
+		"rows", "first_item", "key_to_delete", "payload", "entity", "tpl", "vs",
+		"index_key_prefix", "index_range", "kvs", "val_futures", "field_futures",
+		"unpacked_tpls", "values", "field_slices", "entities":
+		return ident + "_param"
+	}
+	return ident
+}
+
 func fieldRustParamDecls(fields []ir.FieldSpec) string {
 	parts := make([]string, 0, len(fields))
 	for _, f := range fields {
-		ident := FieldIdent(f)
+		ident := safeRustParamIdent(f)
 		parts = append(parts, fmt.Sprintf("%s: %s", ident, FieldRustParamType(f)))
 	}
 	return strings.Join(parts, ", ")
@@ -1502,8 +1538,12 @@ var rustKeywords = map[string]bool{
 	"use": true, "where": true, "while": true,
 }
 
-// RustIdent escapes Rust reserved words with `r#`.
+// RustIdent escapes Rust reserved words with `r#` (or `_` for keywords that cannot be raw identifiers).
 func RustIdent(s string) string {
+	switch s {
+	case "self", "Self", "super", "crate":
+		return s + "_"
+	}
 	if rustKeywords[s] {
 		return "r#" + s
 	}

@@ -280,6 +280,26 @@ func TestGenerateMessage_NonQueueVersionstampWithIndexesAndAtomics(t *testing.T)
 	}
 }
 
+func TestGenerateGoRepository_KeywordQueueParam(t *testing.T) {
+	qType := ir.FieldSpec{ProtoName: "type", GoName: "Type", Number: 1, Kind: ir.KindString}
+	vs := ir.FieldSpec{ProtoName: "vs", GoName: "Vs", Number: 2, Kind: ir.KindBytes, IsVersionstamp: true}
+	spec := ir.MessageSpec{
+		Name:             "JobQueue",
+		GoPackageName:    "testspb",
+		IsQueue:          true,
+		Fields:           []ir.FieldSpec{qType, vs},
+		PrimaryKeyFields: []ir.FieldSpec{qType, vs},
+	}
 
+	var p bufferPrinter
+	GenerateMessage(&p, spec)
+	out := p.sb.String()
 
-
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "jobqueue.fdb.go", out, parser.AllErrors); err != nil {
+		t.Fatalf("generated Go queue code with 'type' partition key failed to parse: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "typeParam string") {
+		t.Errorf("expected 'typeParam string' in Dequeue signature, got:\n%s", out)
+	}
+}

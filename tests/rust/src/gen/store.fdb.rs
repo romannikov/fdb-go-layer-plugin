@@ -168,21 +168,20 @@ impl UserRepository {
         };
         let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;
         let mut next_key_raw: Option<Vec<u8>> = None;
-        for kv in &kvs {
-            let entity = <User as fdb_layer::prost::Message>::decode(kv.value())?;
-            result.items.push(entity);
-            next_key_raw = Some(kv.key().to_vec());
-            if opts.limit > 0 && result.items.len() > opts.limit {
+        for (i, kv) in kvs.iter().enumerate() {
+            if opts.limit > 0 && i == opts.limit {
+                next_key_raw = Some(kv.key().to_vec());
+                result.has_more = true;
                 break;
             }
+            let entity = <User as fdb_layer::prost::Message>::decode(kv.value())?;
+            result.items.push(entity);
         }
-        result.has_more = opts.limit > 0 && result.items.len() > opts.limit;
         if result.has_more {
             if let Some(ref nk) = next_key_raw {
                 let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(nk)?;
                 result.next_key = tpl.into_iter().skip(2).map(|e| e.into_owned()).collect();
             }
-            result.items.truncate(opts.limit);
         }
         Ok(result)
     }
@@ -427,21 +426,20 @@ impl ProductRepository {
         };
         let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;
         let mut next_key_raw: Option<Vec<u8>> = None;
-        for kv in &kvs {
-            let entity = <Product as fdb_layer::prost::Message>::decode(kv.value())?;
-            result.items.push(entity);
-            next_key_raw = Some(kv.key().to_vec());
-            if opts.limit > 0 && result.items.len() > opts.limit {
+        for (i, kv) in kvs.iter().enumerate() {
+            if opts.limit > 0 && i == opts.limit {
+                next_key_raw = Some(kv.key().to_vec());
+                result.has_more = true;
                 break;
             }
+            let entity = <Product as fdb_layer::prost::Message>::decode(kv.value())?;
+            result.items.push(entity);
         }
-        result.has_more = opts.limit > 0 && result.items.len() > opts.limit;
         if result.has_more {
             if let Some(ref nk) = next_key_raw {
                 let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(nk)?;
                 result.next_key = tpl.into_iter().skip(2).map(|e| e.into_owned()).collect();
             }
-            result.items.truncate(opts.limit);
         }
         Ok(result)
     }
@@ -694,21 +692,20 @@ impl PostRepository {
         };
         let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;
         let mut next_key_raw: Option<Vec<u8>> = None;
-        for kv in &kvs {
-            let entity = <Post as fdb_layer::prost::Message>::decode(kv.value())?;
-            result.items.push(entity);
-            next_key_raw = Some(kv.key().to_vec());
-            if opts.limit > 0 && result.items.len() > opts.limit {
+        for (i, kv) in kvs.iter().enumerate() {
+            if opts.limit > 0 && i == opts.limit {
+                next_key_raw = Some(kv.key().to_vec());
+                result.has_more = true;
                 break;
             }
+            let entity = <Post as fdb_layer::prost::Message>::decode(kv.value())?;
+            result.items.push(entity);
         }
-        result.has_more = opts.limit > 0 && result.items.len() > opts.limit;
         if result.has_more {
             if let Some(ref nk) = next_key_raw {
                 let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(nk)?;
                 result.next_key = tpl.into_iter().skip(2).map(|e| e.into_owned()).collect();
             }
-            result.items.truncate(opts.limit);
         }
         Ok(result)
     }
@@ -1095,21 +1092,20 @@ impl OrderRepository {
         };
         let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;
         let mut next_key_raw: Option<Vec<u8>> = None;
-        for kv in &kvs {
-            let entity = <Order as fdb_layer::prost::Message>::decode(kv.value())?;
-            result.items.push(entity);
-            next_key_raw = Some(kv.key().to_vec());
-            if opts.limit > 0 && result.items.len() > opts.limit {
+        for (i, kv) in kvs.iter().enumerate() {
+            if opts.limit > 0 && i == opts.limit {
+                next_key_raw = Some(kv.key().to_vec());
+                result.has_more = true;
                 break;
             }
+            let entity = <Order as fdb_layer::prost::Message>::decode(kv.value())?;
+            result.items.push(entity);
         }
-        result.has_more = opts.limit > 0 && result.items.len() > opts.limit;
         if result.has_more {
             if let Some(ref nk) = next_key_raw {
                 let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(nk)?;
                 result.next_key = tpl.into_iter().skip(2).map(|e| e.into_owned()).collect();
             }
-            result.items.truncate(opts.limit);
         }
         Ok(result)
     }
@@ -1390,7 +1386,7 @@ impl AuditLogRepository {
         if !entity.log_id.is_empty() && entity.log_id.len() != 12 {
             return Err(fdb_layer::FdbLayerError::Custom("invalid versionstamp length: must be 0 or 12 bytes".into()));
         }
-        if !entity.log_id.iter().any(|&b| b != 0) {
+        if entity.log_id.is_empty() {
             return self.create(tr, dir, entity).await;
         }
         let type_id = self.store.get_type_id("AuditLog")?;
@@ -1413,6 +1409,11 @@ impl AuditLogRepository {
             fdb_layer::prost::Message::encode_to_vec(entity)
         };
         tr.set(&key, &value);
+        if entity.views != 0 {
+            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::bytes_to_versionstamp(&entity.log_id[..]), 4i64));
+            let buf = (entity.views as u64).to_le_bytes();
+            tr.set(&field_key, &buf);
+        }
         let idx_changed = match old {
             Some(ref old) => old.actor != entity.actor,
             None => true,
@@ -1582,10 +1583,9 @@ impl AuditLogRepository {
                 break;
             }
             let mut entity = <AuditLog as fdb_layer::prost::Message>::decode(kv.value())?;
-            if let Ok(tpl) = dir.unpack::<Vec<fdb_layer::Element<'_>>>(kv.key()) {
-                if let Some(vs) = tpl.get(2).and_then(|e| e.as_versionstamp()) {
-                    entity.log_id = vs.as_bytes().to_vec();
-                }
+            let tpl = dir.unpack::<Vec<fdb_layer::Element<'_>>>(kv.key())?;
+            if let Some(vs) = tpl.get(2).and_then(|e| e.as_versionstamp()) {
+                entity.log_id = vs.as_bytes().to_vec();
             }
             result.items.push(entity);
         }

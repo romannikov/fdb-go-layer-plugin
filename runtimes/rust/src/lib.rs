@@ -153,7 +153,11 @@ pub fn strinc(prefix: &[u8]) -> Vec<u8> {
         }
         key.pop();
     }
-    vec![0xff]
+    if prefix.is_empty() {
+        vec![0xff]
+    } else {
+        [prefix, &[0xff]].concat()
+    }
 }
 
 /// Returns `(begin, end)` key range matching Go `fdb.PrefixRange(prefix)`.
@@ -182,6 +186,20 @@ pub fn element_from_u64(v: u64) -> Element<'static> {
     }
 }
 
+fn fdb_printable(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for &b in bytes {
+        if b == b'\\' {
+            out.push_str("\\\\");
+        } else if (32..127).contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("\\x{:02x}", b));
+        }
+    }
+    out
+}
+
 /// Formats a tuple slice in the same format as Go `tuple.Tuple.String()`, e.g. `("u1")` or `("a", 42)`.
 pub fn format_tuple(elements: &[Element<'_>]) -> String {
     let mut out = String::from("(");
@@ -197,8 +215,16 @@ pub fn format_tuple(elements: &[Element<'_>]) -> String {
             Element::Bool(v) => out.push_str(&v.to_string()),
             Element::Float(v) => out.push_str(&v.to_string()),
             Element::Double(v) => out.push_str(&v.to_string()),
-            Element::Bytes(b) => out.push_str(&format!("{}", b)),
-            Element::Versionstamp(vs) => out.push_str(&format!("{:?}", vs)),
+            Element::Bytes(b) => out.push_str(&format!("b\"{}\"", fdb_printable(b.as_ref()))),
+            Element::Versionstamp(vs) => {
+                let raw = vs.as_bytes();
+                let user_ver = u16::from_be_bytes([raw[10], raw[11]]);
+                out.push_str(&format!(
+                    "Versionstamp({}, {})",
+                    fdb_printable(&raw[..10]),
+                    user_ver
+                ));
+            }
             Element::Tuple(inner) => out.push_str(&format_tuple(inner)),
             _ => out.push_str(&format!("{:?}", el)),
         }
