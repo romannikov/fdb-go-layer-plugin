@@ -228,6 +228,7 @@ mod tests {
                     PaginationOptions {
                         begin: vec![],
                         limit: 2,
+                        ..Default::default()
                     },
                 )
                 .await
@@ -242,6 +243,7 @@ mod tests {
                     PaginationOptions {
                         begin: p1.next_key,
                         limit: 2,
+                        ..Default::default()
                     },
                 )
                 .await
@@ -256,12 +258,32 @@ mod tests {
                     PaginationOptions {
                         begin: p2.next_key,
                         limit: 2,
+                        ..Default::default()
                     },
                 )
                 .await
                 .unwrap();
             assert_eq!(p3.items.len(), 1);
             assert!(!p3.has_more);
+
+            // Paginated secondary index query in reverse order
+            let idx_page = repo
+                .query_product_by_category(
+                    &tr,
+                    &dir,
+                    "tools",
+                    PaginationOptions {
+                        limit: 2,
+                        reverse: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(idx_page.items.len(), 2);
+            assert!(idx_page.has_more);
+            assert_eq!(idx_page.items[0].id, "p4");
+            assert_eq!(idx_page.items[1].id, "p3");
         }
     }
 
@@ -483,6 +505,7 @@ mod tests {
                     PaginationOptions {
                         begin: vec![],
                         limit: 10,
+                        ..Default::default()
                     },
                 )
                 .await
@@ -498,26 +521,33 @@ mod tests {
             );
         }
 
-        // Verify Set does not overwrite atomic fields
+        // Verify Set does not overwrite atomic fields (even when entity has non-zero atomic values from prior Get)
         {
             let tr = db.create_trx().unwrap();
-            repo.set(
-                &tr,
-                &dir,
-                &Counter {
-                    id: "c1".into(),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
+            let mut fetched = repo.get(&tr, &dir, "c1").await.unwrap();
+            repo.add_counter_value(&tr, &dir, "c1", 10).await.unwrap();
+            // fetched.value is still 15, while FieldNamespace is now 25
+            fetched.id = "c1".into();
+            repo.set(&tr, &dir, &fetched).await.unwrap();
             tr.commit().await.unwrap();
         }
 
         {
             let tr = db.create_trx().unwrap();
             let c = repo.get(&tr, &dir, "c1").await.unwrap();
-            assert_eq!((c.value, c.max_value, c.min_value), (15, 150, 2));
+            assert_eq!((c.value, c.max_value, c.min_value), (25, 150, 2));
+        }
+
+        // Verify explicit set_counter_value can reset atomic field back to 15
+        {
+            let tr = db.create_trx().unwrap();
+            repo.set_counter_value(&tr, &dir, "c1", 15).await.unwrap();
+            tr.commit().await.unwrap();
+        }
+        {
+            let tr = db.create_trx().unwrap();
+            let c = repo.get(&tr, &dir, "c1").await.unwrap();
+            assert_eq!(c.value, 15);
         }
 
         // Verify zero-initialized counter allows positive Min mutation
@@ -732,6 +762,7 @@ mod tests {
                     PaginationOptions {
                         begin: vec![],
                         limit: 10,
+                        ..Default::default()
                     },
                 )
                 .await
@@ -776,6 +807,28 @@ mod tests {
             assert_eq!(batch_item.log_id, log_id);
             assert_eq!(batch_item.views, 5);
 
+            let batch_by_pk = audit_repo
+                .batch_get_audit_log_by_pk(&tr, &dir, std::slice::from_ref(&log_id))
+                .await
+                .unwrap();
+            assert_eq!(batch_by_pk.len(), 1);
+            assert_eq!(batch_by_pk[0].log_id, log_id);
+            assert_eq!(batch_by_pk[0].views, 5);
+
+            let order_batch_by_pk = order_repo
+                .batch_get_order_by_pk(
+                    &tr,
+                    &dir,
+                    &[OrderPrimaryKey {
+                        tenant_id: "acme".into(),
+                        order_seq: 101,
+                    }],
+                )
+                .await
+                .unwrap();
+            assert_eq!(order_batch_by_pk.len(), 1);
+            assert_eq!(order_batch_by_pk[0].order_seq, 101);
+
             let page_by_bytes = audit_repo
                 .list_audit_log(
                     &tr,
@@ -783,6 +836,7 @@ mod tests {
                     AuditLogPaginationOptions {
                         begin: vec![Element::Bytes(fdb_layer::Bytes::from(log_id.clone()))],
                         limit: 1,
+                        ..Default::default()
                     },
                 )
                 .await

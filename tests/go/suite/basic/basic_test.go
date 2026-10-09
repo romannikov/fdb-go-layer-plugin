@@ -707,3 +707,169 @@ func TestSetAndDelete_CorruptedExistingRecordReturnsError(t *testing.T) {
 	}
 }
 
+func TestErrNotFound_SentinelWrapping(t *testing.T) {
+	ctx := context.Background()
+	recordStore, tr, dir, _ := tests.SyncAndSetup()
+	repo := store.NewUserRepository(recordStore)
+
+	_, err := repo.Get(ctx, tr, dir, "missing-user")
+	if !errors.Is(err, fdblayer.ErrNotFound) {
+		t.Fatalf("expected errors.Is(err, fdblayer.ErrNotFound) == true, got err=%v", err)
+	}
+}
+
+func TestUserVersionSequence_CrossTransactionResetAndOverflow(t *testing.T) {
+	recordStore := fdblayer.NewRecordStore()
+	tr1 := tests.NewMockTransaction(tests.NewMockKV())
+	tr2 := tests.NewMockTransaction(tests.NewMockKV())
+
+	// Allocate 65536 user versions in tr1 (0..65535)
+	for i := 0; i < 65536; i++ {
+		if err := recordStore.PrepareUserVersion(tr1); err != nil {
+			t.Fatalf("unexpected error at iteration %d: %v", i, err)
+		}
+		uv := recordStore.NextUserVersion()
+		if int(uv) != i {
+			t.Fatalf("expected UserVersion=%d, got %d", i, uv)
+		}
+	}
+
+	// 65537th allocation in the same transaction MUST return ErrUserVersionOverflow instead of wrapping to 0
+	if err := recordStore.PrepareUserVersion(tr1); !errors.Is(err, fdblayer.ErrUserVersionOverflow) {
+		t.Fatalf("expected ErrUserVersionOverflow at 65537th allocation in same transaction, got: %v", err)
+	}
+
+	// Switching to a new transaction tr2 MUST automatically reset the counter back to 0
+	if err := recordStore.PrepareUserVersion(tr2); err != nil {
+		t.Fatalf("PrepareUserVersion on new transaction tr2 failed: %v", err)
+	}
+	if uv := recordStore.NextUserVersion(); uv != 0 {
+		t.Fatalf("expected UserVersion=0 on new transaction tr2, got %d", uv)
+	}
+}
+
+func TestNormalizeTupleElement_Int32Uint32Enum(t *testing.T) {
+	if got := fdblayer.NormalizeTupleElement(int32(-42)); got != int64(-42) {
+		t.Fatalf("expected int64(-42), got %T(%v)", got, got)
+	}
+	if got := fdblayer.NormalizeTupleElement(uint32(42)); got != uint64(42) {
+		t.Fatalf("expected uint64(42), got %T(%v)", got, got)
+	}
+	if got := fdblayer.NormalizeTupleElement(store.OrderStatus_ORDER_STATUS_SHIPPED); got != int64(store.OrderStatus_ORDER_STATUS_SHIPPED) {
+		t.Fatalf("expected int64 enum value, got %T(%v)", got, got)
+	}
+}
+
+func TestQueryProductByCategory_PaginatedAndReverse(t *testing.T) {
+	ctx := context.Background()
+	recordStore, tr, dir, _ := tests.SyncAndSetup()
+	repo := store.NewProductRepository(recordStore)
+
+	for _, id := range []string{"p1", "p2", "p3", "p4"} {
+		if err := repo.Create(ctx, tr, dir, &store.Product{
+			Id:       id,
+			Name:     "Tool " + id,
+			Category: "tools",
+			Price:    10,
+		}); err != nil {
+			t.Fatalf("Create %s failed: %v", id, err)
+		}
+	}
+
+	// Forward pagination (2 items per page)
+	p1, err := repo.QueryProductByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{Limit: 2})
+	if err != nil || len(p1.Items) != 2 || !p1.HasMore || p1.Items[0].Id != "p1" || p1.Items[1].Id != "p2" {
+		t.Fatalf("unexpected forward page 1: %+v, err=%v", p1, err)
+	}
+	p2, err := repo.QueryProductByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+		Begin: p1.NextKey,
+		Limit: 2,
+	})
+	if err != nil || len(p2.Items) != 2 || p2.HasMore || p2.Items[0].Id != "p3" || p2.Items[1].Id != "p4" {
+		t.Fatalf("unexpected forward page 2: %+v, err=%v", p2, err)
+	}
+
+	// Reverse pagination (2 items per page: p4, p3 -> p2, p1)
+	rev1, err := repo.QueryProductByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+		Limit:   2,
+		Reverse: true,
+	})
+	if err != nil || len(rev1.Items) != 2 || !rev1.HasMore || rev1.Items[0].Id != "p4" || rev1.Items[1].Id != "p3" {
+		t.Fatalf("unexpected reverse page 1: %+v, err=%v", rev1, err)
+	}
+	rev2, err := repo.QueryProductByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+		Begin:   rev1.NextKey,
+		Limit:   2,
+		Reverse: true,
+	})
+	if err != nil || len(rev2.Items) != 2 || rev2.HasMore || rev2.Items[0].Id != "p2" || rev2.Items[1].Id != "p1" {
+		t.Fatalf("unexpected reverse page 2: %+v, err=%v", rev2, err)
+	}
+
+	// Strongly-typed BatchGetProductByPK
+	byPK, err := repo.BatchGetProductByPK(ctx, tr, dir, []string{"p1", "p4", "nonexistent"})
+	if err != nil || len(byPK) != 2 {
+		t.Fatalf("BatchGetProductByPK failed: got %+v, err=%v", byPK, err)
+	}
+
+	// Out-of-bounds cursors in QueryProductByCategory must be clamped without inverted range panic
+	oobForwardAfter, err := repo.QueryProductByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+		Begin: tuple.Tuple{"zzzzz\xff"},
+		Limit: 2,
+	})
+	if err != nil || len(oobForwardAfter.Items) != 0 {
+		t.Fatalf("expected 0 items for forward Begin past end of index range, got %+v, err=%v", oobForwardAfter, err)
+	}
+	oobReverseBefore, err := repo.QueryProductByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+		Begin:   tuple.Tuple{""},
+		Limit:   2,
+		Reverse: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error for reverse Begin at start of index range: %v", err)
+	}
+	_ = oobReverseBefore
+}
+
+func TestUserVersionSequence_ConcurrentInterleavedTransactions(t *testing.T) {
+	recordStore := fdblayer.NewRecordStore()
+	tr1 := tests.NewMockTransaction(tests.NewMockKV())
+	tr2 := tests.NewMockTransaction(tests.NewMockKV())
+
+	// Interleave PrepareUserVersion + NextUserVersion across tr1 and tr2
+	for i := uint16(0); i < 5; i++ {
+		if err := recordStore.PrepareUserVersion(tr1); err != nil {
+			t.Fatalf("tr1 PrepareUserVersion(%d) failed: %v", i, err)
+		}
+		if uv1 := recordStore.NextUserVersion(); uv1 != i {
+			t.Fatalf("expected tr1 UserVersion=%d, got %d", i, uv1)
+		}
+
+		if err := recordStore.PrepareUserVersion(tr2); err != nil {
+			t.Fatalf("tr2 PrepareUserVersion(%d) failed: %v", i, err)
+		}
+		if uv2 := recordStore.NextUserVersion(); uv2 != i {
+			t.Fatalf("expected tr2 UserVersion=%d, got %d", i, uv2)
+		}
+	}
+}
+
+func TestHasAllMetadata_RequiresCommittedMetadata(t *testing.T) {
+	ctx := context.Background()
+	kv := tests.NewMockKV()
+	dir := &tests.MockDirectorySubspace{}
+	recordStore := fdblayer.NewRecordStore()
+
+	tr1 := tests.NewMockTransaction(kv)
+	if err := recordStore.SyncMetadata(ctx, tr1, dir, []string{"User"}); err != nil {
+		t.Fatalf("SyncMetadata(User) failed: %v", err)
+	}
+	// SyncMetadata only stages writes on tr1 without knowing if tr1 committed,
+	// so HasAllMetadata must return false until EnsureMetadata commits.
+	if recordStore.HasAllMetadata([]string{"User"}) {
+		t.Fatalf("expected HasAllMetadata=false after raw SyncMetadata (uncommitted)")
+	}
+}
+
+
+

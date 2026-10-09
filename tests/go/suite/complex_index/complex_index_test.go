@@ -7,6 +7,7 @@ import (
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
+	"google.golang.org/protobuf/proto"
 
 	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
 	tests "github.com/romannikov/fdb-layer/tests/go"
@@ -463,6 +464,173 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 		t.Fatalf("expected atomic field key cleared after Delete")
 	}
 }
+
+func TestFanOutIndex_CreateDeduplicatesRepeatedTags(t *testing.T) {
+	ctx := context.Background()
+	recordStore, tr, dir, _ := tests.SyncAndSetup()
+	postRepo := store.NewPostRepository(recordStore)
+
+	tr.ResetLog()
+	post := &store.Post{
+		Id:   "post_dup",
+		Tags: []string{"go", "go", "fdb", "go"},
+	}
+	if err := postRepo.Create(ctx, tr, dir, post); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	// 1 primary record write + 2 unique tag index writes ("go", "fdb") = 3 SetCalls total (BUG-7)
+	if len(tr.SetCalls) != 3 {
+		t.Fatalf("expected 3 Set calls (1 primary + 2 unique tags), got %d", len(tr.SetCalls))
+	}
+}
+
+func TestQueue_EnqueueZerosVersionstampPayload_AndDequeueBatch(t *testing.T) {
+	ctx := context.Background()
+	recordStore, tr, dir, kv := tests.SyncAndSetup()
+	taskRepo := store.NewTaskMessageRepository(recordStore)
+
+	staleVS := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	msg1 := &store.TaskMessage{
+		QueueName:    "q_batch",
+		ShardId:      1,
+		Versionstamp: staleVS,
+		Payload:      []byte("item-1"),
+	}
+	if err := taskRepo.Enqueue(ctx, tr, dir, msg1); err != nil {
+		t.Fatalf("Enqueue 1 failed: %v", err)
+	}
+	// Caller's struct must not be mutated
+	if !bytes.Equal(msg1.Versionstamp, staleVS) {
+		t.Fatalf("Enqueue mutated caller's Versionstamp slice: %x", msg1.Versionstamp)
+	}
+
+	// Raw stored protobuf value in FDB must have Versionstamp zeroed (BUG-4)
+	typeID := recordStore.Metadata()["TaskMessage"]
+	dummyVS := tuple.Versionstamp{
+		TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		UserVersion:        0,
+	}
+	rawKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "q_batch", dummyVS, uint64(1)})
+	rawVal := kv.Get(rawKey)
+	rawMsg := &store.TaskMessage{}
+	if err := proto.Unmarshal(rawVal, rawMsg); err != nil {
+		t.Fatalf("unmarshal raw TaskMessage failed: %v", err)
+	}
+	if len(rawMsg.Versionstamp) != 0 {
+		t.Fatalf("expected Enqueue to zero Versionstamp in stored protobuf payload, got %x", rawMsg.Versionstamp)
+	}
+
+	// Enqueue 2 more items and test DequeueBatch (PERF-5)
+	_ = taskRepo.Enqueue(ctx, tr, dir, &store.TaskMessage{QueueName: "q_batch", ShardId: 2, Payload: []byte("item-2")})
+	_ = taskRepo.Enqueue(ctx, tr, dir, &store.TaskMessage{QueueName: "q_batch", ShardId: 3, Payload: []byte("item-3")})
+
+	batch, err := taskRepo.DequeueBatch(ctx, tr, dir, "q_batch", 2)
+	if err != nil || len(batch) != 2 {
+		t.Fatalf("DequeueBatch(2) expected 2 items, got %+v, err=%v", batch, err)
+	}
+	if string(batch[0].Payload) != "item-1" || string(batch[1].Payload) != "item-2" || len(batch[0].Versionstamp) != 12 {
+		t.Fatalf("unexpected DequeueBatch(2) items: %+v", batch)
+	}
+
+	rem, err := taskRepo.DequeueBatch(ctx, tr, dir, "q_batch", 5)
+	if err != nil || len(rem) != 1 || string(rem[0].Payload) != "item-3" {
+		t.Fatalf("DequeueBatch remaining expected 1 item ('item-3'), got %+v, err=%v", rem, err)
+	}
+}
+
+func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
+	ctx := context.Background()
+	recordStore, tr, dir, _ := tests.SyncAndSetup()
+	_ = recordStore.SyncMetadata(ctx, tr, dir, []string{"Order"})
+	orderRepo := store.NewOrderRepository(recordStore)
+
+	for _, seq := range []int32{1, 2, 3} {
+		_ = orderRepo.Create(ctx, tr, dir, &store.Order{
+			TenantId: "acme",
+			OrderSeq: seq,
+			Status:   store.OrderStatus_ORDER_STATUS_PENDING,
+		})
+	}
+	_ = orderRepo.Create(ctx, tr, dir, &store.Order{
+		TenantId: "other",
+		OrderSeq: 1,
+		Status:   store.OrderStatus_ORDER_STATUS_PENDING,
+	})
+
+	// 1. ListOrder with Prefix={"acme"} and Reverse=true (PERF-1, PERF-3)
+	acmeRev, err := orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+		Prefix:  tuple.Tuple{"acme"},
+		Limit:   2,
+		Reverse: true,
+	})
+	if err != nil || len(acmeRev.Items) != 2 || !acmeRev.HasMore {
+		t.Fatalf("unexpected ListOrder(Prefix:acme, Reverse:true) page 1: %+v, err=%v", acmeRev, err)
+	}
+	if acmeRev.Items[0].OrderSeq != 3 || acmeRev.Items[1].OrderSeq != 2 {
+		t.Fatalf("expected OrderSeq [3, 2], got [%d, %d]", acmeRev.Items[0].OrderSeq, acmeRev.Items[1].OrderSeq)
+	}
+
+	acmeRev2, err := orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+		Prefix:  tuple.Tuple{"acme"},
+		Begin:   acmeRev.NextKey,
+		Limit:   2,
+		Reverse: true,
+	})
+	if err != nil || len(acmeRev2.Items) != 1 || acmeRev2.HasMore || acmeRev2.Items[0].OrderSeq != 1 {
+		t.Fatalf("unexpected ListOrder(Prefix:acme, Reverse:true) page 2: %+v, err=%v", acmeRev2, err)
+	}
+
+	// 2. BatchGetOrder with int32 tuple element (normalized instead of panicking) and BatchGetOrderByPK (BUG-5)
+	batchNorm, err := orderRepo.BatchGetOrder(ctx, tr, dir, []tuple.Tuple{{"acme", int32(2)}})
+	if err != nil || len(batchNorm) != 1 {
+		t.Fatalf("BatchGetOrder with int32 element failed: %+v, err=%v", batchNorm, err)
+	}
+	batchByPK, err := orderRepo.BatchGetOrderByPK(ctx, tr, dir, []store.OrderPrimaryKey{
+		{TenantId: "acme", OrderSeq: 1},
+		{TenantId: "acme", OrderSeq: 3},
+	})
+	if err != nil || len(batchByPK) != 2 {
+		t.Fatalf("BatchGetOrderByPK failed: %+v, err=%v", batchByPK, err)
+	}
+
+	// 3. Out-of-bounds Begin cursor with Prefix={"acme"} must be clamped to prefix range
+	// without leaking records from "other" or causing an inverted range.
+	clampedForwardBefore, err := orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+		Prefix: tuple.Tuple{"acme"},
+		Begin:  tuple.Tuple{"aaa", int64(1)},
+		Limit:  10,
+	})
+	if err != nil || len(clampedForwardBefore.Items) != 3 {
+		t.Fatalf("expected Begin<'acme' to be clamped to 'acme' start (3 items), got %+v, err=%v", clampedForwardBefore, err)
+	}
+	clampedForwardAfter, err := orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+		Prefix: tuple.Tuple{"acme"},
+		Begin:  tuple.Tuple{"zzz", int64(1)},
+		Limit:  10,
+	})
+	if err != nil || len(clampedForwardAfter.Items) != 0 {
+		t.Fatalf("expected Begin>'acme' to return 0 items without inverted range, got %+v, err=%v", clampedForwardAfter, err)
+	}
+	clampedReverseBefore, err := orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+		Prefix:  tuple.Tuple{"acme"},
+		Begin:   tuple.Tuple{"aaa", int64(1)},
+		Limit:   10,
+		Reverse: true,
+	})
+	if err != nil || len(clampedReverseBefore.Items) != 0 {
+		t.Fatalf("expected Reverse=true with Begin<'acme' to return 0 items, got %+v, err=%v", clampedReverseBefore, err)
+	}
+	clampedReverseAfter, err := orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+		Prefix:  tuple.Tuple{"acme"},
+		Begin:   tuple.Tuple{"zzz", int64(1)},
+		Limit:   10,
+		Reverse: true,
+	})
+	if err != nil || len(clampedReverseAfter.Items) != 3 {
+		t.Fatalf("expected Reverse=true with Begin>'acme' to clamp to 'acme' end (3 items), got %+v, err=%v", clampedReverseAfter, err)
+	}
+}
+
 
 
 

@@ -142,6 +142,34 @@ impl UserRepository {
         Ok(result)
     }
 
+    pub async fn batch_get_user_by_pk(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        pks: &[String],
+    ) -> Result<Vec<User>, fdb_layer::FdbLayerError> {
+        if pks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let type_id = self.store.get_type_id("User")?;
+        let mut val_futures = Vec::with_capacity(pks.len());
+        for pk in pks {
+            let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, pk.as_str()));
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        let mut entities = Vec::with_capacity(values.len());
+        for (_i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <User as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            entities.push(entity);
+        }
+        Ok(entities)
+    }
+
     pub async fn list_user(
         &self,
         tr: &fdb_layer::Transaction,
@@ -151,19 +179,36 @@ impl UserRepository {
         use fdb_layer::futures::TryStreamExt;
         let type_id = self.store.get_type_id("User")?;
         let mut result = UserPaginatedResult::default();
+        let mut prefix_tpl = Vec::with_capacity(2 + opts.prefix.len());
+        prefix_tpl.push(fdb_layer::Element::Int(type_id));
+        prefix_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+        prefix_tpl.extend(opts.prefix.iter().cloned());
+        let data_prefix = dir.pack(&prefix_tpl);
+        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&data_prefix);
         let mut begin_tpl = Vec::with_capacity(2 + opts.begin.len());
         begin_tpl.push(fdb_layer::Element::Int(type_id));
         begin_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
         begin_tpl.extend(opts.begin.iter().cloned());
         let begin = dir.pack(&begin_tpl);
-        let data_prefix = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE));
-        let (_, end) = fdb_layer::prefix_range(&data_prefix);
+        if !opts.begin.is_empty() {
+            if opts.reverse {
+                let (_, end_bound) = fdb_layer::prefix_range(&begin);
+                if end_bound < range_end {
+                    range_end = end_bound;
+                }
+            } else if begin > range_begin {
+                range_begin = begin;
+            }
+        }
+        if range_begin >= range_end {
+            return Ok(result);
+        }
         let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
         let range_opt = fdb_layer::RangeOption {
-            begin: fdb_layer::KeySelector::first_greater_or_equal(begin),
-            end: fdb_layer::KeySelector::first_greater_or_equal(end),
+            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),
             limit,
-            reverse: false,
+            reverse: opts.reverse,
             ..fdb_layer::RangeOption::default()
         };
         let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;
@@ -223,6 +268,78 @@ impl UserRepository {
             entities.push(entity);
         }
         Ok(entities)
+    }
+
+    pub async fn query_user_by_email(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        email: &str,
+        opts: UserPaginationOptions,
+    ) -> Result<UserPaginatedResult, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("User")?;
+        let mut result = UserPaginatedResult::default();
+        let index_key_prefix = dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 2324124615i64, &email));
+        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&index_key_prefix);
+        if !opts.begin.is_empty() {
+            let mut base_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(&index_key_prefix)?;
+            base_tpl.extend(opts.begin.iter().cloned());
+            let cursor_key = dir.pack(&base_tpl);
+            if opts.reverse {
+                let (_, end_bound) = fdb_layer::prefix_range(&cursor_key);
+                if end_bound < range_end {
+                    range_end = end_bound;
+                }
+            } else if cursor_key > range_begin {
+                range_begin = cursor_key;
+            }
+        }
+        if range_begin >= range_end {
+            return Ok(result);
+        }
+        let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
+        let index_range = fdb_layer::RangeOption {
+            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),
+            limit,
+            reverse: opts.reverse,
+            ..fdb_layer::RangeOption::default()
+        };
+        let mut kvs: Vec<_> = tr.get_ranges_keyvalues(index_range, false).try_collect().await?;
+        let pk_index_start = 3 + 1usize;
+        if opts.limit > 0 && kvs.len() > opts.limit {
+            let next_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kvs[opts.limit].key())?;
+            if next_tpl.len() > pk_index_start {
+                result.has_more = true;
+                result.next_key = next_tpl.into_iter().skip(pk_index_start).map(|e| e.into_owned()).collect();
+            }
+            kvs.truncate(opts.limit);
+        }
+        let mut val_futures = Vec::with_capacity(kvs.len());
+        for kv in &kvs {
+            let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;
+            if tpl.len() <= pk_index_start {
+                continue;
+            }
+            let pk_tuple = &tpl[pk_index_start..];
+            let mut key_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend_from_slice(pk_tuple);
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        for (_i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <User as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            result.items.push(entity);
+        }
+        Ok(result)
     }
 
 }
@@ -400,6 +517,34 @@ impl ProductRepository {
         Ok(result)
     }
 
+    pub async fn batch_get_product_by_pk(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        pks: &[String],
+    ) -> Result<Vec<Product>, fdb_layer::FdbLayerError> {
+        if pks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let type_id = self.store.get_type_id("Product")?;
+        let mut val_futures = Vec::with_capacity(pks.len());
+        for pk in pks {
+            let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, pk.as_str()));
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        let mut entities = Vec::with_capacity(values.len());
+        for (_i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <Product as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            entities.push(entity);
+        }
+        Ok(entities)
+    }
+
     pub async fn list_product(
         &self,
         tr: &fdb_layer::Transaction,
@@ -409,19 +554,36 @@ impl ProductRepository {
         use fdb_layer::futures::TryStreamExt;
         let type_id = self.store.get_type_id("Product")?;
         let mut result = ProductPaginatedResult::default();
+        let mut prefix_tpl = Vec::with_capacity(2 + opts.prefix.len());
+        prefix_tpl.push(fdb_layer::Element::Int(type_id));
+        prefix_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+        prefix_tpl.extend(opts.prefix.iter().cloned());
+        let data_prefix = dir.pack(&prefix_tpl);
+        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&data_prefix);
         let mut begin_tpl = Vec::with_capacity(2 + opts.begin.len());
         begin_tpl.push(fdb_layer::Element::Int(type_id));
         begin_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
         begin_tpl.extend(opts.begin.iter().cloned());
         let begin = dir.pack(&begin_tpl);
-        let data_prefix = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE));
-        let (_, end) = fdb_layer::prefix_range(&data_prefix);
+        if !opts.begin.is_empty() {
+            if opts.reverse {
+                let (_, end_bound) = fdb_layer::prefix_range(&begin);
+                if end_bound < range_end {
+                    range_end = end_bound;
+                }
+            } else if begin > range_begin {
+                range_begin = begin;
+            }
+        }
+        if range_begin >= range_end {
+            return Ok(result);
+        }
         let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
         let range_opt = fdb_layer::RangeOption {
-            begin: fdb_layer::KeySelector::first_greater_or_equal(begin),
-            end: fdb_layer::KeySelector::first_greater_or_equal(end),
+            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),
             limit,
-            reverse: false,
+            reverse: opts.reverse,
             ..fdb_layer::RangeOption::default()
         };
         let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;
@@ -481,6 +643,78 @@ impl ProductRepository {
             entities.push(entity);
         }
         Ok(entities)
+    }
+
+    pub async fn query_product_by_category(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        category: &str,
+        opts: ProductPaginationOptions,
+    ) -> Result<ProductPaginatedResult, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("Product")?;
+        let mut result = ProductPaginatedResult::default();
+        let index_key_prefix = dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 3475980913i64, &category));
+        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&index_key_prefix);
+        if !opts.begin.is_empty() {
+            let mut base_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(&index_key_prefix)?;
+            base_tpl.extend(opts.begin.iter().cloned());
+            let cursor_key = dir.pack(&base_tpl);
+            if opts.reverse {
+                let (_, end_bound) = fdb_layer::prefix_range(&cursor_key);
+                if end_bound < range_end {
+                    range_end = end_bound;
+                }
+            } else if cursor_key > range_begin {
+                range_begin = cursor_key;
+            }
+        }
+        if range_begin >= range_end {
+            return Ok(result);
+        }
+        let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
+        let index_range = fdb_layer::RangeOption {
+            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),
+            limit,
+            reverse: opts.reverse,
+            ..fdb_layer::RangeOption::default()
+        };
+        let mut kvs: Vec<_> = tr.get_ranges_keyvalues(index_range, false).try_collect().await?;
+        let pk_index_start = 3 + 1usize;
+        if opts.limit > 0 && kvs.len() > opts.limit {
+            let next_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kvs[opts.limit].key())?;
+            if next_tpl.len() > pk_index_start {
+                result.has_more = true;
+                result.next_key = next_tpl.into_iter().skip(pk_index_start).map(|e| e.into_owned()).collect();
+            }
+            kvs.truncate(opts.limit);
+        }
+        let mut val_futures = Vec::with_capacity(kvs.len());
+        for kv in &kvs {
+            let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;
+            if tpl.len() <= pk_index_start {
+                continue;
+            }
+            let pk_tuple = &tpl[pk_index_start..];
+            let mut key_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend_from_slice(pk_tuple);
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        for (_i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <Product as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            result.items.push(entity);
+        }
+        Ok(result)
     }
 
 }
@@ -564,8 +798,14 @@ impl PostRepository {
         }
         let value = fdb_layer::prost::Message::encode_to_vec(entity);
         tr.set(&key, &value);
-        for item in &entity.tags {
-            tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, item, &entity.id)), &[]);
+        {
+            let mut seen = std::collections::HashSet::with_capacity(entity.tags.len());
+            for item in &entity.tags {
+                if !seen.insert(item) {
+                    continue;
+                }
+                tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, item, &entity.id)), &[]);
+            }
         }
         Ok(())
     }
@@ -612,7 +852,11 @@ impl PostRepository {
                 }
             }
         } else {
+            let mut seen = std::collections::HashSet::with_capacity(entity.tags.len());
             for item in &entity.tags {
+                if !seen.insert(item) {
+                    continue;
+                }
                 tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, item, &entity.id)), &[]);
             }
         }
@@ -666,6 +910,34 @@ impl PostRepository {
         Ok(result)
     }
 
+    pub async fn batch_get_post_by_pk(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        pks: &[String],
+    ) -> Result<Vec<Post>, fdb_layer::FdbLayerError> {
+        if pks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let type_id = self.store.get_type_id("Post")?;
+        let mut val_futures = Vec::with_capacity(pks.len());
+        for pk in pks {
+            let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, pk.as_str()));
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        let mut entities = Vec::with_capacity(values.len());
+        for (_i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <Post as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            entities.push(entity);
+        }
+        Ok(entities)
+    }
+
     pub async fn list_post(
         &self,
         tr: &fdb_layer::Transaction,
@@ -675,19 +947,36 @@ impl PostRepository {
         use fdb_layer::futures::TryStreamExt;
         let type_id = self.store.get_type_id("Post")?;
         let mut result = PostPaginatedResult::default();
+        let mut prefix_tpl = Vec::with_capacity(2 + opts.prefix.len());
+        prefix_tpl.push(fdb_layer::Element::Int(type_id));
+        prefix_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+        prefix_tpl.extend(opts.prefix.iter().cloned());
+        let data_prefix = dir.pack(&prefix_tpl);
+        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&data_prefix);
         let mut begin_tpl = Vec::with_capacity(2 + opts.begin.len());
         begin_tpl.push(fdb_layer::Element::Int(type_id));
         begin_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
         begin_tpl.extend(opts.begin.iter().cloned());
         let begin = dir.pack(&begin_tpl);
-        let data_prefix = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE));
-        let (_, end) = fdb_layer::prefix_range(&data_prefix);
+        if !opts.begin.is_empty() {
+            if opts.reverse {
+                let (_, end_bound) = fdb_layer::prefix_range(&begin);
+                if end_bound < range_end {
+                    range_end = end_bound;
+                }
+            } else if begin > range_begin {
+                range_begin = begin;
+            }
+        }
+        if range_begin >= range_end {
+            return Ok(result);
+        }
         let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
         let range_opt = fdb_layer::RangeOption {
-            begin: fdb_layer::KeySelector::first_greater_or_equal(begin),
-            end: fdb_layer::KeySelector::first_greater_or_equal(end),
+            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),
             limit,
-            reverse: false,
+            reverse: opts.reverse,
             ..fdb_layer::RangeOption::default()
         };
         let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;
@@ -747,6 +1036,78 @@ impl PostRepository {
             entities.push(entity);
         }
         Ok(entities)
+    }
+
+    pub async fn query_post_by_tags(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        tags: &str,
+        opts: PostPaginationOptions,
+    ) -> Result<PostPaginatedResult, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("Post")?;
+        let mut result = PostPaginatedResult::default();
+        let index_key_prefix = dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, &tags));
+        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&index_key_prefix);
+        if !opts.begin.is_empty() {
+            let mut base_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(&index_key_prefix)?;
+            base_tpl.extend(opts.begin.iter().cloned());
+            let cursor_key = dir.pack(&base_tpl);
+            if opts.reverse {
+                let (_, end_bound) = fdb_layer::prefix_range(&cursor_key);
+                if end_bound < range_end {
+                    range_end = end_bound;
+                }
+            } else if cursor_key > range_begin {
+                range_begin = cursor_key;
+            }
+        }
+        if range_begin >= range_end {
+            return Ok(result);
+        }
+        let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
+        let index_range = fdb_layer::RangeOption {
+            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),
+            limit,
+            reverse: opts.reverse,
+            ..fdb_layer::RangeOption::default()
+        };
+        let mut kvs: Vec<_> = tr.get_ranges_keyvalues(index_range, false).try_collect().await?;
+        let pk_index_start = 3 + 1usize;
+        if opts.limit > 0 && kvs.len() > opts.limit {
+            let next_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kvs[opts.limit].key())?;
+            if next_tpl.len() > pk_index_start {
+                result.has_more = true;
+                result.next_key = next_tpl.into_iter().skip(pk_index_start).map(|e| e.into_owned()).collect();
+            }
+            kvs.truncate(opts.limit);
+        }
+        let mut val_futures = Vec::with_capacity(kvs.len());
+        for kv in &kvs {
+            let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;
+            if tpl.len() <= pk_index_start {
+                continue;
+            }
+            let pk_tuple = &tpl[pk_index_start..];
+            let mut key_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend_from_slice(pk_tuple);
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        for (_i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <Post as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            result.items.push(entity);
+        }
+        Ok(result)
     }
 
 }
@@ -824,8 +1185,19 @@ impl TaskMessageRepository {
         entity: &TaskMessage,
     ) -> Result<(), fdb_layer::FdbLayerError> {
         let type_id = self.store.get_type_id("TaskMessage")?;
+        self.store.prepare_user_version(tr)?;
         let key = dir.pack_with_versionstamp(&(type_id, fdb_layer::DATA_NAMESPACE, &entity.queue_name, fdb_layer::Versionstamp::incomplete(self.store.next_user_version()), (entity.shard_id as u64)));
-        let value = fdb_layer::prost::Message::encode_to_vec(entity);
+        let value = if !entity.versionstamp.is_empty() {
+            let clean_entity = TaskMessage {
+                queue_name: entity.queue_name.clone(),
+                shard_id: entity.shard_id.clone(),
+                versionstamp: Vec::new(),
+                payload: entity.payload.clone(),
+            };
+            fdb_layer::prost::Message::encode_to_vec(&clean_entity)
+        } else {
+            fdb_layer::prost::Message::encode_to_vec(entity)
+        };
         tr.atomic_op(&key, &value, fdb_layer::MutationType::SetVersionstampedKey);
         Ok(())
     }
@@ -855,6 +1227,35 @@ impl TaskMessageRepository {
             entity.versionstamp = vs.as_bytes().to_vec();
         }
         Ok(Some(entity))
+    }
+
+    /// Dequeues and removes up to `limit` oldest `TaskMessage` items from the queue.
+    pub async fn dequeue_batch(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        queue_name: &str,
+        limit: usize,
+    ) -> Result<Vec<TaskMessage>, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let type_id = self.store.get_type_id("TaskMessage")?;
+        let prefix = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, &queue_name));
+        let range_opt = fdb_layer::prefix_range_option(&prefix, Some(limit));
+        let rows: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;
+        let mut items = Vec::with_capacity(rows.len());
+        for row in &rows {
+            tr.clear(row.key());
+            let mut entity = <TaskMessage as fdb_layer::prost::Message>::decode(row.value())?;
+            let tpl = dir.unpack::<Vec<fdb_layer::Element<'_>>>(row.key())?;
+            if let Some(vs) = tpl.get(3).and_then(|e| e.as_versionstamp()) {
+                entity.versionstamp = vs.as_bytes().to_vec();
+            }
+            items.push(entity);
+        }
+        Ok(items)
     }
 }
 
@@ -942,8 +1343,14 @@ impl OrderRepository {
         tr.set(&key, &value);
         tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1001i64, (entity.status as i64), (entity.created_at as i64), &entity.tenant_id, (entity.order_seq as i64))), &[]);
         tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4117767939i64, fdb_layer::Bytes::from(&entity.receipt_hash[..]), &entity.tenant_id, (entity.order_seq as i64))), &[]);
-        for item in &entity.attachment_hashes {
-            tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1605301564i64, fdb_layer::Bytes::from(&item[..]), &entity.tenant_id, (entity.order_seq as i64))), &[]);
+        {
+            let mut seen = std::collections::HashSet::with_capacity(entity.attachment_hashes.len());
+            for item in &entity.attachment_hashes {
+                if !seen.insert(item) {
+                    continue;
+                }
+                tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1605301564i64, fdb_layer::Bytes::from(&item[..]), &entity.tenant_id, (entity.order_seq as i64))), &[]);
+            }
         }
         Ok(())
     }
@@ -1010,7 +1417,11 @@ impl OrderRepository {
                 }
             }
         } else {
+            let mut seen = std::collections::HashSet::with_capacity(entity.attachment_hashes.len());
             for item in &entity.attachment_hashes {
+                if !seen.insert(item) {
+                    continue;
+                }
                 tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1605301564i64, fdb_layer::Bytes::from(&item[..]), &entity.tenant_id, (entity.order_seq as i64))), &[]);
             }
         }
@@ -1066,6 +1477,34 @@ impl OrderRepository {
         Ok(result)
     }
 
+    pub async fn batch_get_order_by_pk(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        pks: &[OrderPrimaryKey],
+    ) -> Result<Vec<Order>, fdb_layer::FdbLayerError> {
+        if pks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let type_id = self.store.get_type_id("Order")?;
+        let mut val_futures = Vec::with_capacity(pks.len());
+        for pk in pks {
+            let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, &pk.tenant_id, (pk.order_seq as i64)));
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        let mut entities = Vec::with_capacity(values.len());
+        for (_i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <Order as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            entities.push(entity);
+        }
+        Ok(entities)
+    }
+
     pub async fn list_order(
         &self,
         tr: &fdb_layer::Transaction,
@@ -1075,19 +1514,36 @@ impl OrderRepository {
         use fdb_layer::futures::TryStreamExt;
         let type_id = self.store.get_type_id("Order")?;
         let mut result = OrderPaginatedResult::default();
+        let mut prefix_tpl = Vec::with_capacity(2 + opts.prefix.len());
+        prefix_tpl.push(fdb_layer::Element::Int(type_id));
+        prefix_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+        prefix_tpl.extend(opts.prefix.iter().cloned());
+        let data_prefix = dir.pack(&prefix_tpl);
+        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&data_prefix);
         let mut begin_tpl = Vec::with_capacity(2 + opts.begin.len());
         begin_tpl.push(fdb_layer::Element::Int(type_id));
         begin_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
         begin_tpl.extend(opts.begin.iter().cloned());
         let begin = dir.pack(&begin_tpl);
-        let data_prefix = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE));
-        let (_, end) = fdb_layer::prefix_range(&data_prefix);
+        if !opts.begin.is_empty() {
+            if opts.reverse {
+                let (_, end_bound) = fdb_layer::prefix_range(&begin);
+                if end_bound < range_end {
+                    range_end = end_bound;
+                }
+            } else if begin > range_begin {
+                range_begin = begin;
+            }
+        }
+        if range_begin >= range_end {
+            return Ok(result);
+        }
         let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
         let range_opt = fdb_layer::RangeOption {
-            begin: fdb_layer::KeySelector::first_greater_or_equal(begin),
-            end: fdb_layer::KeySelector::first_greater_or_equal(end),
+            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),
             limit,
-            reverse: false,
+            reverse: opts.reverse,
             ..fdb_layer::RangeOption::default()
         };
         let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;
@@ -1149,6 +1605,78 @@ impl OrderRepository {
         Ok(entities)
     }
 
+    pub async fn query_order_by_status_and_created_at(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        status: i32, created_at: i64,
+        opts: OrderPaginationOptions,
+    ) -> Result<OrderPaginatedResult, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("Order")?;
+        let mut result = OrderPaginatedResult::default();
+        let index_key_prefix = dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1001i64, (status as i64), (created_at as i64)));
+        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&index_key_prefix);
+        if !opts.begin.is_empty() {
+            let mut base_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(&index_key_prefix)?;
+            base_tpl.extend(opts.begin.iter().cloned());
+            let cursor_key = dir.pack(&base_tpl);
+            if opts.reverse {
+                let (_, end_bound) = fdb_layer::prefix_range(&cursor_key);
+                if end_bound < range_end {
+                    range_end = end_bound;
+                }
+            } else if cursor_key > range_begin {
+                range_begin = cursor_key;
+            }
+        }
+        if range_begin >= range_end {
+            return Ok(result);
+        }
+        let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
+        let index_range = fdb_layer::RangeOption {
+            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),
+            limit,
+            reverse: opts.reverse,
+            ..fdb_layer::RangeOption::default()
+        };
+        let mut kvs: Vec<_> = tr.get_ranges_keyvalues(index_range, false).try_collect().await?;
+        let pk_index_start = 3 + 2usize;
+        if opts.limit > 0 && kvs.len() > opts.limit {
+            let next_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kvs[opts.limit].key())?;
+            if next_tpl.len() > pk_index_start {
+                result.has_more = true;
+                result.next_key = next_tpl.into_iter().skip(pk_index_start).map(|e| e.into_owned()).collect();
+            }
+            kvs.truncate(opts.limit);
+        }
+        let mut val_futures = Vec::with_capacity(kvs.len());
+        for kv in &kvs {
+            let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;
+            if tpl.len() <= pk_index_start {
+                continue;
+            }
+            let pk_tuple = &tpl[pk_index_start..];
+            let mut key_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend_from_slice(pk_tuple);
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        for (_i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <Order as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            result.items.push(entity);
+        }
+        Ok(result)
+    }
+
     pub async fn get_order_by_receipt_hash(
         &self,
         tr: &fdb_layer::Transaction,
@@ -1188,6 +1716,78 @@ impl OrderRepository {
         Ok(entities)
     }
 
+    pub async fn query_order_by_receipt_hash(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        receipt_hash: &[u8],
+        opts: OrderPaginationOptions,
+    ) -> Result<OrderPaginatedResult, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("Order")?;
+        let mut result = OrderPaginatedResult::default();
+        let index_key_prefix = dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4117767939i64, fdb_layer::Bytes::from(&receipt_hash[..])));
+        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&index_key_prefix);
+        if !opts.begin.is_empty() {
+            let mut base_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(&index_key_prefix)?;
+            base_tpl.extend(opts.begin.iter().cloned());
+            let cursor_key = dir.pack(&base_tpl);
+            if opts.reverse {
+                let (_, end_bound) = fdb_layer::prefix_range(&cursor_key);
+                if end_bound < range_end {
+                    range_end = end_bound;
+                }
+            } else if cursor_key > range_begin {
+                range_begin = cursor_key;
+            }
+        }
+        if range_begin >= range_end {
+            return Ok(result);
+        }
+        let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
+        let index_range = fdb_layer::RangeOption {
+            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),
+            limit,
+            reverse: opts.reverse,
+            ..fdb_layer::RangeOption::default()
+        };
+        let mut kvs: Vec<_> = tr.get_ranges_keyvalues(index_range, false).try_collect().await?;
+        let pk_index_start = 3 + 1usize;
+        if opts.limit > 0 && kvs.len() > opts.limit {
+            let next_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kvs[opts.limit].key())?;
+            if next_tpl.len() > pk_index_start {
+                result.has_more = true;
+                result.next_key = next_tpl.into_iter().skip(pk_index_start).map(|e| e.into_owned()).collect();
+            }
+            kvs.truncate(opts.limit);
+        }
+        let mut val_futures = Vec::with_capacity(kvs.len());
+        for kv in &kvs {
+            let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;
+            if tpl.len() <= pk_index_start {
+                continue;
+            }
+            let pk_tuple = &tpl[pk_index_start..];
+            let mut key_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend_from_slice(pk_tuple);
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        for (_i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <Order as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            result.items.push(entity);
+        }
+        Ok(result)
+    }
+
     pub async fn get_order_by_attachment_hashes(
         &self,
         tr: &fdb_layer::Transaction,
@@ -1225,6 +1825,78 @@ impl OrderRepository {
             entities.push(entity);
         }
         Ok(entities)
+    }
+
+    pub async fn query_order_by_attachment_hashes(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        attachment_hashes: &[u8],
+        opts: OrderPaginationOptions,
+    ) -> Result<OrderPaginatedResult, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("Order")?;
+        let mut result = OrderPaginatedResult::default();
+        let index_key_prefix = dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 1605301564i64, fdb_layer::Bytes::from(&attachment_hashes[..])));
+        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&index_key_prefix);
+        if !opts.begin.is_empty() {
+            let mut base_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(&index_key_prefix)?;
+            base_tpl.extend(opts.begin.iter().cloned());
+            let cursor_key = dir.pack(&base_tpl);
+            if opts.reverse {
+                let (_, end_bound) = fdb_layer::prefix_range(&cursor_key);
+                if end_bound < range_end {
+                    range_end = end_bound;
+                }
+            } else if cursor_key > range_begin {
+                range_begin = cursor_key;
+            }
+        }
+        if range_begin >= range_end {
+            return Ok(result);
+        }
+        let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
+        let index_range = fdb_layer::RangeOption {
+            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),
+            limit,
+            reverse: opts.reverse,
+            ..fdb_layer::RangeOption::default()
+        };
+        let mut kvs: Vec<_> = tr.get_ranges_keyvalues(index_range, false).try_collect().await?;
+        let pk_index_start = 3 + 1usize;
+        if opts.limit > 0 && kvs.len() > opts.limit {
+            let next_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kvs[opts.limit].key())?;
+            if next_tpl.len() > pk_index_start {
+                result.has_more = true;
+                result.next_key = next_tpl.into_iter().skip(pk_index_start).map(|e| e.into_owned()).collect();
+            }
+            kvs.truncate(opts.limit);
+        }
+        let mut val_futures = Vec::with_capacity(kvs.len());
+        for kv in &kvs {
+            let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;
+            if tpl.len() <= pk_index_start {
+                continue;
+            }
+            let pk_tuple = &tpl[pk_index_start..];
+            let mut key_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend_from_slice(pk_tuple);
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        for (_i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let entity = <Order as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            result.items.push(entity);
+        }
+        Ok(result)
     }
 
 }
@@ -1306,6 +1978,7 @@ impl AuditLogRepository {
         entity: &AuditLog,
     ) -> Result<(), fdb_layer::FdbLayerError> {
         let type_id = self.store.get_type_id("AuditLog")?;
+        self.store.prepare_user_version(tr)?;
         let user_version = self.store.next_user_version();
         let key = dir.pack_with_versionstamp(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::Versionstamp::incomplete(user_version)));
         let value = if !entity.log_id.is_empty() || entity.views != 0 {
@@ -1329,9 +2002,15 @@ impl AuditLogRepository {
             let idx_key = dir.pack_with_versionstamp(&(type_id, fdb_layer::INDEX_NAMESPACE, 244111290i64, &entity.actor, fdb_layer::Versionstamp::incomplete(user_version)));
             tr.atomic_op(&idx_key, &[], fdb_layer::MutationType::SetVersionstampedKey);
         }
-        for item in &entity.tags {
-            let idx_key = dir.pack_with_versionstamp(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, item, fdb_layer::Versionstamp::incomplete(user_version)));
-            tr.atomic_op(&idx_key, &[], fdb_layer::MutationType::SetVersionstampedKey);
+        {
+            let mut seen = std::collections::HashSet::with_capacity(entity.tags.len());
+            for item in &entity.tags {
+                if !seen.insert(item) {
+                    continue;
+                }
+                let idx_key = dir.pack_with_versionstamp(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, item, fdb_layer::Versionstamp::incomplete(user_version)));
+                tr.atomic_op(&idx_key, &[], fdb_layer::MutationType::SetVersionstampedKey);
+            }
         }
         Ok(())
     }
@@ -1409,10 +2088,12 @@ impl AuditLogRepository {
             fdb_layer::prost::Message::encode_to_vec(entity)
         };
         tr.set(&key, &value);
-        if entity.views != 0 {
-            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::bytes_to_versionstamp(&entity.log_id[..]), 4i64));
-            let buf = (entity.views as u64).to_le_bytes();
-            tr.set(&field_key, &buf);
+        if old.is_none() {
+            if entity.views != 0 {
+                let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::bytes_to_versionstamp(&entity.log_id[..]), 4i64));
+                let buf = (entity.views as u64).to_le_bytes();
+                tr.atomic_op(&field_key, &buf, fdb_layer::MutationType::Add);
+            }
         }
         let idx_changed = match old {
             Some(ref old) => old.actor != entity.actor,
@@ -1438,7 +2119,11 @@ impl AuditLogRepository {
                 }
             }
         } else {
+            let mut seen = std::collections::HashSet::with_capacity(entity.tags.len());
             for item in &entity.tags {
+                if !seen.insert(item) {
+                    continue;
+                }
                 tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, item, fdb_layer::bytes_to_versionstamp(&entity.log_id[..]))), &[]);
             }
         }
@@ -1543,6 +2228,62 @@ impl AuditLogRepository {
         Ok(result)
     }
 
+    pub async fn batch_get_audit_log_by_pk(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        pks: &[Vec<u8>],
+    ) -> Result<Vec<AuditLog>, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        if pks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let type_id = self.store.get_type_id("AuditLog")?;
+        let mut val_futures = Vec::with_capacity(pks.len());
+        let mut field_futures = Vec::with_capacity(pks.len());
+        for pk in pks {
+            let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::bytes_to_versionstamp(&pk[..])));
+            val_futures.push(tr.get(&key, false));
+            let field_prefix = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::bytes_to_versionstamp(&pk[..])));
+            let field_range = fdb_layer::prefix_range_option(&field_prefix, None);
+            field_futures.push(tr.get_ranges_keyvalues(field_range, false).try_collect::<Vec<_>>());
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        let field_slices = fdb_layer::futures::future::try_join_all(field_futures).await?;
+        let mut entities = Vec::with_capacity(values.len());
+        for (i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let mut entity = <AuditLog as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            entity.log_id = fdb_layer::bytes_to_versionstamp(&pks[i][..]).as_bytes().to_vec();
+            entity.views = 0;
+            for fkv in &field_slices[i] {
+                if fkv.value().len() < 8 {
+                    continue;
+                }
+                let ftpl = match dir.unpack::<Vec<fdb_layer::Element<'_>>>(fkv.key()) {
+                    Ok(t) if !t.is_empty() => t,
+                    _ => continue,
+                };
+                let field_num = match ftpl.last().and_then(|e| e.as_i64()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let mut raw_bytes = [0u8; 8];
+                raw_bytes.copy_from_slice(&fkv.value()[..8]);
+                let raw_u64 = u64::from_le_bytes(raw_bytes);
+                match field_num {
+                    4 => entity.views = raw_u64 as i64,
+                    _ => {}
+                }
+            }
+            entities.push(entity);
+        }
+        Ok(entities)
+    }
+
     pub async fn list_audit_log(
         &self,
         tr: &fdb_layer::Transaction,
@@ -1552,6 +2293,19 @@ impl AuditLogRepository {
         use fdb_layer::futures::TryStreamExt;
         let type_id = self.store.get_type_id("AuditLog")?;
         let mut result = AuditLogPaginatedResult::default();
+        let mut prefix_tpl = Vec::with_capacity(2 + opts.prefix.len());
+        prefix_tpl.push(fdb_layer::Element::Int(type_id));
+        prefix_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+        for (pk_idx, el) in opts.prefix.iter().enumerate() {
+            match (pk_idx, el) {
+                (0, fdb_layer::Element::Bytes(b)) => {
+                    prefix_tpl.push(fdb_layer::Element::Versionstamp(fdb_layer::bytes_to_versionstamp(b.as_ref())));
+                }
+                _ => prefix_tpl.push(el.clone()),
+            }
+        }
+        let data_prefix = dir.pack(&prefix_tpl);
+        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&data_prefix);
         let mut begin_tpl = Vec::with_capacity(2 + opts.begin.len());
         begin_tpl.push(fdb_layer::Element::Int(type_id));
         begin_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
@@ -1564,14 +2318,25 @@ impl AuditLogRepository {
             }
         }
         let begin = dir.pack(&begin_tpl);
-        let data_prefix = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE));
-        let (_, end) = fdb_layer::prefix_range(&data_prefix);
+        if !opts.begin.is_empty() {
+            if opts.reverse {
+                let (_, end_bound) = fdb_layer::prefix_range(&begin);
+                if end_bound < range_end {
+                    range_end = end_bound;
+                }
+            } else if begin > range_begin {
+                range_begin = begin;
+            }
+        }
+        if range_begin >= range_end {
+            return Ok(result);
+        }
         let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
         let range_opt = fdb_layer::RangeOption {
-            begin: fdb_layer::KeySelector::first_greater_or_equal(begin),
-            end: fdb_layer::KeySelector::first_greater_or_equal(end),
+            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),
             limit,
-            reverse: false,
+            reverse: opts.reverse,
             ..fdb_layer::RangeOption::default()
         };
         let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;
@@ -1590,8 +2355,11 @@ impl AuditLogRepository {
             result.items.push(entity);
         }
         if !result.items.is_empty() {
-            let first = &result.items[0];
-            let last = &result.items[result.items.len() - 1];
+            let (first, last) = if opts.reverse {
+                (&result.items[result.items.len() - 1], &result.items[0])
+            } else {
+                (&result.items[0], &result.items[result.items.len() - 1])
+            };
             let field_begin = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::bytes_to_versionstamp(&first.log_id[..])));
             let field_end_prefix = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::bytes_to_versionstamp(&last.log_id[..])));
             let (_, field_end) = fdb_layer::prefix_range(&field_end_prefix);
@@ -1713,6 +2481,120 @@ impl AuditLogRepository {
         Ok(entities)
     }
 
+    pub async fn query_audit_log_by_actor(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        actor: &str,
+        opts: AuditLogPaginationOptions,
+    ) -> Result<AuditLogPaginatedResult, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("AuditLog")?;
+        let mut result = AuditLogPaginatedResult::default();
+        let index_key_prefix = dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 244111290i64, &actor));
+        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&index_key_prefix);
+        if !opts.begin.is_empty() {
+            let mut base_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(&index_key_prefix)?;
+            for (pk_idx, el) in opts.begin.iter().enumerate() {
+                match (pk_idx, el) {
+                    (0, fdb_layer::Element::Bytes(b)) => {
+                        base_tpl.push(fdb_layer::Element::Versionstamp(fdb_layer::bytes_to_versionstamp(b.as_ref())));
+                    }
+                    _ => base_tpl.push(el.clone()),
+                }
+            }
+            let cursor_key = dir.pack(&base_tpl);
+            if opts.reverse {
+                let (_, end_bound) = fdb_layer::prefix_range(&cursor_key);
+                if end_bound < range_end {
+                    range_end = end_bound;
+                }
+            } else if cursor_key > range_begin {
+                range_begin = cursor_key;
+            }
+        }
+        if range_begin >= range_end {
+            return Ok(result);
+        }
+        let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
+        let index_range = fdb_layer::RangeOption {
+            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),
+            limit,
+            reverse: opts.reverse,
+            ..fdb_layer::RangeOption::default()
+        };
+        let mut kvs: Vec<_> = tr.get_ranges_keyvalues(index_range, false).try_collect().await?;
+        let pk_index_start = 3 + 1usize;
+        if opts.limit > 0 && kvs.len() > opts.limit {
+            let next_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kvs[opts.limit].key())?;
+            if next_tpl.len() > pk_index_start {
+                result.has_more = true;
+                result.next_key = next_tpl.into_iter().skip(pk_index_start).map(|e| e.into_owned()).collect();
+            }
+            kvs.truncate(opts.limit);
+        }
+        let mut val_futures = Vec::with_capacity(kvs.len());
+        let mut field_futures = Vec::with_capacity(kvs.len());
+        let mut unpacked_tpls: Vec<Vec<fdb_layer::Element<'_>>> = Vec::with_capacity(kvs.len());
+        for kv in &kvs {
+            let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;
+            if tpl.len() <= pk_index_start {
+                continue;
+            }
+            let pk_tuple = &tpl[pk_index_start..];
+            let mut key_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend_from_slice(pk_tuple);
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+            let mut field_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            field_tpl.push(fdb_layer::Element::Int(type_id));
+            field_tpl.push(fdb_layer::Element::Int(fdb_layer::FIELD_NAMESPACE));
+            field_tpl.extend_from_slice(pk_tuple);
+            let field_prefix = dir.pack(&field_tpl);
+            let field_range = fdb_layer::prefix_range_option(&field_prefix, None);
+            field_futures.push(tr.get_ranges_keyvalues(field_range, false).try_collect::<Vec<_>>());
+            unpacked_tpls.push(tpl);
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        let field_slices = fdb_layer::futures::future::try_join_all(field_futures).await?;
+        for (i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let mut entity = <AuditLog as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            if let Some(vs) = unpacked_tpls.get(i).and_then(|t| t.get(4)).and_then(|e| e.as_versionstamp()) {
+                entity.log_id = vs.as_bytes().to_vec();
+            }
+            entity.views = 0;
+            for fkv in &field_slices[i] {
+                if fkv.value().len() < 8 {
+                    continue;
+                }
+                let ftpl = match dir.unpack::<Vec<fdb_layer::Element<'_>>>(fkv.key()) {
+                    Ok(t) if !t.is_empty() => t,
+                    _ => continue,
+                };
+                let field_num = match ftpl.last().and_then(|e| e.as_i64()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let mut raw_bytes = [0u8; 8];
+                raw_bytes.copy_from_slice(&fkv.value()[..8]);
+                let raw_u64 = u64::from_le_bytes(raw_bytes);
+                match field_num {
+                    4 => entity.views = raw_u64 as i64,
+                    _ => {}
+                }
+            }
+            result.items.push(entity);
+        }
+        Ok(result)
+    }
+
     pub async fn get_audit_log_by_tags(
         &self,
         tr: &fdb_layer::Transaction,
@@ -1787,6 +2669,120 @@ impl AuditLogRepository {
         Ok(entities)
     }
 
+    pub async fn query_audit_log_by_tags(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        tags: &str,
+        opts: AuditLogPaginationOptions,
+    ) -> Result<AuditLogPaginatedResult, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("AuditLog")?;
+        let mut result = AuditLogPaginatedResult::default();
+        let index_key_prefix = dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, &tags));
+        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&index_key_prefix);
+        if !opts.begin.is_empty() {
+            let mut base_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(&index_key_prefix)?;
+            for (pk_idx, el) in opts.begin.iter().enumerate() {
+                match (pk_idx, el) {
+                    (0, fdb_layer::Element::Bytes(b)) => {
+                        base_tpl.push(fdb_layer::Element::Versionstamp(fdb_layer::bytes_to_versionstamp(b.as_ref())));
+                    }
+                    _ => base_tpl.push(el.clone()),
+                }
+            }
+            let cursor_key = dir.pack(&base_tpl);
+            if opts.reverse {
+                let (_, end_bound) = fdb_layer::prefix_range(&cursor_key);
+                if end_bound < range_end {
+                    range_end = end_bound;
+                }
+            } else if cursor_key > range_begin {
+                range_begin = cursor_key;
+            }
+        }
+        if range_begin >= range_end {
+            return Ok(result);
+        }
+        let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };
+        let index_range = fdb_layer::RangeOption {
+            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),
+            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),
+            limit,
+            reverse: opts.reverse,
+            ..fdb_layer::RangeOption::default()
+        };
+        let mut kvs: Vec<_> = tr.get_ranges_keyvalues(index_range, false).try_collect().await?;
+        let pk_index_start = 3 + 1usize;
+        if opts.limit > 0 && kvs.len() > opts.limit {
+            let next_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kvs[opts.limit].key())?;
+            if next_tpl.len() > pk_index_start {
+                result.has_more = true;
+                result.next_key = next_tpl.into_iter().skip(pk_index_start).map(|e| e.into_owned()).collect();
+            }
+            kvs.truncate(opts.limit);
+        }
+        let mut val_futures = Vec::with_capacity(kvs.len());
+        let mut field_futures = Vec::with_capacity(kvs.len());
+        let mut unpacked_tpls: Vec<Vec<fdb_layer::Element<'_>>> = Vec::with_capacity(kvs.len());
+        for kv in &kvs {
+            let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;
+            if tpl.len() <= pk_index_start {
+                continue;
+            }
+            let pk_tuple = &tpl[pk_index_start..];
+            let mut key_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend_from_slice(pk_tuple);
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+            let mut field_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            field_tpl.push(fdb_layer::Element::Int(type_id));
+            field_tpl.push(fdb_layer::Element::Int(fdb_layer::FIELD_NAMESPACE));
+            field_tpl.extend_from_slice(pk_tuple);
+            let field_prefix = dir.pack(&field_tpl);
+            let field_range = fdb_layer::prefix_range_option(&field_prefix, None);
+            field_futures.push(tr.get_ranges_keyvalues(field_range, false).try_collect::<Vec<_>>());
+            unpacked_tpls.push(tpl);
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        let field_slices = fdb_layer::futures::future::try_join_all(field_futures).await?;
+        for (i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let mut entity = <AuditLog as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            if let Some(vs) = unpacked_tpls.get(i).and_then(|t| t.get(4)).and_then(|e| e.as_versionstamp()) {
+                entity.log_id = vs.as_bytes().to_vec();
+            }
+            entity.views = 0;
+            for fkv in &field_slices[i] {
+                if fkv.value().len() < 8 {
+                    continue;
+                }
+                let ftpl = match dir.unpack::<Vec<fdb_layer::Element<'_>>>(fkv.key()) {
+                    Ok(t) if !t.is_empty() => t,
+                    _ => continue,
+                };
+                let field_num = match ftpl.last().and_then(|e| e.as_i64()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let mut raw_bytes = [0u8; 8];
+                raw_bytes.copy_from_slice(&fkv.value()[..8]);
+                let raw_u64 = u64::from_le_bytes(raw_bytes);
+                match field_num {
+                    4 => entity.views = raw_u64 as i64,
+                    _ => {}
+                }
+            }
+            result.items.push(entity);
+        }
+        Ok(result)
+    }
+
     pub async fn add_audit_log_views(
         &self,
         tr: &fdb_layer::Transaction,
@@ -1798,6 +2794,24 @@ impl AuditLogRepository {
         let key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::bytes_to_versionstamp(&log_id[..]), 4i64));
         let buf = (val as u64).to_le_bytes();
         tr.atomic_op(&key, &buf, fdb_layer::MutationType::Add);
+        Ok(())
+    }
+
+    pub async fn set_audit_log_views(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        log_id: &[u8],
+        val: i64,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("AuditLog")?;
+        let key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::bytes_to_versionstamp(&log_id[..]), 4i64));
+        if val == 0 {
+            tr.clear(&key);
+        } else {
+            let buf = (val as u64).to_le_bytes();
+            tr.set(&key, &buf);
+        }
         Ok(())
     }
 

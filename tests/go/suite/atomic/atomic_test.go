@@ -440,20 +440,85 @@ func TestZeroInitializedMaxAndSetAtomicFields(t *testing.T) {
 		t.Fatalf("expected MaxValue=0 after Max(-100) on 0-initialized Counter, got %d", gotZero.MaxValue)
 	}
 
-	// 2. Set upsert with non-zero atomic fields must persist them to FieldNamespace
+	// 2. Set upsert with non-zero atomic fields must persist them to FieldNamespace,
+	// and Set upsert with MaxValue=0 must write signed bias so subsequent Max(-100) stays 0 (BUG-1).
 	if err := counterRepo.Set(ctx, tr, dir, &atomic.Counter{
 		Id:       "c_set_upsert",
 		Value:    42,
-		MaxValue: 100,
+		MaxValue: 0,
 		MinValue: 7,
 	}); err != nil {
 		t.Fatalf("Set failed: %v", err)
+	}
+	if err := counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_set_upsert", -100); err != nil {
+		t.Fatalf("MaxCounterMaxValue(-100) after Set upsert failed: %v", err)
 	}
 	gotUpsert, err := counterRepo.Get(ctx, tr, dir, "c_set_upsert")
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
-	if gotUpsert.Value != 42 || gotUpsert.MaxValue != 100 || gotUpsert.MinValue != 7 {
-		t.Fatalf("expected Set to persist atomic fields {42, 100, 7}, got %+v", gotUpsert)
+	if gotUpsert.Value != 42 || gotUpsert.MaxValue != 0 || gotUpsert.MinValue != 7 {
+		t.Fatalf("expected Set upsert to persist {42, 0, 7} and ignore Max(-100), got %+v", gotUpsert)
+	}
+
+	// 3. Read-modify-write via Get + concurrent Add + Set MUST NOT clobber FieldNamespace
+	// even when the struct passed to Set has non-zero atomic field values from the earlier Get (BUG-1).
+	staleCopy, err := counterRepo.Get(ctx, tr, dir, "c_set_upsert")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if err := counterRepo.AddCounterValue(ctx, tr, dir, "c_set_upsert", 58); err != nil {
+		t.Fatalf("AddCounterValue failed: %v", err)
+	}
+	// staleCopy.Value is still 42 (non-zero!), while FieldNamespace is now 100.
+	if err := counterRepo.Set(ctx, tr, dir, staleCopy); err != nil {
+		t.Fatalf("Set with staleCopy failed: %v", err)
+	}
+	gotAfterRMW, err := counterRepo.Get(ctx, tr, dir, "c_set_upsert")
+	if err != nil {
+		t.Fatalf("Get after RMW Set failed: %v", err)
+	}
+	if gotAfterRMW.Value != 100 {
+		t.Fatalf("BUG-1 regression: Set overwrote concurrent atomic Add (expected 100, got %d)", gotAfterRMW.Value)
+	}
+
+	// 4. Explicit SetCounter* methods can set and reset atomic fields to 0 (BUG-1).
+	if err := counterRepo.SetCounterValue(ctx, tr, dir, "c_set_upsert", 0); err != nil {
+		t.Fatalf("SetCounterValue(0) failed: %v", err)
+	}
+	if err := counterRepo.SetCounterMaxValue(ctx, tr, dir, "c_set_upsert", 0); err != nil {
+		t.Fatalf("SetCounterMaxValue(0) failed: %v", err)
+	}
+	if err := counterRepo.SetCounterMinValue(ctx, tr, dir, "c_set_upsert", 0); err != nil {
+		t.Fatalf("SetCounterMinValue(0) failed: %v", err)
+	}
+	// After resetting MaxValue=0 and MinValue=0, Max(-50) must stay 0 and Min(25) must become 25.
+	_ = counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_set_upsert", -50)
+	_ = counterRepo.MinCounterMinValue(ctx, tr, dir, "c_set_upsert", 25)
+	gotReset, err := counterRepo.Get(ctx, tr, dir, "c_set_upsert")
+	if err != nil {
+		t.Fatalf("Get after SetCounter* reset failed: %v", err)
+	}
+	if gotReset.Value != 0 || gotReset.MaxValue != 0 || gotReset.MinValue != 25 {
+		t.Fatalf("unexpected state after SetCounter* reset: %+v", gotReset)
+	}
+
+	// 5. BatchGetCounterByPK strongly-typed batch lookup and ListCounter with Reverse: true (BUG-5, PERF-3).
+	_ = counterRepo.SetCounterValue(ctx, tr, dir, "c_max_zero", 11)
+	byPK, err := counterRepo.BatchGetCounterByPK(ctx, tr, dir, []string{"c_max_zero", "c_set_upsert"})
+	if err != nil || len(byPK) != 2 {
+		t.Fatalf("BatchGetCounterByPK failed: got %+v, err=%v", byPK, err)
+	}
+
+	revList, err := counterRepo.ListCounter(ctx, tr, dir, atomic.CounterPaginationOptions{
+		Limit:   10,
+		Reverse: true,
+	})
+	if err != nil || len(revList.Items) != 2 {
+		t.Fatalf("ListCounter(Reverse:true) failed: got %+v, err=%v", revList, err)
+	}
+	if revList.Items[0].Id != "c_set_upsert" || revList.Items[0].MinValue != 25 || revList.Items[1].Id != "c_max_zero" || revList.Items[1].Value != 11 {
+		t.Fatalf("ListCounter(Reverse:true) did not populate atomic fields in reverse order: %+v, %+v", revList.Items[0], revList.Items[1])
 	}
 }
+

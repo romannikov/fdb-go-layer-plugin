@@ -32,10 +32,14 @@ func TestGenerateRustRepository_StandardAndAtomics(t *testing.T) {
 		"pub async fn set(",
 		"pub async fn delete(",
 		"pub async fn batch_get_counter(",
+		"pub async fn batch_get_counter_by_pk(",
 		"pub async fn list_counter(",
 		"pub async fn add_counter_value(",
 		"pub async fn max_counter_max_value(",
 		"pub async fn min_counter_min_value(",
+		"pub async fn set_counter_value(",
+		"pub async fn set_counter_max_value(",
+		"pub async fn set_counter_min_value(",
 		"fdb_layer::MutationType::Add",
 		"fdb_layer::MutationType::Max",
 		"fdb_layer::MutationType::Min",
@@ -73,6 +77,8 @@ func TestGenerateRustRepository_Queue(t *testing.T) {
 		"pub struct TaskMessageRepository",
 		"pub async fn enqueue(",
 		"pub async fn dequeue(",
+		"pub async fn dequeue_batch(",
+		"self.store.prepare_user_version(tr)?;",
 		"fdb_layer::Versionstamp::incomplete(self.store.next_user_version())",
 		"(entity.shard_id as u64)",
 		"fdb_layer::MutationType::SetVersionstampedKey",
@@ -125,6 +131,8 @@ func TestGenerateRustRepository_BytesPrimaryKeyAndSecondaryIndexes(t *testing.T)
 		"fdb_layer::Bytes::from(&old.hash[..])",
 		"fdb_layer::Bytes::from(&hash[..])",
 		"fdb_layer::Bytes::from(&item[..])",
+		"pub async fn query_blob_record_by_hash(",
+		"pub async fn query_blob_record_by_chunks(",
 	}
 
 	for _, exp := range expectedSubstrings {

@@ -290,5 +290,63 @@ func TestIntegration_DeleteAndUnsigned32BitAtomic(t *testing.T) {
 	if got.Value != 0 || got.MaxValue != 0 || got.MinValue != 0 || got.U64Max != 0 || got.I32Min != 0 || got.U32Add != 0 {
 		t.Fatalf("Delete did not clear FieldNamespace in live FDB: %+v", got)
 	}
+
+	// Verify BUG-1 in live FDB:
+	// 1. Set upsert with MaxValue=0 writes signed bias so Max(-100) stays 0
+	// 2. Set with non-zero atomic fields from a prior Get does NOT clobber concurrent Add
+	// 3. Explicit SetCounter* resets atomic fields to 0
+	// 4. ListCounter with Reverse: true populates FieldNamespace when firstPK > lastPK
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return counterRepo.Set(ctx, tr, dir, &atomic.Counter{
+			Id:       "c_rmw",
+			Value:    20,
+			MaxValue: 0,
+			MinValue: 10,
+		})
+	})
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		got, err = counterRepo.Get(ctx, tr, dir, "c_rmw")
+		if err != nil {
+			return err
+		}
+		if err := counterRepo.AddCounterValue(ctx, tr, dir, "c_rmw", 30); err != nil {
+			return err
+		}
+		if err := counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_rmw", -100); err != nil {
+			return err
+		}
+		// got.Value is still 20, while FieldNamespace has 50
+		return counterRepo.Set(ctx, tr, dir, got)
+	})
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		got, err = counterRepo.Get(ctx, tr, dir, "c_rmw")
+		return err
+	})
+	if got.Value != 50 || got.MaxValue != 0 || got.MinValue != 10 {
+		t.Fatalf("expected {Value:50, MaxValue:0, MinValue:10} after RMW Set in live FDB, got %+v", got)
+	}
+
+	// Reset Value to 0 via SetCounterValue and set c_live Value to 77
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if err := counterRepo.SetCounterValue(ctx, tr, dir, "c_rmw", 0); err != nil {
+			return err
+		}
+		return counterRepo.SetCounterValue(ctx, tr, dir, "c_live", 77)
+	})
+
+	var revList *atomic.CounterPaginatedResult
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		revList, err = counterRepo.ListCounter(ctx, tr, dir, atomic.CounterPaginationOptions{
+			Limit:   10,
+			Reverse: true,
+		})
+		return err
+	})
+	if len(revList.Items) != 2 || revList.Items[0].Id != "c_rmw" || revList.Items[0].Value != 0 || revList.Items[0].MinValue != 10 || revList.Items[1].Id != "c_live" || revList.Items[1].Value != 77 {
+		t.Fatalf("unexpected ListCounter(Reverse:true) result in live FDB: %+v", revList.Items)
+	}
 }
 

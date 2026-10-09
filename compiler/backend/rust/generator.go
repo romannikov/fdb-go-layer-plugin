@@ -280,11 +280,12 @@ func generateQueueRepository(g Printer, msg ir.MessageSpec) {
 	g.P("    ) -> Result<(), fdb_layer::FdbLayerError> {")
 	g.P(`        let type_id = self.store.get_type_id("`, msg.Name, `")?;`)
 	if hasVS {
+		g.P("        self.store.prepare_user_version(tr)?;")
 		g.P("        let key = dir.pack_with_versionstamp(&(type_id, fdb_layer::DATA_NAMESPACE, ", versionstampedPKTupleArgs(msg), "));")
 	} else {
 		g.P("        let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, ", pkTupleArgsFromEntity(msg, "entity"), "));")
 	}
-	g.P("        let value = fdb_layer::prost::Message::encode_to_vec(entity);")
+	generateEncodeWithZeroedAtomics(g, msg, "        ")
 	if hasVS {
 		g.P("        tr.atomic_op(&key, &value, fdb_layer::MutationType::SetVersionstampedKey);")
 	} else {
@@ -324,6 +325,41 @@ func generateQueueRepository(g Printer, msg ir.MessageSpec) {
 		}
 	}
 	g.P("        Ok(Some(entity))")
+	g.P("    }")
+	g.P()
+	g.P("    /// Dequeues and removes up to `limit` oldest `", msg.Name, "` items from the queue.")
+	g.P("    pub async fn dequeue_batch(")
+	g.P("        &self,")
+	g.P("        tr: &fdb_layer::Transaction,")
+	g.P("        dir: &fdb_layer::Subspace,")
+	g.P("        ", firstPKSnake, ": ", FieldRustParamType(firstPK), ",")
+	g.P("        limit: usize,")
+	g.P("    ) -> Result<Vec<", msg.Name, ">, fdb_layer::FdbLayerError> {")
+	g.P("        use fdb_layer::futures::TryStreamExt;")
+	g.P("        if limit == 0 {")
+	g.P("            return Ok(Vec::new());")
+	g.P("        }")
+	g.P(`        let type_id = self.store.get_type_id("`, msg.Name, `")?;`)
+	g.P("        let prefix = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, ", PackField(firstPKSnake, firstPK), "));")
+	g.P("        let range_opt = fdb_layer::prefix_range_option(&prefix, Some(limit));")
+	g.P("        let rows: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;")
+	g.P("        let mut items = Vec::with_capacity(rows.len());")
+	g.P("        for row in &rows {")
+	g.P("            tr.clear(row.key());")
+	g.P("            let mut entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(row.value())?;")
+	if hasVS {
+		g.P("            let tpl = dir.unpack::<Vec<fdb_layer::Element<'_>>>(row.key())?;")
+		for i, f := range msg.PrimaryKeyFields {
+			if f.IsVersionstamp {
+				g.P("            if let Some(vs) = tpl.get(", i+2, ").and_then(|e| e.as_versionstamp()) {")
+				g.P("                entity.", FieldIdent(f), " = vs.as_bytes().to_vec();")
+				g.P("            }")
+			}
+		}
+	}
+	g.P("            items.push(entity);")
+	g.P("        }")
+	g.P("        Ok(items)")
 	g.P("    }")
 	g.P("}")
 }
@@ -371,6 +407,7 @@ func generateEntityRepository(g Printer, msg ir.MessageSpec) {
 	generateList(g, msg)
 	for _, idx := range msg.SecondaryIndexes {
 		generateGetByIndex(g, msg, idx)
+		generateQueryByIndex(g, msg, idx)
 	}
 	generateAtomicMutators(g, msg)
 
@@ -473,6 +510,7 @@ func generateCreate(g Printer, msg ir.MessageSpec) {
 	g.P("    ) -> Result<(), fdb_layer::FdbLayerError> {")
 	g.P(`        let type_id = self.store.get_type_id("`, msg.Name, `")?;`)
 	if hasVS {
+		g.P("        self.store.prepare_user_version(tr)?;")
 		g.P("        let user_version = self.store.next_user_version();")
 		g.P("        let key = dir.pack_with_versionstamp(&(type_id, fdb_layer::DATA_NAMESPACE, ", versionstampedPKTupleArgsWithVar(msg, "user_version"), "));")
 	} else {
@@ -521,12 +559,18 @@ func generateCreate(g Printer, msg ir.MessageSpec) {
 		if idx.IsFanOut {
 			for i, f := range idx.Fields {
 				if f.IsRepeated {
-					g.P("        for item in &entity.", FieldIdent(f), " {")
+					g.P("        {")
+					g.P("            let mut seen = std::collections::HashSet::with_capacity(entity.", FieldIdent(f), ".len());")
+					g.P("            for item in &entity.", FieldIdent(f), " {")
+					g.P("                if !seen.insert(item) {")
+					g.P("                    continue;")
+					g.P("                }")
 					if hasVS {
-						emitVersionstampedFanOutIndexWrite(g, msg, idx, i, "entity", "user_version", "            ")
+						emitVersionstampedFanOutIndexWrite(g, msg, idx, i, "entity", "user_version", "                ")
 					} else {
-						emitFanOutIndexWrite(g, msg, idx, i, "entity", true, "            ")
+						emitFanOutIndexWrite(g, msg, idx, i, "entity", true, "                ")
 					}
+					g.P("            }")
 					g.P("        }")
 				}
 			}
@@ -601,6 +645,8 @@ func generateGet(g Printer, msg ir.MessageSpec) {
 
 func generateSet(g Printer, msg ir.MessageSpec) {
 	hasVS := ir.MsgHasVersionstampPK(msg)
+	hasMut := ir.HasMutationFields(msg)
+	hasIdx := len(msg.SecondaryIndexes) > 0
 	pkArgsEntity := pkTupleArgsFromEntity(msg, "entity")
 	pkArgsOld := pkTupleArgsFromEntity(msg, "old")
 
@@ -629,12 +675,12 @@ func generateSet(g Printer, msg ir.MessageSpec) {
 
 	g.P(`        let type_id = self.store.get_type_id("`, msg.Name, `")?;`)
 
-	if len(msg.SecondaryIndexes) > 0 {
+	if hasIdx {
 		g.P("        let mut old: Option<", msg.Name, "> = None;")
 	}
 
 	g.P("        let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, ", pkArgsEntity, "));")
-	if len(msg.SecondaryIndexes) > 0 {
+	if hasIdx {
 		g.P("        if let Some(old_val) = tr.get(&key, false).await? {")
 		if hasVS {
 			g.P("            let mut decoded = <", msg.Name, " as fdb_layer::prost::Message>::decode(old_val.as_ref())?;")
@@ -644,22 +690,34 @@ func generateSet(g Printer, msg ir.MessageSpec) {
 			g.P("            old = Some(<", msg.Name, " as fdb_layer::prost::Message>::decode(old_val.as_ref())?);")
 		}
 		g.P("        }")
+	} else if hasMut {
+		g.P("        let is_new_record = tr.get(&key, false).await?.is_none();")
 	}
 
 	generateEncodeWithZeroedAtomics(g, msg, "        ")
 
 	g.P("        tr.set(&key, &value);")
-	if ir.HasMutationFields(msg) {
+	if hasMut {
+		newCond := "is_new_record"
+		if hasIdx {
+			newCond = "old.is_none()"
+		}
+		g.P("        if ", newCond, " {")
 		for _, f := range msg.Fields {
 			if f.Mutation != ir.MutationNone {
 				ident := FieldIdent(f)
-				g.P("        if entity.", ident, " != 0 {")
-				g.P("            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, ", pkArgsEntity, ", ", f.Number, "i64));")
-				g.P("            let buf = ", encodeAtomicRustExpr("entity."+ident, f), ".to_le_bytes();")
-				g.P("            tr.set(&field_key, &buf);")
-				g.P("        }")
+				if f.Mutation == ir.MutationMax && !f.IsUnsigned {
+					g.P("            {")
+				} else {
+					g.P("            if entity.", ident, " != 0 {")
+				}
+				g.P("                let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, ", pkArgsEntity, ", ", f.Number, "i64));")
+				g.P("                let buf = ", encodeAtomicRustExpr("entity."+ident, f), ".to_le_bytes();")
+				g.P("                tr.atomic_op(&field_key, &buf, fdb_layer::MutationType::", MutationEnumVariant(f.Mutation), ");")
+				g.P("            }")
 			}
 		}
+		g.P("        }")
 	}
 
 	for _, idx := range msg.SecondaryIndexes {
@@ -686,7 +744,11 @@ func generateSet(g Printer, msg ir.MessageSpec) {
 						g.P("                for item in &old.", ident, " {")
 						emitFanOutIndexWrite(g, msg, idx, i, "old", false, "                    ")
 						g.P("                }")
+						g.P("                let mut seen = std::collections::HashSet::with_capacity(entity.", ident, ".len());")
 						g.P("                for item in &entity.", ident, " {")
+						g.P("                    if !seen.insert(item) {")
+						g.P("                        continue;")
+						g.P("                    }")
 						emitFanOutIndexWrite(g, msg, idx, i, "entity", true, "                    ")
 						g.P("                }")
 						g.P("            }")
@@ -705,7 +767,11 @@ func generateSet(g Printer, msg ir.MessageSpec) {
 						g.P("            }")
 					}
 					g.P("        } else {")
+					g.P("            let mut seen = std::collections::HashSet::with_capacity(entity.", ident, ".len());")
 					g.P("            for item in &entity.", ident, " {")
+					g.P("                if !seen.insert(item) {")
+					g.P("                    continue;")
+					g.P("                }")
 					emitFanOutIndexWrite(g, msg, idx, i, "entity", true, "                ")
 					g.P("            }")
 					g.P("        }")
@@ -889,6 +955,74 @@ func generateBatchGet(g Printer, msg ir.MessageSpec) {
 	g.P("        Ok(result)")
 	g.P("    }")
 	g.P()
+
+	ownedPKType := ownedPKRustTypeExpr(msg)
+	pkArgsFromOwnedRef := pkTupleArgsFromOwnedRef(msg, "pk")
+	g.P("    pub async fn batch_get_", snakeName, "_by_pk(")
+	g.P("        &self,")
+	g.P("        tr: &fdb_layer::Transaction,")
+	g.P("        dir: &fdb_layer::Subspace,")
+	g.P("        pks: &[", ownedPKType, "],")
+	g.P("    ) -> Result<Vec<", msg.Name, ">, fdb_layer::FdbLayerError> {")
+	if hasMut {
+		g.P("        use fdb_layer::futures::TryStreamExt;")
+	}
+	g.P("        if pks.is_empty() {")
+	g.P("            return Ok(Vec::new());")
+	g.P("        }")
+	g.P(`        let type_id = self.store.get_type_id("`, msg.Name, `")?;`)
+	g.P("        let mut val_futures = Vec::with_capacity(pks.len());")
+	if hasMut {
+		g.P("        let mut field_futures = Vec::with_capacity(pks.len());")
+	}
+	g.P("        for pk in pks {")
+	g.P("            let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, ", pkArgsFromOwnedRef, "));")
+	g.P("            val_futures.push(tr.get(&key, false));")
+	if hasMut {
+		g.P("            let field_prefix = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, ", pkArgsFromOwnedRef, "));")
+		g.P("            let field_range = fdb_layer::prefix_range_option(&field_prefix, None);")
+		g.P("            field_futures.push(tr.get_ranges_keyvalues(field_range, false).try_collect::<Vec<_>>());")
+	}
+	g.P("        }")
+	g.P("        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;")
+	if hasMut {
+		g.P("        let field_slices = fdb_layer::futures::future::try_join_all(field_futures).await?;")
+	}
+	g.P("        let mut entities = Vec::with_capacity(values.len());")
+	iterPatternPK := "(_i, value_opt)"
+	if hasMut || hasVS {
+		iterPatternPK = "(i, value_opt)"
+	}
+	g.P("        for ", iterPatternPK, " in values.into_iter().enumerate() {")
+	g.P("            let value = match value_opt {")
+	g.P("                Some(v) => v,")
+	g.P("                None => continue,")
+	g.P("            };")
+	if hasMut || hasVS {
+		g.P("            let mut entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(value.as_ref())?;")
+		if hasVS {
+			for _, f := range msg.PrimaryKeyFields {
+				if f.IsVersionstamp {
+					ident := FieldIdent(f)
+					if len(msg.PrimaryKeyFields) == 1 {
+						g.P("            entity.", ident, " = fdb_layer::bytes_to_versionstamp(&pks[i][..]).as_bytes().to_vec();")
+					} else {
+						g.P("            entity.", ident, " = fdb_layer::bytes_to_versionstamp(&pks[i].", ident, "[..]).as_bytes().to_vec();")
+					}
+				}
+			}
+		}
+		if hasMut {
+			generateUnmarshalAtomicFields(g, msg, "&field_slices[i]", "            ")
+		}
+	} else {
+		g.P("            let entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(value.as_ref())?;")
+	}
+	g.P("            entities.push(entity);")
+	g.P("        }")
+	g.P("        Ok(entities)")
+	g.P("    }")
+	g.P()
 }
 
 func generateList(g Printer, msg ir.MessageSpec) {
@@ -904,6 +1038,27 @@ func generateList(g Printer, msg ir.MessageSpec) {
 	g.P("        use fdb_layer::futures::TryStreamExt;")
 	g.P(`        let type_id = self.store.get_type_id("`, msg.Name, `")?;`)
 	g.P("        let mut result = ", msg.Name, "PaginatedResult::default();")
+	g.P("        let mut prefix_tpl = Vec::with_capacity(2 + opts.prefix.len());")
+	g.P("        prefix_tpl.push(fdb_layer::Element::Int(type_id));")
+	g.P("        prefix_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));")
+	if ir.MsgHasVersionstampPK(msg) {
+		g.P("        for (pk_idx, el) in opts.prefix.iter().enumerate() {")
+		g.P("            match (pk_idx, el) {")
+		for pkIdx, f := range msg.PrimaryKeyFields {
+			if f.IsVersionstamp {
+				g.P("                (", pkIdx, ", fdb_layer::Element::Bytes(b)) => {")
+				g.P("                    prefix_tpl.push(fdb_layer::Element::Versionstamp(fdb_layer::bytes_to_versionstamp(b.as_ref())));")
+				g.P("                }")
+			}
+		}
+		g.P("                _ => prefix_tpl.push(el.clone()),")
+		g.P("            }")
+		g.P("        }")
+	} else {
+		g.P("        prefix_tpl.extend(opts.prefix.iter().cloned());")
+	}
+	g.P("        let data_prefix = dir.pack(&prefix_tpl);")
+	g.P("        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&data_prefix);")
 	g.P("        let mut begin_tpl = Vec::with_capacity(2 + opts.begin.len());")
 	g.P("        begin_tpl.push(fdb_layer::Element::Int(type_id));")
 	g.P("        begin_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));")
@@ -924,14 +1079,25 @@ func generateList(g Printer, msg ir.MessageSpec) {
 		g.P("        begin_tpl.extend(opts.begin.iter().cloned());")
 	}
 	g.P("        let begin = dir.pack(&begin_tpl);")
-	g.P("        let data_prefix = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE));")
-	g.P("        let (_, end) = fdb_layer::prefix_range(&data_prefix);")
+	g.P("        if !opts.begin.is_empty() {")
+	g.P("            if opts.reverse {")
+	g.P("                let (_, end_bound) = fdb_layer::prefix_range(&begin);")
+	g.P("                if end_bound < range_end {")
+	g.P("                    range_end = end_bound;")
+	g.P("                }")
+	g.P("            } else if begin > range_begin {")
+	g.P("                range_begin = begin;")
+	g.P("            }")
+	g.P("        }")
+	g.P("        if range_begin >= range_end {")
+	g.P("            return Ok(result);")
+	g.P("        }")
 	g.P("        let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };")
 	g.P("        let range_opt = fdb_layer::RangeOption {")
-	g.P("            begin: fdb_layer::KeySelector::first_greater_or_equal(begin),")
-	g.P("            end: fdb_layer::KeySelector::first_greater_or_equal(end),")
+	g.P("            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),")
+	g.P("            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),")
 	g.P("            limit,")
-	g.P("            reverse: false,")
+	g.P("            reverse: opts.reverse,")
 	g.P("            ..fdb_layer::RangeOption::default()")
 	g.P("        };")
 	g.P("        let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;")
@@ -978,8 +1144,11 @@ func generateList(g Printer, msg ir.MessageSpec) {
 		entityPKArgs := pkTupleArgsFromEntity(msg, "entity")
 
 		g.P("        if !result.items.is_empty() {")
-		g.P("            let first = &result.items[0];")
-		g.P("            let last = &result.items[result.items.len() - 1];")
+		g.P("            let (first, last) = if opts.reverse {")
+		g.P("                (&result.items[result.items.len() - 1], &result.items[0])")
+		g.P("            } else {")
+		g.P("                (&result.items[0], &result.items[result.items.len() - 1])")
+		g.P("            };")
 		g.P("            let field_begin = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, ", firstPKArgs, "));")
 		g.P("            let field_end_prefix = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, ", lastPKArgs, "));")
 		g.P("            let (_, field_end) = fdb_layer::prefix_range(&field_end_prefix);")
@@ -1133,6 +1302,149 @@ func generateGetByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec
 	g.P()
 }
 
+func generateQueryByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec) {
+	snakeMsg := SnakeCase(msg.Name)
+	joinedSnake := JoinFieldNamesSnake(idx.Fields)
+	hasMut := ir.HasMutationFields(msg)
+	hasVS := ir.MsgHasVersionstampPK(msg)
+
+	var idxPackArgs []string
+	for _, f := range idx.Fields {
+		idxPackArgs = append(idxPackArgs, PackField(safeRustParamIdent(f), f))
+	}
+
+	g.P("    pub async fn query_", snakeMsg, "_by_", joinedSnake, "(")
+	g.P("        &self,")
+	g.P("        tr: &fdb_layer::Transaction,")
+	g.P("        dir: &fdb_layer::Subspace,")
+	g.P("        ", fieldRustParamDecls(idx.Fields), ",")
+	g.P("        opts: ", msg.Name, "PaginationOptions,")
+	g.P("    ) -> Result<", msg.Name, "PaginatedResult, fdb_layer::FdbLayerError> {")
+	g.P("        use fdb_layer::futures::TryStreamExt;")
+	g.P(`        let type_id = self.store.get_type_id("`, msg.Name, `")?;`)
+	g.P("        let mut result = ", msg.Name, "PaginatedResult::default();")
+	g.P("        let index_key_prefix = dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, ", idx.IndexID, "i64, ", strings.Join(idxPackArgs, ", "), "));")
+	g.P("        let (mut range_begin, mut range_end) = fdb_layer::prefix_range(&index_key_prefix);")
+	g.P("        if !opts.begin.is_empty() {")
+	g.P("            let mut base_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(&index_key_prefix)?;")
+	if hasVS {
+		g.P("            for (pk_idx, el) in opts.begin.iter().enumerate() {")
+		g.P("                match (pk_idx, el) {")
+		for pkIdx, f := range msg.PrimaryKeyFields {
+			if f.IsVersionstamp {
+				g.P("                    (", pkIdx, ", fdb_layer::Element::Bytes(b)) => {")
+				g.P("                        base_tpl.push(fdb_layer::Element::Versionstamp(fdb_layer::bytes_to_versionstamp(b.as_ref())));")
+				g.P("                    }")
+			}
+		}
+		g.P("                    _ => base_tpl.push(el.clone()),")
+		g.P("                }")
+		g.P("            }")
+	} else {
+		g.P("            base_tpl.extend(opts.begin.iter().cloned());")
+	}
+	g.P("            let cursor_key = dir.pack(&base_tpl);")
+	g.P("            if opts.reverse {")
+	g.P("                let (_, end_bound) = fdb_layer::prefix_range(&cursor_key);")
+	g.P("                if end_bound < range_end {")
+	g.P("                    range_end = end_bound;")
+	g.P("                }")
+	g.P("            } else if cursor_key > range_begin {")
+	g.P("                range_begin = cursor_key;")
+	g.P("            }")
+	g.P("        }")
+	g.P("        if range_begin >= range_end {")
+	g.P("            return Ok(result);")
+	g.P("        }")
+	g.P("        let limit = if opts.limit > 0 { Some(opts.limit + 1) } else { None };")
+	g.P("        let index_range = fdb_layer::RangeOption {")
+	g.P("            begin: fdb_layer::KeySelector::first_greater_or_equal(range_begin),")
+	g.P("            end: fdb_layer::KeySelector::first_greater_or_equal(range_end),")
+	g.P("            limit,")
+	g.P("            reverse: opts.reverse,")
+	g.P("            ..fdb_layer::RangeOption::default()")
+	g.P("        };")
+	g.P("        let mut kvs: Vec<_> = tr.get_ranges_keyvalues(index_range, false).try_collect().await?;")
+	g.P("        let pk_index_start = 3 + ", len(idx.Fields), "usize;")
+	g.P("        if opts.limit > 0 && kvs.len() > opts.limit {")
+	g.P("            let next_tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kvs[opts.limit].key())?;")
+	g.P("            if next_tpl.len() > pk_index_start {")
+	g.P("                result.has_more = true;")
+	g.P("                result.next_key = next_tpl.into_iter().skip(pk_index_start).map(|e| e.into_owned()).collect();")
+	g.P("            }")
+	g.P("            kvs.truncate(opts.limit);")
+	g.P("        }")
+	g.P("        let mut val_futures = Vec::with_capacity(kvs.len());")
+	if hasMut {
+		g.P("        let mut field_futures = Vec::with_capacity(kvs.len());")
+	}
+	if hasVS {
+		g.P("        let mut unpacked_tpls: Vec<Vec<fdb_layer::Element<'_>>> = Vec::with_capacity(kvs.len());")
+	}
+	g.P("        for kv in &kvs {")
+	g.P("            let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;")
+	g.P("            if tpl.len() <= pk_index_start {")
+	g.P("                continue;")
+	g.P("            }")
+	g.P("            let pk_tuple = &tpl[pk_index_start..];")
+	g.P("            let mut key_tpl = Vec::with_capacity(2 + pk_tuple.len());")
+	g.P("            key_tpl.push(fdb_layer::Element::Int(type_id));")
+	g.P("            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));")
+	g.P("            key_tpl.extend_from_slice(pk_tuple);")
+	g.P("            let key = dir.pack(&key_tpl);")
+	g.P("            val_futures.push(tr.get(&key, false));")
+	if hasMut {
+		g.P("            let mut field_tpl = Vec::with_capacity(2 + pk_tuple.len());")
+		g.P("            field_tpl.push(fdb_layer::Element::Int(type_id));")
+		g.P("            field_tpl.push(fdb_layer::Element::Int(fdb_layer::FIELD_NAMESPACE));")
+		g.P("            field_tpl.extend_from_slice(pk_tuple);")
+		g.P("            let field_prefix = dir.pack(&field_tpl);")
+		g.P("            let field_range = fdb_layer::prefix_range_option(&field_prefix, None);")
+		g.P("            field_futures.push(tr.get_ranges_keyvalues(field_range, false).try_collect::<Vec<_>>());")
+	}
+	if hasVS {
+		g.P("            unpacked_tpls.push(tpl);")
+	}
+	g.P("        }")
+	g.P("        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;")
+	if hasMut {
+		g.P("        let field_slices = fdb_layer::futures::future::try_join_all(field_futures).await?;")
+	}
+	iterPattern := "(_i, value_opt)"
+	if hasMut || hasVS {
+		iterPattern = "(i, value_opt)"
+	}
+	g.P("        for ", iterPattern, " in values.into_iter().enumerate() {")
+	g.P("            let value = match value_opt {")
+	g.P("                Some(v) => v,")
+	g.P("                None => continue,")
+	g.P("            };")
+	if hasMut || hasVS {
+		g.P("            let mut entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(value.as_ref())?;")
+		if hasVS {
+			pkStart := 3 + len(idx.Fields)
+			for pkIdx, f := range msg.PrimaryKeyFields {
+				if f.IsVersionstamp {
+					ident := FieldIdent(f)
+					g.P("            if let Some(vs) = unpacked_tpls.get(i).and_then(|t| t.get(", pkStart+pkIdx, ")).and_then(|e| e.as_versionstamp()) {")
+					g.P("                entity.", ident, " = vs.as_bytes().to_vec();")
+					g.P("            }")
+				}
+			}
+		}
+		if hasMut {
+			generateUnmarshalAtomicFields(g, msg, "&field_slices[i]", "            ")
+		}
+	} else {
+		g.P("            let entity = <", msg.Name, " as fdb_layer::prost::Message>::decode(value.as_ref())?;")
+	}
+	g.P("            result.items.push(entity);")
+	g.P("        }")
+	g.P("        Ok(result)")
+	g.P("    }")
+	g.P()
+}
+
 func generateAtomicMutators(g Printer, msg ir.MessageSpec) {
 	snakeMsg := SnakeCase(msg.Name)
 	var pkPackArgs []string
@@ -1158,6 +1470,30 @@ func generateAtomicMutators(g Printer, msg ir.MessageSpec) {
 		g.P("        let key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, ", pkArgsStr, ", ", f.Number, "i64));")
 		g.P("        let buf = ", encodeAtomicRustExpr("val", f), ".to_le_bytes();")
 		g.P("        tr.atomic_op(&key, &buf, fdb_layer::MutationType::", MutationEnumVariant(f.Mutation), ");")
+		g.P("        Ok(())")
+		g.P("    }")
+		g.P()
+
+		g.P("    pub async fn set_", snakeMsg, "_", fieldSnake, "(")
+		g.P("        &self,")
+		g.P("        tr: &fdb_layer::Transaction,")
+		g.P("        dir: &fdb_layer::Subspace,")
+		g.P("        ", fieldRustParamDecls(msg.PrimaryKeyFields), ",")
+		g.P("        val: ", FieldRustType(f), ",")
+		g.P("    ) -> Result<(), fdb_layer::FdbLayerError> {")
+		g.P(`        let type_id = self.store.get_type_id("`, msg.Name, `")?;`)
+		g.P("        let key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, ", pkArgsStr, ", ", f.Number, "i64));")
+		if f.Mutation == ir.MutationMax && !f.IsUnsigned {
+			g.P("        let buf = ", encodeAtomicRustExpr("val", f), ".to_le_bytes();")
+			g.P("        tr.set(&key, &buf);")
+		} else {
+			g.P("        if val == 0 {")
+			g.P("            tr.clear(&key);")
+			g.P("        } else {")
+			g.P("            let buf = ", encodeAtomicRustExpr("val", f), ".to_le_bytes();")
+			g.P("            tr.set(&key, &buf);")
+			g.P("        }")
+		}
 		g.P("        Ok(())")
 		g.P("    }")
 		g.P()
@@ -1365,6 +1701,30 @@ func pkRustTypeExpr(msg ir.MessageSpec) string {
 		return msg.Name + "PrimaryKey"
 	}
 	return "()"
+}
+
+func ownedPKRustTypeExpr(msg ir.MessageSpec) string {
+	if len(msg.PrimaryKeyFields) == 1 {
+		return FieldRustType(msg.PrimaryKeyFields[0])
+	}
+	if len(msg.PrimaryKeyFields) > 1 {
+		return msg.Name + "PrimaryKey"
+	}
+	return "()"
+}
+
+func pkTupleArgsFromOwnedRef(msg ir.MessageSpec, varName string) string {
+	if len(msg.PrimaryKeyFields) == 1 {
+		f := msg.PrimaryKeyFields[0]
+		if f.Kind == ir.KindString {
+			return varName + ".as_str()"
+		}
+		if f.Kind == ir.KindBytes {
+			return PackField(varName, f)
+		}
+		return PackField("*"+varName, f)
+	}
+	return pkTupleArgsFromEntity(msg, varName)
 }
 
 func pkTupleArgsFromEntity(msg ir.MessageSpec, varName string) string {

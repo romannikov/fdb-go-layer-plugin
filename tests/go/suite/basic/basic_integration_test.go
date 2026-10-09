@@ -732,7 +732,86 @@ func TestIntegration_GenericRepository(t *testing.T) {
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
 		return genRepo.Get(ctx, tr, dir, "g1")
 	})
-	if err == nil {
-		t.Fatal("expected not found after delete")
+	if !errors.Is(err, fdblayer.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound after delete, got: %v", err)
+	}
+}
+
+func TestIntegration_EnsureMetadata_AndPaginatedIndexQuery(t *testing.T) {
+	ctx := context.Background()
+	db := fdb.MustOpenDefault()
+	dir, cleanup := tests.TestDir(t, db)
+	defer cleanup()
+
+	recordStore := fdblayer.NewRecordStore()
+	if recordStore.HasAllMetadata([]string{"User", "Product"}) {
+		t.Fatal("expected HasAllMetadata=false on fresh store")
+	}
+	if err := recordStore.EnsureMetadata(ctx, db, dir, []string{"User", "Product"}); err != nil {
+		t.Fatalf("EnsureMetadata failed: %v", err)
+	}
+	if !recordStore.HasAllMetadata([]string{"User", "Product"}) {
+		t.Fatal("expected HasAllMetadata=true after EnsureMetadata")
+	}
+	// Second call hits fast path without error
+	if err := recordStore.EnsureMetadata(ctx, db, dir, []string{"User", "Product"}); err != nil {
+		t.Fatalf("second EnsureMetadata failed: %v", err)
+	}
+
+	// Simulate an aborted transaction that calls SyncMetadata for "AbortedEntity"
+	_, _ = db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"AbortedEntity"}); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("abort transaction")
+	})
+	if recordStore.HasAllMetadata([]string{"User", "Product"}) {
+		t.Fatal("expected HasAllMetadata=false after uncommitted SyncMetadata")
+	}
+	if err := recordStore.EnsureMetadata(ctx, db, dir, []string{"User", "Product"}); err != nil {
+		t.Fatalf("EnsureMetadata after aborted SyncMetadata failed: %v", err)
+	}
+	if _, err := recordStore.GetTypeID("AbortedEntity"); err == nil {
+		t.Fatal("expected uncommitted AbortedEntity to be purged from in-memory metadata after EnsureMetadata")
+	}
+
+	productRepo := store.NewProductRepository(recordStore)
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		for i := 1; i <= 4; i++ {
+			if err := productRepo.Create(ctx, tr, dir, &store.Product{
+				Id:       fmt.Sprintf("p%d", i),
+				Name:     fmt.Sprintf("Item %d", i),
+				Category: "hardware",
+				Price:    int32(i * 10),
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	// Reverse pagination on secondary index
+	var revPage1, revPage2 *store.ProductPaginatedResult
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		revPage1, err = productRepo.QueryProductByCategory(ctx, tr, dir, "hardware", store.ProductPaginationOptions{
+			Limit:   2,
+			Reverse: true,
+		})
+		if err != nil {
+			return err
+		}
+		revPage2, err = productRepo.QueryProductByCategory(ctx, tr, dir, "hardware", store.ProductPaginationOptions{
+			Begin:   revPage1.NextKey,
+			Limit:   2,
+			Reverse: true,
+		})
+		return err
+	})
+	if len(revPage1.Items) != 2 || !revPage1.HasMore || revPage1.Items[0].Id != "p4" || revPage1.Items[1].Id != "p3" {
+		t.Fatalf("unexpected reverse index page 1: %+v", revPage1)
+	}
+	if len(revPage2.Items) != 2 || revPage2.HasMore || revPage2.Items[0].Id != "p2" || revPage2.Items[1].Id != "p1" {
+		t.Fatalf("unexpected reverse index page 2: %+v", revPage2)
 	}
 }

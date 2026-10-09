@@ -968,6 +968,111 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	}
 }
 
+func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
+	ctx := context.Background()
+	db := fdb.MustOpenDefault()
+	dir, cleanup := tests.TestDir(t, db)
+	defer cleanup()
+
+	recordStore := fdblayer.NewRecordStore()
+	if err := recordStore.EnsureMetadata(ctx, db, dir, []string{"TaskMessage", "Order"}); err != nil {
+		t.Fatalf("EnsureMetadata failed: %v", err)
+	}
+
+	taskRepo := store.NewTaskMessageRepository(recordStore)
+	orderRepo := store.NewOrderRepository(recordStore)
+
+	// 1. Enqueue 3 messages in the same transaction (including pre-filled Versionstamp to test BUG-4)
+	// and dequeue in batches of 2 then 2 (testing PERF-5 and BUG-2 automatic cross-tx reset).
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		for i := 1; i <= 3; i++ {
+			if err := taskRepo.Enqueue(ctx, tr, dir, &store.TaskMessage{
+				QueueName:    "batch_live",
+				ShardId:      uint32(i),
+				Versionstamp: []byte{9, 9, 9},
+				Payload:      []byte(fmt.Sprintf("msg-%d", i)),
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	var batch1, batch2 []*store.TaskMessage
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		batch1, err = taskRepo.DequeueBatch(ctx, tr, dir, "batch_live", 2)
+		return err
+	})
+	if len(batch1) != 2 || string(batch1[0].Payload) != "msg-1" || string(batch1[1].Payload) != "msg-2" || len(batch1[0].Versionstamp) != 12 {
+		t.Fatalf("unexpected DequeueBatch 1 result: %+v", batch1)
+	}
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		batch2, err = taskRepo.DequeueBatch(ctx, tr, dir, "batch_live", 2)
+		return err
+	})
+	if len(batch2) != 1 || string(batch2[0].Payload) != "msg-3" {
+		t.Fatalf("unexpected DequeueBatch 2 result: %+v", batch2)
+	}
+
+	// 2. Prefix + Reverse pagination on compound PK Order in live FDB (PERF-1, PERF-3, BUG-5)
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		for _, seq := range []int32{10, 20, 30} {
+			if err := orderRepo.Create(ctx, tr, dir, &store.Order{
+				TenantId: "tenant_a",
+				OrderSeq: seq,
+				Status:   store.OrderStatus_ORDER_STATUS_PENDING,
+			}); err != nil {
+				return err
+			}
+		}
+		return orderRepo.Create(ctx, tr, dir, &store.Order{
+			TenantId: "tenant_b",
+			OrderSeq: 99,
+			Status:   store.OrderStatus_ORDER_STATUS_PENDING,
+		})
+	})
+
+	var page1, page2 *store.OrderPaginatedResult
+	var byPK []*store.Order
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		page1, err = orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+			Prefix:  tuple.Tuple{"tenant_a"},
+			Limit:   2,
+			Reverse: true,
+		})
+		if err != nil {
+			return err
+		}
+		page2, err = orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+			Prefix:  tuple.Tuple{"tenant_a"},
+			Begin:   page1.NextKey,
+			Limit:   2,
+			Reverse: true,
+		})
+		if err != nil {
+			return err
+		}
+		byPK, err = orderRepo.BatchGetOrderByPK(ctx, tr, dir, []store.OrderPrimaryKey{
+			{TenantId: "tenant_a", OrderSeq: 10},
+			{TenantId: "tenant_b", OrderSeq: 99},
+		})
+		return err
+	})
+	if len(page1.Items) != 2 || !page1.HasMore || page1.Items[0].OrderSeq != 30 || page1.Items[1].OrderSeq != 20 {
+		t.Fatalf("unexpected live ListOrder(Prefix:tenant_a, Reverse:true) page 1: %+v", page1)
+	}
+	if len(page2.Items) != 1 || page2.HasMore || page2.Items[0].OrderSeq != 10 {
+		t.Fatalf("unexpected live ListOrder(Prefix:tenant_a, Reverse:true) page 2: %+v", page2)
+	}
+	if len(byPK) != 2 {
+		t.Fatalf("expected 2 orders from BatchGetOrderByPK, got %+v", byPK)
+	}
+}
+
 
 
 

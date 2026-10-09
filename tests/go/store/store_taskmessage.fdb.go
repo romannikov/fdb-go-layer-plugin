@@ -17,6 +17,7 @@ import (
 type TaskMessageRepository interface {
 	Enqueue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, msg *TaskMessage) error
 	Dequeue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string) (*TaskMessage, error)
+	DequeueBatch(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string, limit int) ([]*TaskMessage, error)
 }
 
 type taskmessageRepository struct {
@@ -38,12 +39,24 @@ func (r *taskmessageRepository) Enqueue(ctx context.Context, tr fdblayer.Transac
 		return err
 	}
 
+	if err := r.store.PrepareUserVersion(tr); err != nil {
+		return err
+	}
 	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.QueueName, tuple.IncompleteVersionstamp(r.store.NextUserVersion()), uint64(entity.ShardId)})
 	if err != nil {
 		return err
 	}
 
-	value, err := proto.Marshal(entity)
+	// Marshal without mutating the caller's struct in-place.
+	marshalTarget := entity
+	if len(entity.Versionstamp) > 0 {
+		marshalTarget = &TaskMessage{
+			QueueName: entity.QueueName,
+			ShardId:   entity.ShardId,
+			Payload:   entity.Payload,
+		}
+	}
+	value, err := proto.Marshal(marshalTarget)
 	if err != nil {
 		return err
 	}
@@ -99,4 +112,52 @@ func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transac
 	}
 
 	return entity, nil
+}
+
+// DequeueBatch reads and removes up to limit oldest messages from the queue in a single range scan.
+func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string, limit int) ([]*TaskMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	typeID, err := r.store.GetTypeID("TaskMessage")
+	if err != nil {
+		return nil, err
+	}
+
+	prefixTuple := tuple.Tuple{typeID, fdblayer.DataNamespace, queuename}
+	prefixRange, err := fdb.PrefixRange(dir.Pack(prefixTuple))
+	if err != nil {
+		return nil, err
+	}
+
+	rows := fdblayer.GetRange(tr, prefixRange, fdb.RangeOptions{Limit: limit}).GetSliceOrPanic()
+	if len(rows) == 0 {
+		return nil, nil
+	}
+
+	items := make([]*TaskMessage, 0, len(rows))
+	for _, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		tr.Clear(row.Key)
+		entity := &TaskMessage{}
+		if err := proto.Unmarshal(row.Value, entity); err != nil {
+			return nil, err
+		}
+		tpl, unpackErr := dir.Unpack(row.Key)
+		if unpackErr != nil {
+			return nil, unpackErr
+		}
+		if len(tpl) > 1+2 {
+			if vs, ok := tpl[1+2].(tuple.Versionstamp); ok {
+				entity.Versionstamp = vs.Bytes()
+			}
+		}
+		items = append(items, entity)
+	}
+	return items, nil
 }

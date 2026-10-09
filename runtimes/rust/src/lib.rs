@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Mutex, RwLock};
 
 pub use async_trait::async_trait;
 pub use foundationdb;
@@ -24,6 +24,7 @@ pub const FIELD_NAMESPACE: i64 = 2;
 pub enum FdbLayerError {
     AlreadyExists(&'static str),
     NotFound(&'static str),
+    UserVersionOverflow,
     MetadataNotInitialized,
     TypeNotFound(String),
     Fdb(FdbError),
@@ -42,6 +43,10 @@ impl FdbLayerError {
     pub fn is_not_found(&self) -> bool {
         matches!(self, FdbLayerError::NotFound(_))
     }
+
+    pub fn is_user_version_overflow(&self) -> bool {
+        matches!(self, FdbLayerError::UserVersionOverflow)
+    }
 }
 
 impl fmt::Display for FdbLayerError {
@@ -49,6 +54,9 @@ impl fmt::Display for FdbLayerError {
         match self {
             FdbLayerError::AlreadyExists(entity) => write!(f, "{} already exists", entity),
             FdbLayerError::NotFound(entity) => write!(f, "{} not found", entity),
+            FdbLayerError::UserVersionOverflow => {
+                write!(f, "user version overflow in transaction")
+            }
             FdbLayerError::MetadataNotInitialized => {
                 write!(f, "metadata not initialized, call sync_metadata first")
             }
@@ -118,14 +126,16 @@ pub trait GenericRepository<T, PK>: Send + Sync {
     async fn delete(&self, tr: &Transaction, dir: &Subspace, pk: PK) -> Result<(), FdbLayerError>;
 }
 
-/// Options for paginated `list_*` queries.
+/// Options for paginated `list_*` and `query_*_by_*` queries.
 #[derive(Debug, Clone, Default)]
 pub struct PaginationOptions {
     pub begin: Vec<Element<'static>>,
+    pub prefix: Vec<Element<'static>>,
     pub limit: usize,
+    pub reverse: bool,
 }
 
-/// Paginated result set returned by `list_*` queries.
+/// Paginated result set returned by `list_*` and `query_*_by_*` queries.
 #[derive(Debug, Clone)]
 pub struct PaginatedResult<T> {
     pub items: Vec<T>,
@@ -233,10 +243,19 @@ pub fn format_tuple(elements: &[Element<'_>]) -> String {
     out
 }
 
+#[derive(Default)]
+struct UserVersionState {
+    tx_counts: HashMap<usize, u32>,
+    tx_order: VecDeque<usize>,
+    pending_uv: VecDeque<u16>,
+}
+
 /// `RecordStore` holds metadata mapping between message names and their integer type IDs.
 pub struct RecordStore {
     metadata: RwLock<Option<HashMap<String, i64>>>,
+    metadata_committed: AtomicBool,
     user_version_seq: AtomicU32,
+    uv_state: Mutex<UserVersionState>,
 }
 
 impl Default for RecordStore {
@@ -250,14 +269,52 @@ impl RecordStore {
     pub fn new() -> Self {
         Self {
             metadata: RwLock::new(None),
+            metadata_committed: AtomicBool::new(false),
             user_version_seq: AtomicU32::new(0),
+            uv_state: Mutex::new(UserVersionState::default()),
         }
+    }
+
+    /// Resets the user version sequence and per-transaction counters to 0.
+    pub fn reset_user_version(&self) {
+        let mut st = self.uv_state.lock().unwrap();
+        self.user_version_seq.store(0, Ordering::Relaxed);
+        st.tx_counts.clear();
+        st.tx_order.clear();
+        st.pending_uv.clear();
+    }
+
+    /// Validates that the next `next_user_version()` call for `tr` will not wrap
+    /// around the 16-bit boundary (`65535 -> 0`) within the same transaction.
+    pub fn prepare_user_version(&self, tr: &Transaction) -> Result<(), FdbLayerError> {
+        let tx_id = tr as *const Transaction as usize;
+        let mut st = self.uv_state.lock().unwrap();
+        let count = st.tx_counts.get(&tx_id).copied().unwrap_or(0);
+        if count >= 65536 {
+            return Err(FdbLayerError::UserVersionOverflow);
+        }
+        if !st.tx_counts.contains_key(&tx_id) {
+            if st.tx_order.len() >= 1024 {
+                if let Some(oldest) = st.tx_order.pop_front() {
+                    st.tx_counts.remove(&oldest);
+                }
+            }
+            st.tx_order.push_back(tx_id);
+        }
+        st.tx_counts.insert(tx_id, count + 1);
+        st.pending_uv.push_back(count as u16);
+        Ok(())
     }
 
     /// Returns a monotonically increasing 16-bit user version so that multiple
     /// versionstamped keys written within the same transaction receive distinct
     /// user versions instead of colliding at 0.
     pub fn next_user_version(&self) -> u16 {
+        let mut st = self.uv_state.lock().unwrap();
+        if let Some(uv) = st.pending_uv.pop_front() {
+            return uv;
+        }
+        drop(st);
         self.user_version_seq.fetch_add(1, Ordering::Relaxed) as u16
     }
 
@@ -276,14 +333,56 @@ impl RecordStore {
         guard.clone().unwrap_or_default()
     }
 
-    /// Reads the existing metadata from FDB and assigns new IDs to any unmapped messages.
-    /// Binary-compatible with Go `RecordStore.SyncMetadata`.
-    pub async fn sync_metadata(
+    /// Returns true if all given message names have been committed and are present in memory.
+    pub fn has_all_metadata(&self, messages: &[&str]) -> bool {
+        if !self.metadata_committed.load(Ordering::Acquire) {
+            return false;
+        }
+        let guard = self.metadata.read().unwrap();
+        let Some(ref map) = *guard else {
+            return false;
+        };
+        messages.iter().all(|m| map.contains_key(*m))
+    }
+
+    /// Synchronizes metadata in its own committed transaction and only updates
+    /// the in-memory metadata map after `commit()` succeeds.
+    pub async fn ensure_metadata(
+        &self,
+        db: &Database,
+        meta_dir: &Subspace,
+        messages: &[&str],
+    ) -> Result<(), FdbLayerError> {
+        if self.metadata_committed.load(Ordering::Acquire) && self.has_all_metadata(messages) {
+            return Ok(());
+        }
+        let map = loop {
+            let tr = db.create_trx()?;
+            match self.compute_and_write_metadata(&tr, meta_dir, messages).await {
+                Ok(m) => match tr.commit().await {
+                    Ok(_) => break m,
+                    Err(err) => {
+                        tr.on_error(err).await?;
+                    }
+                },
+                Err(FdbLayerError::Fdb(err)) => {
+                    tr.on_error(err).await?;
+                }
+                Err(other) => return Err(other),
+            }
+        };
+        let mut guard = self.metadata.write().unwrap();
+        *guard = Some(map);
+        self.metadata_committed.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    async fn compute_and_write_metadata(
         &self,
         tr: &Transaction,
         meta_dir: &Subspace,
         messages: &[&str],
-    ) -> Result<(), FdbLayerError> {
+    ) -> Result<HashMap<String, i64>, FdbLayerError> {
         use futures::TryStreamExt;
 
         let mut map = HashMap::with_capacity(messages.len());
@@ -338,8 +437,21 @@ impl RecordStore {
             tr.set(&key, &val);
         }
 
+        Ok(map)
+    }
+
+    /// Reads the existing metadata from FDB and assigns new IDs to any unmapped messages.
+    /// Binary-compatible with Go `RecordStore.SyncMetadata`.
+    pub async fn sync_metadata(
+        &self,
+        tr: &Transaction,
+        meta_dir: &Subspace,
+        messages: &[&str],
+    ) -> Result<(), FdbLayerError> {
+        let map = self.compute_and_write_metadata(tr, meta_dir, messages).await?;
         let mut guard = self.metadata.write().unwrap();
         *guard = Some(map);
+        self.metadata_committed.store(false, Ordering::Release);
         Ok(())
     }
 }
@@ -356,3 +468,4 @@ pub fn bytes_to_versionstamp(b: &[u8]) -> Versionstamp {
     };
     Versionstamp::complete(tr_version, user_version)
 }
+

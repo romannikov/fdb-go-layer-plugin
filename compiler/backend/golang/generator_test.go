@@ -157,8 +157,12 @@ func TestGenerateMessage_EntityAndQueue(t *testing.T) {
 		"type OrderPrimaryKey struct {",
 		"func (r *orderRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk OrderPrimaryKey)",
 		"func (r *orderRepository) GetOrderByStatusAndOrderSeq(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, OrderSeq uint64)",
+		"func (r *orderRepository) QueryOrderByStatusAndOrderSeq(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, OrderSeq uint64, opts OrderPaginationOptions)",
 		"func (r *orderRepository) GetOrderByHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Hashes []byte)",
 		"func (r *orderRepository) AddOrderCounter(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, TenantId string, OrderSeq uint64, val int64)",
+		"func (r *orderRepository) SetOrderCounter(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, TenantId string, OrderSeq uint64, val int64)",
+		"func (r *orderRepository) BatchGetOrderByPK(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []OrderPrimaryKey)",
+		"fdblayer.ErrNotFound",
 		"oldSet := make(map[string]struct{}, len(old.Hashes))",
 	} {
 		if !strings.Contains(out, expectedSnippet) {
@@ -185,6 +189,8 @@ func TestGenerateMessage_EntityAndQueue(t *testing.T) {
 	for _, expectedSnippet := range []string{
 		"func (r *taskmessageRepository) Enqueue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *TaskMessage)",
 		"func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string)",
+		"func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string, limit int)",
+		"r.store.PrepareUserVersion(tr)",
 		"tr.SetVersionstampedKey(key, value)",
 		"tuple.IncompleteVersionstamp(r.store.NextUserVersion())",
 	} {
