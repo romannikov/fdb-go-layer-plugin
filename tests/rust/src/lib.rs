@@ -677,6 +677,8 @@ mod tests {
                     &AuditLog {
                         log_id: vec![],
                         actor: "order_created".into(),
+                        tags: vec!["orders".into(), "create".into()],
+                        views: 5,
                     },
                 )
                 .await
@@ -685,6 +687,7 @@ mod tests {
         }
 
         // Verify compound PK get, compound index, bytes index, fan-out bytes index, and nested fields
+        let log_id: Vec<u8>;
         {
             let tr = db.create_trx().unwrap();
             let ord = order_repo
@@ -721,7 +724,7 @@ mod tests {
                 .unwrap();
             assert_eq!(by_attach.len(), 1);
 
-            // Verify AuditLog non-queue versionstamp PK via list + get + delete
+            // Verify AuditLog non-queue versionstamp PK via list + get + indexes + batch_get
             let logs = audit_repo
                 .list_audit_log(
                     &tr,
@@ -735,14 +738,146 @@ mod tests {
                 .unwrap();
             assert_eq!(logs.items.len(), 1);
             assert_eq!(logs.items[0].log_id.len(), 12);
+            assert_eq!(logs.items[0].views, 5);
+            log_id = logs.items[0].log_id.clone();
 
             let fetched_log = audit_repo
-                .get(&tr, &dir, &logs.items[0].log_id)
+                .get(&tr, &dir, &log_id)
                 .await
                 .unwrap();
             assert_eq!(fetched_log.actor, "order_created");
+            assert_eq!(fetched_log.views, 5);
+
+            let by_actor = audit_repo
+                .get_audit_log_by_actor(&tr, &dir, "order_created")
+                .await
+                .unwrap();
+            assert_eq!(by_actor.len(), 1);
+            assert_eq!(by_actor[0].log_id, log_id);
+            assert_eq!(by_actor[0].views, 5);
+
+            let by_tag = audit_repo
+                .get_audit_log_by_tags(&tr, &dir, "orders")
+                .await
+                .unwrap();
+            assert_eq!(by_tag.len(), 1);
+            assert_eq!(by_tag[0].log_id, log_id);
+
+            let batch = audit_repo
+                .batch_get_audit_log(
+                    &tr,
+                    &dir,
+                    &[vec![Element::Versionstamp(fdb_layer::bytes_to_versionstamp(&log_id))]],
+                )
+                .await
+                .unwrap();
+            assert_eq!(batch.len(), 1);
+            let batch_item = batch.values().next().unwrap();
+            assert_eq!(batch_item.log_id, log_id);
+            assert_eq!(batch_item.views, 5);
+
+            let page_by_bytes = audit_repo
+                .list_audit_log(
+                    &tr,
+                    &dir,
+                    AuditLogPaginationOptions {
+                        begin: vec![Element::Bytes(fdb_layer::Bytes::from(log_id.clone()))],
+                        limit: 1,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(page_by_bytes.items.len(), 1);
+            assert_eq!(page_by_bytes.items[0].log_id, log_id);
+        }
+
+        // Verify AuditLog atomic mutation + in-place set + delete
+        {
+            let tr = db.create_trx().unwrap();
+            assert!(audit_repo
+                .set(
+                    &tr,
+                    &dir,
+                    &AuditLog {
+                        log_id: vec![1, 2, 3],
+                        actor: "invalid".into(),
+                        tags: vec![],
+                        views: 0,
+                    },
+                )
+                .await
+                .is_err());
+            audit_repo
+                .add_audit_log_views(&tr, &dir, &log_id, 3)
+                .await
+                .unwrap();
+            audit_repo
+                .set(
+                    &tr,
+                    &dir,
+                    &AuditLog {
+                        log_id: log_id.clone(),
+                        actor: "order_updated".into(),
+                        tags: vec!["orders".into(), "update".into()],
+                        views: 0,
+                    },
+                )
+                .await
+                .unwrap();
+            tr.commit().await.unwrap();
+        }
+
+        {
+            let tr = db.create_trx().unwrap();
+            let updated = audit_repo.get(&tr, &dir, &log_id).await.unwrap();
+            assert_eq!(updated.actor, "order_updated");
+            assert_eq!(updated.views, 8);
+            assert!(audit_repo
+                .get_audit_log_by_actor(&tr, &dir, "order_created")
+                .await
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                audit_repo
+                    .get_audit_log_by_actor(&tr, &dir, "order_updated")
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(audit_repo
+                .get_audit_log_by_tags(&tr, &dir, "create")
+                .await
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                audit_repo
+                    .get_audit_log_by_tags(&tr, &dir, "update")
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+
+            audit_repo.delete(&tr, &dir, &log_id).await.unwrap();
+            tr.commit().await.unwrap();
+        }
+
+        {
+            let tr = db.create_trx().unwrap();
+            assert!(audit_repo
+                .get_audit_log_by_actor(&tr, &dir, "order_updated")
+                .await
+                .unwrap()
+                .is_empty());
+            assert!(audit_repo
+                .get_audit_log_by_tags(&tr, &dir, "orders")
+                .await
+                .unwrap()
+                .is_empty());
         }
     }
 }
+
 
 

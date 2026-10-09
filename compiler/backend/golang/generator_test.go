@@ -2,6 +2,9 @@ package golang
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 
@@ -190,5 +193,93 @@ func TestGenerateMessage_EntityAndQueue(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateMessage_NonQueueVersionstampWithIndexesAndAtomics(t *testing.T) {
+	logID := ir.FieldSpec{ProtoName: "log_id", GoName: "LogId", Number: 1, Kind: ir.KindBytes, IsVersionstamp: true}
+	actor := ir.FieldSpec{ProtoName: "actor", GoName: "Actor", Number: 2, Kind: ir.KindString}
+	tags := ir.FieldSpec{ProtoName: "tags", GoName: "Tags", Number: 3, Kind: ir.KindString, IsRepeated: true}
+	views := ir.FieldSpec{ProtoName: "views", GoName: "Views", Number: 4, Kind: ir.KindInt64, Mutation: ir.MutationAdd}
+	action := ir.FieldSpec{ProtoName: "action", GoName: "Action", Number: 5, Kind: ir.KindString}
+
+	spec := ir.MessageSpec{
+		Name:             "AuditLog",
+		GoPackageName:    "testspb",
+		Fields:           []ir.FieldSpec{logID, actor, tags, views, action},
+		PrimaryKeyFields: []ir.FieldSpec{logID},
+		SecondaryIndexes: []ir.SecondaryIndexSpec{
+			{
+				Fields:  []ir.FieldSpec{actor},
+				IndexID: 1001,
+			},
+			{
+				Fields:      []ir.FieldSpec{tags},
+				IsFanOut:    true,
+				FanOutField: tags,
+				IndexID:     1002,
+			},
+			{
+				Fields:  []ir.FieldSpec{action},
+				IndexID: 1003,
+			},
+		},
+	}
+
+	var p bufferPrinter
+	GenerateMessage(&p, spec)
+	out := p.sb.String()
+
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, "auditlog.fdb.go", out, parser.AllErrors)
+	if err != nil {
+		t.Fatalf("generated Go code failed to parse: %v\n%s", err, out)
+	}
+	for _, decl := range parsed.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "Create" {
+			continue
+		}
+		declared := map[string]bool{}
+		for _, stmt := range fn.Body.List {
+			assign, ok := stmt.(*ast.AssignStmt)
+			if !ok || assign.Tok != token.DEFINE {
+				continue
+			}
+			newVars := 0
+			for _, expr := range assign.Lhs {
+				if ident, ok := expr.(*ast.Ident); ok && ident.Name != "_" && !declared[ident.Name] {
+					declared[ident.Name] = true
+					newVars++
+				}
+			}
+			if newVars == 0 {
+				t.Errorf("Create has duplicate short variable declaration at top-level function scope")
+			}
+		}
+	}
+
+	for _, expectedSnippet := range []string{
+		"userVersion := r.store.NextUserVersion()",
+		"tuple.IncompleteVersionstamp(userVersion)",
+		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.IndexNamespace, 1001, entity.Actor, tuple.IncompleteVersionstamp(userVersion)})",
+		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.IndexNamespace, 1002,",
+		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.IndexNamespace, 1003, entity.Action, tuple.IncompleteVersionstamp(userVersion)})",
+		"fieldKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.FieldNamespace, tuple.IncompleteVersionstamp(userVersion), 4})",
+		"entity.LogId = fdblayer.BytesToVersionstamp(pk).Bytes()",
+		"if len(entity.LogId) != 0 && len(entity.LogId) != 12 {",
+		"if !hasOldVS {",
+		"return r.Create(ctx, tr, dir, entity)",
+		"unmarshaled.LogId = entity.LogId",
+		"entity.LogId = pk",
+		"beginTpl[2+0] = fdblayer.BytesToVersionstamp(rawVS)",
+		"pkTuples := make([]tuple.Tuple, len(kvs))",
+		"if vs, ok := pkTuples[i][0].(tuple.Versionstamp); ok {",
+	} {
+		if !strings.Contains(out, expectedSnippet) {
+			t.Errorf("expected generated Go code for non-queue versionstamp message to contain %q, got:\n%s", expectedSnippet, out)
+		}
+	}
+}
+
+
 
 

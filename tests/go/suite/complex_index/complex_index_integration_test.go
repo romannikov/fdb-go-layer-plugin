@@ -3,6 +3,7 @@
 package complex_index_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
@@ -781,49 +782,192 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 		return recordStore.SyncMetadata(ctx, tr, dir, []string{"AuditLog"})
 	})
 
+	// 1. Create two AuditLog entities in the same transaction with initial atomic Views,
+	// standard index (Actor), and fan-out index (Tags).
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		if err := auditRepo.Create(ctx, tr, dir, &store.AuditLog{
 			Actor: "alice",
+			Tags:  []string{"auth", "login"},
+			Views: 10,
 		}); err != nil {
 			return err
 		}
 		return auditRepo.Create(ctx, tr, dir, &store.AuditLog{
 			Actor: "bob",
+			Tags:  []string{"auth", "logout"},
+			Views: 5,
 		})
 	})
 
+	// 2. ListAuditLog unpacks the 12-byte versionstamp and populates atomic Views
 	var listed *store.AuditLogPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
 		listed, err = auditRepo.ListAuditLog(ctx, tr, dir, store.AuditLogPaginationOptions{Limit: 10})
 		return err
 	})
-	if len(listed.Items) != 2 || len(listed.Items[0].LogId) != 12 {
+	if len(listed.Items) != 2 || len(listed.Items[0].LogId) != 12 || len(listed.Items[1].LogId) != 12 {
 		t.Fatalf("expected 2 AuditLogs with 12-byte LogId, got %+v", listed)
 	}
-
 	firstID := listed.Items[0].LogId
+	secondID := listed.Items[1].LogId
+	if bytes.Equal(firstID, secondID) {
+		t.Fatalf("expected distinct 12-byte versionstamps in same transaction, got %x", firstID)
+	}
+	if listed.Items[0].Views != 10 || listed.Items[1].Views != 5 {
+		t.Fatalf("expected Views 10 and 5 from ListAuditLog, got %d and %d", listed.Items[0].Views, listed.Items[1].Views)
+	}
+
+	// 3. Get by 12-byte versionstamp
 	var got *store.AuditLog
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
 		got, err = auditRepo.Get(ctx, tr, dir, firstID)
 		return err
 	})
-	if got.Actor != "alice" {
+	if got.Actor != "alice" || !bytes.Equal(got.LogId, firstID) || got.Views != 10 {
 		t.Fatalf("unexpected AuditLog from Get: %+v", got)
 	}
 
+	// 4. Query by standard index (GetAuditLogByActor) and fan-out index (GetAuditLogByTags)
+	var byActor, byTagAuth []*store.AuditLog
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		byActor, err = auditRepo.GetAuditLogByActor(ctx, tr, dir, "alice")
+		if err != nil {
+			return err
+		}
+		byTagAuth, err = auditRepo.GetAuditLogByTags(ctx, tr, dir, "auth")
+		return err
+	})
+	if len(byActor) != 1 || !bytes.Equal(byActor[0].LogId, firstID) || byActor[0].Views != 10 {
+		t.Fatalf("unexpected GetAuditLogByActor('alice') result: %+v", byActor)
+	}
+	if len(byTagAuth) != 2 || !bytes.Equal(byTagAuth[0].LogId, firstID) || !bytes.Equal(byTagAuth[1].LogId, secondID) {
+		t.Fatalf("unexpected GetAuditLogByTags('auth') result: %+v", byTagAuth)
+	}
+
+	// 5. BatchGetAuditLog with both tuple.Versionstamp and raw []byte elements
+	var batchRes map[string]*store.AuditLog
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		batchRes, err = auditRepo.BatchGetAuditLog(ctx, tr, dir, []tuple.Tuple{
+			{fdblayer.BytesToVersionstamp(firstID)},
+			{secondID},
+		})
+		return err
+	})
+	if len(batchRes) != 2 {
+		t.Fatalf("expected 2 results from BatchGetAuditLog, got %+v", batchRes)
+	}
+	for _, item := range batchRes {
+		if len(item.LogId) != 12 {
+			t.Fatalf("BatchGetAuditLog did not populate 12-byte LogId: %+v", item)
+		}
+		if item.Actor == "alice" && item.Views != 10 {
+			t.Fatalf("BatchGetAuditLog expected Views=10 for alice, got %d", item.Views)
+		}
+	}
+
+	// 6. AddAuditLogViews atomic mutator
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return auditRepo.AddAuditLogViews(ctx, tr, dir, firstID, 7)
+	})
+
+	// 7. Set on existing entity updates in-place (preserving LogId and Views) and updates indexes;
+	// Set on empty LogId creates a new entity.
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if err := auditRepo.Set(ctx, tr, dir, &store.AuditLog{
+			LogId: firstID,
+			Actor: "alice_admin",
+			Tags:  []string{"auth", "elevated"},
+		}); err != nil {
+			return err
+		}
+		return auditRepo.Set(ctx, tr, dir, &store.AuditLog{
+			Actor: "charlie",
+			Tags:  []string{"audit"},
+			Views: 3,
+		})
+	})
+
+	var oldActor, newActor, oldTag, newTag, charlieLogs []*store.AuditLog
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		if got, err = auditRepo.Get(ctx, tr, dir, firstID); err != nil {
+			return err
+		}
+		if oldActor, err = auditRepo.GetAuditLogByActor(ctx, tr, dir, "alice"); err != nil {
+			return err
+		}
+		if newActor, err = auditRepo.GetAuditLogByActor(ctx, tr, dir, "alice_admin"); err != nil {
+			return err
+		}
+		if oldTag, err = auditRepo.GetAuditLogByTags(ctx, tr, dir, "login"); err != nil {
+			return err
+		}
+		if newTag, err = auditRepo.GetAuditLogByTags(ctx, tr, dir, "elevated"); err != nil {
+			return err
+		}
+		charlieLogs, err = auditRepo.GetAuditLogByActor(ctx, tr, dir, "charlie")
+		return err
+	})
+	if got.Actor != "alice_admin" || got.Views != 17 || !bytes.Equal(got.LogId, firstID) {
+		t.Fatalf("unexpected AuditLog after Set: %+v", got)
+	}
+	if len(oldActor) != 0 || len(newActor) != 1 || !bytes.Equal(newActor[0].LogId, firstID) || newActor[0].Views != 17 {
+		t.Fatalf("Actor index mismatch after Set: old=%+v, new=%+v", oldActor, newActor)
+	}
+	if len(oldTag) != 0 || len(newTag) != 1 || !bytes.Equal(newTag[0].LogId, firstID) {
+		t.Fatalf("Tags fan-out index mismatch after Set: old=%+v, new=%+v", oldTag, newTag)
+	}
+	if len(charlieLogs) != 1 || len(charlieLogs[0].LogId) != 12 || charlieLogs[0].Views != 3 {
+		t.Fatalf("unexpected charlie AuditLog created via Set(empty LogId): %+v", charlieLogs)
+	}
+
+	// 7b. ListAuditLog pagination with raw []byte Begin cursor and invalid Set length check
+	var pageFromSecond *store.AuditLogPaginatedResult
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if err := auditRepo.Set(ctx, tr, dir, &store.AuditLog{
+			LogId: []byte{1, 2, 3},
+			Actor: "invalid",
+		}); err == nil {
+			t.Fatalf("expected Set with 3-byte LogId to fail")
+		}
+		var err error
+		pageFromSecond, err = auditRepo.ListAuditLog(ctx, tr, dir, store.AuditLogPaginationOptions{
+			Begin: tuple.Tuple{secondID},
+			Limit: 1,
+		})
+		return err
+	})
+	if len(pageFromSecond.Items) != 1 || !bytes.Equal(pageFromSecond.Items[0].LogId, secondID) || !pageFromSecond.HasMore {
+		t.Fatalf("expected ListAuditLog from secondID ([]byte) to return bob with HasMore=true, got %+v", pageFromSecond)
+	}
+
+	// 8. Delete clears primary record, standard index, fan-out index, and atomic field
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		return auditRepo.Delete(ctx, tr, dir, firstID)
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		listed, err = auditRepo.ListAuditLog(ctx, tr, dir, store.AuditLogPaginationOptions{Limit: 10})
+		if newActor, err = auditRepo.GetAuditLogByActor(ctx, tr, dir, "alice_admin"); err != nil {
+			return err
+		}
+		if newTag, err = auditRepo.GetAuditLogByTags(ctx, tr, dir, "elevated"); err != nil {
+			return err
+		}
+		byTagAuth, err = auditRepo.GetAuditLogByTags(ctx, tr, dir, "auth")
 		return err
 	})
-	if len(listed.Items) != 1 || listed.Items[0].Actor != "bob" {
-		t.Fatalf("expected 1 AuditLog after Delete, got %+v", listed)
+	if len(newActor) != 0 || len(newTag) != 0 {
+		t.Fatalf("expected indexes for deleted AuditLog to be cleared, got actor=%+v tag=%+v", newActor, newTag)
+	}
+	if len(byTagAuth) != 1 || byTagAuth[0].Actor != "bob" {
+		t.Fatalf("expected only bob on 'auth' tag after Delete, got %+v", byTagAuth)
 	}
 }
+
+
 
 

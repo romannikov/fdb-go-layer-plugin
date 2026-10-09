@@ -227,6 +227,14 @@ func TestBuildMessageSpec_ValidationErrors(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "cannot have an atomic mutation") {
 		t.Fatalf("expected secondary index on atomic mutation field error, got %v", err)
 	}
+
+	// 9. Secondary index referencing a versionstamp field
+	_, err = BuildMessageSpec("InvalidMsg", singleVsFields, singleVsMap, []string{"id", "vs1"}, []*annotationspb.SecondaryIndex{
+		{Fields: []string{"vs1"}},
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "cannot be a versionstamp field") {
+		t.Fatalf("expected secondary index on versionstamp field error, got %v", err)
+	}
 }
 
 

@@ -1,8 +1,9 @@
 use fdb_layer::{Database, Element, RecordStore, Subspace};
 use fdb_layer_tests::atomic::CounterRepository;
 use fdb_layer_tests::store::{
-    order, Order, OrderPrimaryKey, OrderRepository, OrderStatus, Post, PostRepository, Product,
-    ProductRepository, TaskMessage, TaskMessageRepository, User, UserRepository,
+    order, AuditLog, AuditLogRepository, Order, OrderPrimaryKey, OrderRepository, OrderStatus,
+    Post, PostRepository, Product, ProductRepository, TaskMessage, TaskMessageRepository, User,
+    UserRepository,
 };
 use std::sync::Arc;
 
@@ -19,16 +20,25 @@ async fn main() {
     let post_repo = PostRepository::new(store.clone());
     let task_repo = TaskMessageRepository::new(store.clone());
     let order_repo = OrderRepository::new(store.clone());
+    let audit_repo = AuditLogRepository::new(store.clone());
     let counter_repo = CounterRepository::new(store.clone());
 
-    // 1. Sync metadata and verify all 6 types registered by Go exist
+    // 1. Sync metadata and verify all 7 types registered by Go exist
     {
         let tr = db.create_trx().unwrap();
         store
             .sync_metadata(
                 &tr,
                 &dir,
-                &["User", "Product", "Post", "TaskMessage", "Order", "Counter"],
+                &[
+                    "User",
+                    "Product",
+                    "Post",
+                    "TaskMessage",
+                    "Order",
+                    "AuditLog",
+                    "Counter",
+                ],
             )
             .await
             .expect("sync_metadata failed in Rust");
@@ -36,9 +46,10 @@ async fn main() {
     }
 
     let meta = store.metadata();
-    assert_eq!(meta.len(), 6, "expected 6 metadata entries, got {meta:?}");
+    assert_eq!(meta.len(), 7, "expected 7 metadata entries, got {meta:?}");
 
     // 2. Read and verify records written by Go
+    let audit_log_id: Vec<u8>;
     {
         let tr = db.create_trx().unwrap();
 
@@ -103,6 +114,15 @@ async fn main() {
             .await
             .expect("get_order_by_receipt_hash failed");
         assert_eq!(by_receipt.len(), 1);
+
+        let audit_logs = audit_repo
+            .get_audit_log_by_actor(&tr, &dir, "go_actor")
+            .await
+            .expect("get_audit_log_by_actor failed");
+        assert_eq!(audit_logs.len(), 1);
+        assert_eq!(audit_logs[0].log_id.len(), 12);
+        assert_eq!(audit_logs[0].views, 10);
+        audit_log_id = audit_logs[0].log_id.clone();
 
         let cnt1 = counter_repo
             .get(&tr, &dir, "cnt1")
@@ -203,6 +223,24 @@ async fn main() {
             .await
             .unwrap();
 
+        // Update AuditLog in-place and increment its atomic views from Rust
+        audit_repo
+            .add_audit_log_views(&tr, &dir, &audit_log_id, 5)
+            .await
+            .unwrap();
+        audit_repo
+            .set(
+                &tr,
+                &dir,
+                &AuditLog {
+                    log_id: audit_log_id,
+                    actor: "rust_actor".into(),
+                    tags: vec!["conformance".into(), "from_rust".into()],
+                    views: 0,
+                },
+            )
+            .await
+            .unwrap();
 
         // Apply atomic mutations on cnt1 from Rust
         counter_repo
@@ -248,4 +286,5 @@ async fn main() {
         tr.commit().await.unwrap();
     }
 }
+
 

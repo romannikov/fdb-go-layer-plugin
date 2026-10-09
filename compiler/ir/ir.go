@@ -530,6 +530,9 @@ func BuildSecondaryIndex(
 		if f.Mutation != MutationNone {
 			return SecondaryIndexSpec{}, fmt.Errorf("secondary index field %q in message %s cannot have an atomic mutation", idxFieldName, msgName)
 		}
+		if f.IsVersionstamp {
+			return SecondaryIndexSpec{}, fmt.Errorf("secondary index field %q in message %s cannot be a versionstamp field", idxFieldName, msgName)
+		}
 		idxFields = append(idxFields, f)
 	}
 

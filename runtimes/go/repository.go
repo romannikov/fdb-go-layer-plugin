@@ -187,9 +187,7 @@ func (s *RecordStore) SyncMetadata(ctx context.Context, tr Transaction, metaDir 
 // BytesToVersionstamp converts a 12-byte slice into a complete tuple.Versionstamp.
 func BytesToVersionstamp(b []byte) tuple.Versionstamp {
 	var vs tuple.Versionstamp
-	if len(b) >= 10 {
-		copy(vs.TransactionVersion[:], b[:10])
-	}
+	copy(vs.TransactionVersion[:], b)
 	if len(b) >= 12 {
 		vs.UserVersion = uint16(b[10])<<8 | uint16(b[11])
 	}

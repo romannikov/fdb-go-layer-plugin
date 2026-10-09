@@ -1279,6 +1279,10 @@ pub struct AuditLog {
     pub log_id: Vec<u8>,
     #[prost(string, tag = "2")]
     pub actor: String,
+    #[prost(string, repeated, tag = "3")]
+    pub tags: Vec<String>,
+    #[prost(int64, tag = "4")]
+    pub views: i64,
 }
 
 #[allow(dead_code)]
@@ -1306,9 +1310,33 @@ impl AuditLogRepository {
         entity: &AuditLog,
     ) -> Result<(), fdb_layer::FdbLayerError> {
         let type_id = self.store.get_type_id("AuditLog")?;
-        let key = dir.pack_with_versionstamp(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::Versionstamp::incomplete(self.store.next_user_version())));
-        let value = fdb_layer::prost::Message::encode_to_vec(entity);
+        let user_version = self.store.next_user_version();
+        let key = dir.pack_with_versionstamp(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::Versionstamp::incomplete(user_version)));
+        let value = if !entity.log_id.is_empty() || entity.views != 0 {
+            let clean_entity = AuditLog {
+                log_id: Vec::new(),
+                actor: entity.actor.clone(),
+                tags: entity.tags.clone(),
+                views: 0,
+            };
+            fdb_layer::prost::Message::encode_to_vec(&clean_entity)
+        } else {
+            fdb_layer::prost::Message::encode_to_vec(entity)
+        };
         tr.atomic_op(&key, &value, fdb_layer::MutationType::SetVersionstampedKey);
+        if entity.views != 0 {
+            let field_key = dir.pack_with_versionstamp(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::Versionstamp::incomplete(user_version), 4i64));
+            let buf = (entity.views as u64).to_le_bytes();
+            tr.atomic_op(&field_key, &buf, fdb_layer::MutationType::SetVersionstampedKey);
+        }
+        {
+            let idx_key = dir.pack_with_versionstamp(&(type_id, fdb_layer::INDEX_NAMESPACE, 244111290i64, &entity.actor, fdb_layer::Versionstamp::incomplete(user_version)));
+            tr.atomic_op(&idx_key, &[], fdb_layer::MutationType::SetVersionstampedKey);
+        }
+        for item in &entity.tags {
+            let idx_key = dir.pack_with_versionstamp(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, item, fdb_layer::Versionstamp::incomplete(user_version)));
+            tr.atomic_op(&idx_key, &[], fdb_layer::MutationType::SetVersionstampedKey);
+        }
         Ok(())
     }
 
@@ -1318,14 +1346,36 @@ impl AuditLogRepository {
         dir: &fdb_layer::Subspace,
         pk: &[u8],
     ) -> Result<AuditLog, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
         let type_id = self.store.get_type_id("AuditLog")?;
         let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::bytes_to_versionstamp(&pk[..])));
-        let value_opt = tr.get(&key, false).await?;
+        let field_prefix = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::bytes_to_versionstamp(&pk[..])));
+        let field_range = fdb_layer::prefix_range_option(&field_prefix, None);
+        let val_fut = tr.get(&key, false);
+        let field_fut = tr.get_ranges_keyvalues(field_range, false).try_collect::<Vec<_>>();
+        let (value_opt, field_kvs) = fdb_layer::futures::future::try_join(val_fut, field_fut).await?;
         let value = value_opt.ok_or(fdb_layer::FdbLayerError::NotFound("auditlog"))?;
         let mut entity = <AuditLog as fdb_layer::prost::Message>::decode(value.as_ref())?;
-        if let Ok(tpl) = dir.unpack::<Vec<fdb_layer::Element<'_>>>(&key) {
-            if let Some(vs) = tpl.get(2).and_then(|e| e.as_versionstamp()) {
-                entity.log_id = vs.as_bytes().to_vec();
+        entity.log_id = fdb_layer::bytes_to_versionstamp(pk).as_bytes().to_vec();
+        entity.views = 0;
+        for fkv in &field_kvs {
+            if fkv.value().len() < 8 {
+                continue;
+            }
+            let ftpl = match dir.unpack::<Vec<fdb_layer::Element<'_>>>(fkv.key()) {
+                Ok(t) if !t.is_empty() => t,
+                _ => continue,
+            };
+            let field_num = match ftpl.last().and_then(|e| e.as_i64()) {
+                Some(n) => n,
+                None => continue,
+            };
+            let mut raw_bytes = [0u8; 8];
+            raw_bytes.copy_from_slice(&fkv.value()[..8]);
+            let raw_u64 = u64::from_le_bytes(raw_bytes);
+            match field_num {
+                4 => entity.views = raw_u64 as i64,
+                _ => {}
             }
         }
         Ok(entity)
@@ -1337,14 +1387,60 @@ impl AuditLogRepository {
         dir: &fdb_layer::Subspace,
         entity: &AuditLog,
     ) -> Result<(), fdb_layer::FdbLayerError> {
-        let type_id = self.store.get_type_id("AuditLog")?;
-        if entity.log_id.iter().any(|&b| b != 0) {
-            let old_key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::bytes_to_versionstamp(&entity.log_id[..])));
-            tr.clear(&old_key);
+        if !entity.log_id.is_empty() && entity.log_id.len() != 12 {
+            return Err(fdb_layer::FdbLayerError::Custom("invalid versionstamp length: must be 0 or 12 bytes".into()));
         }
-        let key = dir.pack_with_versionstamp(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::Versionstamp::incomplete(self.store.next_user_version())));
-        let value = fdb_layer::prost::Message::encode_to_vec(entity);
-        tr.atomic_op(&key, &value, fdb_layer::MutationType::SetVersionstampedKey);
+        if !entity.log_id.iter().any(|&b| b != 0) {
+            return self.create(tr, dir, entity).await;
+        }
+        let type_id = self.store.get_type_id("AuditLog")?;
+        let mut old: Option<AuditLog> = None;
+        let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::bytes_to_versionstamp(&entity.log_id[..])));
+        if let Some(old_val) = tr.get(&key, false).await? {
+            let mut decoded = <AuditLog as fdb_layer::prost::Message>::decode(old_val.as_ref())?;
+            decoded.log_id = entity.log_id.clone();
+            old = Some(decoded);
+        }
+        let value = if !entity.log_id.is_empty() || entity.views != 0 {
+            let clean_entity = AuditLog {
+                log_id: Vec::new(),
+                actor: entity.actor.clone(),
+                tags: entity.tags.clone(),
+                views: 0,
+            };
+            fdb_layer::prost::Message::encode_to_vec(&clean_entity)
+        } else {
+            fdb_layer::prost::Message::encode_to_vec(entity)
+        };
+        tr.set(&key, &value);
+        let idx_changed = match old {
+            Some(ref old) => old.actor != entity.actor,
+            None => true,
+        };
+        if idx_changed {
+            if let Some(ref old) = old {
+                tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 244111290i64, &old.actor, fdb_layer::bytes_to_versionstamp(&old.log_id[..]))));
+            }
+            tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 244111290i64, &entity.actor, fdb_layer::bytes_to_versionstamp(&entity.log_id[..]))), &[]);
+        }
+        if let Some(ref old) = old {
+            let old_set: std::collections::HashSet<_> = old.tags.iter().collect();
+            let new_set: std::collections::HashSet<_> = entity.tags.iter().collect();
+            for item in &old.tags {
+                if !new_set.contains(item) {
+                    tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, item, fdb_layer::bytes_to_versionstamp(&old.log_id[..]))));
+                }
+            }
+            for item in &entity.tags {
+                if !old_set.contains(item) {
+                    tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, item, fdb_layer::bytes_to_versionstamp(&entity.log_id[..]))), &[]);
+                }
+            }
+        } else {
+            for item in &entity.tags {
+                tr.set(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, item, fdb_layer::bytes_to_versionstamp(&entity.log_id[..]))), &[]);
+            }
+        }
         Ok(())
     }
 
@@ -1356,7 +1452,19 @@ impl AuditLogRepository {
     ) -> Result<(), fdb_layer::FdbLayerError> {
         let type_id = self.store.get_type_id("AuditLog")?;
         let key = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::bytes_to_versionstamp(&pk[..])));
+        if let Some(value) = tr.get(&key, false).await? {
+            let mut entity = <AuditLog as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            entity.log_id = pk.to_vec();
+            tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 244111290i64, &entity.actor, fdb_layer::bytes_to_versionstamp(&entity.log_id[..]))));
+            for item in &entity.tags {
+                tr.clear(&dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, item, fdb_layer::bytes_to_versionstamp(&entity.log_id[..]))));
+            }
+        }
         tr.clear(&key);
+        {
+            let field_key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::bytes_to_versionstamp(&pk[..]), 4i64));
+            tr.clear(&field_key);
+        }
         Ok(())
     }
 
@@ -1366,24 +1474,69 @@ impl AuditLogRepository {
         dir: &fdb_layer::Subspace,
         ids: &[Vec<fdb_layer::Element<'_>>],
     ) -> Result<std::collections::HashMap<String, AuditLog>, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
         let type_id = self.store.get_type_id("AuditLog")?;
         let mut result = std::collections::HashMap::new();
         let mut val_futures = Vec::with_capacity(ids.len());
+        let mut field_futures = Vec::with_capacity(ids.len());
         for id in ids {
             let mut key_tpl = Vec::with_capacity(2 + id.len());
             key_tpl.push(fdb_layer::Element::Int(type_id));
             key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
-            key_tpl.extend(id.iter().cloned());
+            for (pk_idx, el) in id.iter().enumerate() {
+                match (pk_idx, el) {
+                    (0, fdb_layer::Element::Bytes(b)) => {
+                        key_tpl.push(fdb_layer::Element::Versionstamp(fdb_layer::bytes_to_versionstamp(b.as_ref())));
+                    }
+                    _ => key_tpl.push(el.clone()),
+                }
+            }
             let key = dir.pack(&key_tpl);
             val_futures.push(tr.get(&key, false));
+            let mut field_tpl = Vec::with_capacity(2 + id.len());
+            field_tpl.push(fdb_layer::Element::Int(type_id));
+            field_tpl.push(fdb_layer::Element::Int(fdb_layer::FIELD_NAMESPACE));
+            field_tpl.extend(key_tpl.iter().skip(2).cloned());
+            let field_prefix = dir.pack(&field_tpl);
+            let field_range = fdb_layer::prefix_range_option(&field_prefix, None);
+            field_futures.push(tr.get_ranges_keyvalues(field_range, false).try_collect::<Vec<_>>());
         }
         let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        let field_slices = fdb_layer::futures::future::try_join_all(field_futures).await?;
         for (i, value_opt) in values.into_iter().enumerate() {
             let value = match value_opt {
                 Some(v) => v,
                 None => continue,
             };
-            let entity = <AuditLog as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            let mut entity = <AuditLog as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            if let Some(el) = ids[i].get(0) {
+                match el {
+                    fdb_layer::Element::Versionstamp(vs) => entity.log_id = vs.as_bytes().to_vec(),
+                    fdb_layer::Element::Bytes(b) => entity.log_id = b.as_ref().to_vec(),
+                    _ => {}
+                }
+            }
+            entity.views = 0;
+            for fkv in &field_slices[i] {
+                if fkv.value().len() < 8 {
+                    continue;
+                }
+                let ftpl = match dir.unpack::<Vec<fdb_layer::Element<'_>>>(fkv.key()) {
+                    Ok(t) if !t.is_empty() => t,
+                    _ => continue,
+                };
+                let field_num = match ftpl.last().and_then(|e| e.as_i64()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let mut raw_bytes = [0u8; 8];
+                raw_bytes.copy_from_slice(&fkv.value()[..8]);
+                let raw_u64 = u64::from_le_bytes(raw_bytes);
+                match field_num {
+                    4 => entity.views = raw_u64 as i64,
+                    _ => {}
+                }
+            }
             result.insert(fdb_layer::format_tuple(&ids[i]), entity);
         }
         Ok(result)
@@ -1401,7 +1554,14 @@ impl AuditLogRepository {
         let mut begin_tpl = Vec::with_capacity(2 + opts.begin.len());
         begin_tpl.push(fdb_layer::Element::Int(type_id));
         begin_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
-        begin_tpl.extend(opts.begin.iter().cloned());
+        for (pk_idx, el) in opts.begin.iter().enumerate() {
+            match (pk_idx, el) {
+                (0, fdb_layer::Element::Bytes(b)) => {
+                    begin_tpl.push(fdb_layer::Element::Versionstamp(fdb_layer::bytes_to_versionstamp(b.as_ref())));
+                }
+                _ => begin_tpl.push(el.clone()),
+            }
+        }
         let begin = dir.pack(&begin_tpl);
         let data_prefix = dir.pack(&(type_id, fdb_layer::DATA_NAMESPACE));
         let (_, end) = fdb_layer::prefix_range(&data_prefix);
@@ -1414,8 +1574,13 @@ impl AuditLogRepository {
             ..fdb_layer::RangeOption::default()
         };
         let kvs: Vec<_> = tr.get_ranges_keyvalues(range_opt, false).try_collect().await?;
-        let mut next_key_raw: Option<Vec<u8>> = None;
-        for kv in &kvs {
+        for (i, kv) in kvs.iter().enumerate() {
+            if opts.limit > 0 && i == opts.limit {
+                let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;
+                result.has_more = true;
+                result.next_key = tpl.into_iter().skip(2).map(|e| e.into_owned()).collect();
+                break;
+            }
             let mut entity = <AuditLog as fdb_layer::prost::Message>::decode(kv.value())?;
             if let Ok(tpl) = dir.unpack::<Vec<fdb_layer::Element<'_>>>(kv.key()) {
                 if let Some(vs) = tpl.get(2).and_then(|e| e.as_versionstamp()) {
@@ -1423,20 +1588,217 @@ impl AuditLogRepository {
                 }
             }
             result.items.push(entity);
-            next_key_raw = Some(kv.key().to_vec());
-            if opts.limit > 0 && result.items.len() > opts.limit {
-                break;
-            }
         }
-        result.has_more = opts.limit > 0 && result.items.len() > opts.limit;
-        if result.has_more {
-            if let Some(ref nk) = next_key_raw {
-                let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(nk)?;
-                result.next_key = tpl.into_iter().skip(2).map(|e| e.into_owned()).collect();
+        if !result.items.is_empty() {
+            let first = &result.items[0];
+            let last = &result.items[result.items.len() - 1];
+            let field_begin = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::bytes_to_versionstamp(&first.log_id[..])));
+            let field_end_prefix = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::bytes_to_versionstamp(&last.log_id[..])));
+            let (_, field_end) = fdb_layer::prefix_range(&field_end_prefix);
+            let mut idx_by_pk = std::collections::HashMap::with_capacity(result.items.len());
+            for (idx, entity) in result.items.iter_mut().enumerate() {
+                entity.views = 0;
+                let pk_bytes = fdb_layer::foundationdb_tuple::pack(&(fdb_layer::bytes_to_versionstamp(&entity.log_id[..]),));
+                idx_by_pk.insert(pk_bytes, idx);
             }
-            result.items.truncate(opts.limit);
+            let field_range = fdb_layer::RangeOption {
+                begin: fdb_layer::KeySelector::first_greater_or_equal(field_begin),
+                end: fdb_layer::KeySelector::first_greater_or_equal(field_end),
+                ..fdb_layer::RangeOption::default()
+            };
+            let field_kvs: Vec<_> = tr.get_ranges_keyvalues(field_range, false).try_collect().await?;
+            let pk_len = 1usize;
+            for fkv in &field_kvs {
+                if fkv.value().len() < 8 {
+                    continue;
+                }
+                let ftpl = match dir.unpack::<Vec<fdb_layer::Element<'_>>>(fkv.key()) {
+                    Ok(t) if t.len() >= 3 + pk_len => t,
+                    _ => continue,
+                };
+                let pk_slice = &ftpl[2..2 + pk_len];
+                let pk_bytes = fdb_layer::foundationdb_tuple::pack(&pk_slice);
+                let item_idx = match idx_by_pk.get(&pk_bytes) {
+                    Some(&i) => i,
+                    None => continue,
+                };
+                let field_num = match ftpl[2 + pk_len].as_i64() {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let mut raw_bytes = [0u8; 8];
+                raw_bytes.copy_from_slice(&fkv.value()[..8]);
+                let raw_u64 = u64::from_le_bytes(raw_bytes);
+                let entity = &mut result.items[item_idx];
+                match field_num {
+                    4 => entity.views = raw_u64 as i64,
+                    _ => {}
+                }
+            }
         }
         Ok(result)
+    }
+
+    pub async fn get_audit_log_by_actor(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        actor: &str,
+    ) -> Result<Vec<AuditLog>, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("AuditLog")?;
+        let index_key_prefix = dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 244111290i64, &actor));
+        let index_range = fdb_layer::prefix_range_option(&index_key_prefix, None);
+        let kvs: Vec<_> = tr.get_ranges_keyvalues(index_range, false).try_collect().await?;
+        let mut val_futures = Vec::with_capacity(kvs.len());
+        let mut field_futures = Vec::with_capacity(kvs.len());
+        let mut unpacked_tpls: Vec<Vec<fdb_layer::Element<'_>>> = Vec::with_capacity(kvs.len());
+        for kv in &kvs {
+            let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;
+            let pk_index_start = 3 + 1usize;
+            if tpl.len() <= pk_index_start {
+                continue;
+            }
+            let pk_tuple = &tpl[pk_index_start..];
+            let mut key_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend_from_slice(pk_tuple);
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+            let mut field_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            field_tpl.push(fdb_layer::Element::Int(type_id));
+            field_tpl.push(fdb_layer::Element::Int(fdb_layer::FIELD_NAMESPACE));
+            field_tpl.extend_from_slice(pk_tuple);
+            let field_prefix = dir.pack(&field_tpl);
+            let field_range = fdb_layer::prefix_range_option(&field_prefix, None);
+            field_futures.push(tr.get_ranges_keyvalues(field_range, false).try_collect::<Vec<_>>());
+            unpacked_tpls.push(tpl);
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        let field_slices = fdb_layer::futures::future::try_join_all(field_futures).await?;
+        let mut entities = Vec::with_capacity(values.len());
+        for (i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let mut entity = <AuditLog as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            if let Some(vs) = unpacked_tpls.get(i).and_then(|t| t.get(4)).and_then(|e| e.as_versionstamp()) {
+                entity.log_id = vs.as_bytes().to_vec();
+            }
+            entity.views = 0;
+            for fkv in &field_slices[i] {
+                if fkv.value().len() < 8 {
+                    continue;
+                }
+                let ftpl = match dir.unpack::<Vec<fdb_layer::Element<'_>>>(fkv.key()) {
+                    Ok(t) if !t.is_empty() => t,
+                    _ => continue,
+                };
+                let field_num = match ftpl.last().and_then(|e| e.as_i64()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let mut raw_bytes = [0u8; 8];
+                raw_bytes.copy_from_slice(&fkv.value()[..8]);
+                let raw_u64 = u64::from_le_bytes(raw_bytes);
+                match field_num {
+                    4 => entity.views = raw_u64 as i64,
+                    _ => {}
+                }
+            }
+            entities.push(entity);
+        }
+        Ok(entities)
+    }
+
+    pub async fn get_audit_log_by_tags(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        tags: &str,
+    ) -> Result<Vec<AuditLog>, fdb_layer::FdbLayerError> {
+        use fdb_layer::futures::TryStreamExt;
+        let type_id = self.store.get_type_id("AuditLog")?;
+        let index_key_prefix = dir.pack(&(type_id, fdb_layer::INDEX_NAMESPACE, 4095142816i64, &tags));
+        let index_range = fdb_layer::prefix_range_option(&index_key_prefix, None);
+        let kvs: Vec<_> = tr.get_ranges_keyvalues(index_range, false).try_collect().await?;
+        let mut val_futures = Vec::with_capacity(kvs.len());
+        let mut field_futures = Vec::with_capacity(kvs.len());
+        let mut unpacked_tpls: Vec<Vec<fdb_layer::Element<'_>>> = Vec::with_capacity(kvs.len());
+        for kv in &kvs {
+            let tpl: Vec<fdb_layer::Element<'_>> = dir.unpack(kv.key())?;
+            let pk_index_start = 3 + 1usize;
+            if tpl.len() <= pk_index_start {
+                continue;
+            }
+            let pk_tuple = &tpl[pk_index_start..];
+            let mut key_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            key_tpl.push(fdb_layer::Element::Int(type_id));
+            key_tpl.push(fdb_layer::Element::Int(fdb_layer::DATA_NAMESPACE));
+            key_tpl.extend_from_slice(pk_tuple);
+            let key = dir.pack(&key_tpl);
+            val_futures.push(tr.get(&key, false));
+            let mut field_tpl = Vec::with_capacity(2 + pk_tuple.len());
+            field_tpl.push(fdb_layer::Element::Int(type_id));
+            field_tpl.push(fdb_layer::Element::Int(fdb_layer::FIELD_NAMESPACE));
+            field_tpl.extend_from_slice(pk_tuple);
+            let field_prefix = dir.pack(&field_tpl);
+            let field_range = fdb_layer::prefix_range_option(&field_prefix, None);
+            field_futures.push(tr.get_ranges_keyvalues(field_range, false).try_collect::<Vec<_>>());
+            unpacked_tpls.push(tpl);
+        }
+        let values = fdb_layer::futures::future::try_join_all(val_futures).await?;
+        let field_slices = fdb_layer::futures::future::try_join_all(field_futures).await?;
+        let mut entities = Vec::with_capacity(values.len());
+        for (i, value_opt) in values.into_iter().enumerate() {
+            let value = match value_opt {
+                Some(v) => v,
+                None => continue,
+            };
+            let mut entity = <AuditLog as fdb_layer::prost::Message>::decode(value.as_ref())?;
+            if let Some(vs) = unpacked_tpls.get(i).and_then(|t| t.get(4)).and_then(|e| e.as_versionstamp()) {
+                entity.log_id = vs.as_bytes().to_vec();
+            }
+            entity.views = 0;
+            for fkv in &field_slices[i] {
+                if fkv.value().len() < 8 {
+                    continue;
+                }
+                let ftpl = match dir.unpack::<Vec<fdb_layer::Element<'_>>>(fkv.key()) {
+                    Ok(t) if !t.is_empty() => t,
+                    _ => continue,
+                };
+                let field_num = match ftpl.last().and_then(|e| e.as_i64()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let mut raw_bytes = [0u8; 8];
+                raw_bytes.copy_from_slice(&fkv.value()[..8]);
+                let raw_u64 = u64::from_le_bytes(raw_bytes);
+                match field_num {
+                    4 => entity.views = raw_u64 as i64,
+                    _ => {}
+                }
+            }
+            entities.push(entity);
+        }
+        Ok(entities)
+    }
+
+    pub async fn add_audit_log_views(
+        &self,
+        tr: &fdb_layer::Transaction,
+        dir: &fdb_layer::Subspace,
+        log_id: &[u8],
+        val: i64,
+    ) -> Result<(), fdb_layer::FdbLayerError> {
+        let type_id = self.store.get_type_id("AuditLog")?;
+        let key = dir.pack(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::bytes_to_versionstamp(&log_id[..]), 4i64));
+        let buf = (val as u64).to_le_bytes();
+        tr.atomic_op(&key, &buf, fdb_layer::MutationType::Add);
+        Ok(())
     }
 
 }

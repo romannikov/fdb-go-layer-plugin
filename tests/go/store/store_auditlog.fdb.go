@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -33,6 +34,9 @@ type AuditLogRepository interface {
 
 	BatchGetAuditLog(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*AuditLog, error)
 	ListAuditLog(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error)
+	GetAuditLogByActor(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Actor string) ([]*AuditLog, error)
+	GetAuditLogByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string) ([]*AuditLog, error)
+	AddAuditLogViews(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, LogId []byte, val int64) error
 }
 
 type auditlogRepository struct {
@@ -54,17 +58,58 @@ func (r *auditlogRepository) Create(ctx context.Context, tr fdblayer.Transaction
 		return err
 	}
 
-	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, tuple.IncompleteVersionstamp(r.store.NextUserVersion())})
+	userVersion := r.store.NextUserVersion()
+	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, tuple.IncompleteVersionstamp(userVersion)})
 	if err != nil {
 		return err
 	}
 
-	value, err := proto.Marshal(entity)
+	// Marshal without mutating the caller's struct in-place.
+	marshalTarget := entity
+	if len(entity.LogId) > 0 || entity.Views != 0 {
+		marshalTarget = &AuditLog{
+			Actor: entity.Actor,
+			Tags:  entity.Tags,
+		}
+	}
+	value, err := proto.Marshal(marshalTarget)
 	if err != nil {
 		return err
 	}
 
 	tr.SetVersionstampedKey(key, value)
+
+	// Store non-zero initial atomic fields in separate keys
+	if entity.Views != 0 {
+		fieldKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.FieldNamespace, tuple.IncompleteVersionstamp(userVersion), 4})
+		if err != nil {
+			return err
+		}
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(entity.Views))
+		tr.SetVersionstampedKey(fieldKey, buf)
+	}
+
+	// Standard index
+	{
+		idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.IndexNamespace, 244111290, entity.Actor, tuple.IncompleteVersionstamp(userVersion)})
+		if err != nil {
+			return err
+		}
+		tr.SetVersionstampedKey(idxKey, []byte{})
+	}
+
+	// Fan-out index
+	for _, item := range entity.Tags {
+		idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+			item,
+			tuple.IncompleteVersionstamp(userVersion),
+		})
+		if err != nil {
+			return err
+		}
+		tr.SetVersionstampedKey(idxKey, []byte{})
+	}
 
 	return nil
 }
@@ -81,6 +126,12 @@ func (r *auditlogRepository) Get(ctx context.Context, tr fdb.ReadTransaction, di
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, fdblayer.BytesToVersionstamp(pk)})
 	valueFuture := tr.Get(key)
+	// Issue a single prefix range read for all atomic fields concurrently with the primary record read
+	fieldPrefixRange, err := fdb.PrefixRange(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, fdblayer.BytesToVersionstamp(pk)}))
+	if err != nil {
+		return nil, err
+	}
+	fieldFuture := fdblayer.GetRange(tr, fieldPrefixRange, fdb.RangeOptions{})
 	value := valueFuture.MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("auditlog not found")
@@ -91,11 +142,23 @@ func (r *auditlogRepository) Get(ctx context.Context, tr fdb.ReadTransaction, di
 		return nil, err
 	}
 
-	if tpl, unpackErr := dir.Unpack(key); unpackErr == nil {
-		if len(tpl) > 0+2 {
-			if vs, ok := tpl[0+2].(tuple.Versionstamp); ok {
-				entity.LogId = vs.Bytes()
-			}
+	entity.LogId = fdblayer.BytesToVersionstamp(pk).Bytes()
+	entity.Views = 0
+	for _, fkv := range fieldFuture.GetSliceOrPanic() {
+		if len(fkv.Value) < 8 {
+			continue
+		}
+		ftpl, err := dir.Unpack(fkv.Key)
+		if err != nil || len(ftpl) == 0 {
+			continue
+		}
+		fieldNum, ok := ftpl[len(ftpl)-1].(int64)
+		if !ok {
+			continue
+		}
+		switch fieldNum {
+		case 4:
+			entity.Views = int64(binary.LittleEndian.Uint64(fkv.Value))
 		}
 	}
 	return entity, nil
@@ -106,13 +169,9 @@ func (r *auditlogRepository) Set(ctx context.Context, tr fdblayer.Transaction, d
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	typeID, err := r.store.GetTypeID("AuditLog")
-	if err != nil {
-		return err
+	if len(entity.LogId) != 0 && len(entity.LogId) != 12 {
+		return fmt.Errorf("invalid versionstamp length %d for LogId: must be 0 or 12 bytes", len(entity.LogId))
 	}
-
-	// If the entity already has a versionstamp, delete the old versionstamped record.
-	// (Since the primary key contains the versionstamp, an update changes the key itself).
 	hasOldVS := false
 	for _, b := range entity.LogId {
 		if b != 0 {
@@ -120,22 +179,85 @@ func (r *auditlogRepository) Set(ctx context.Context, tr fdblayer.Transaction, d
 			break
 		}
 	}
-	if hasOldVS {
-		oldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, fdblayer.BytesToVersionstamp(entity.LogId)})
-		tr.Clear(oldKey)
+	if !hasOldVS {
+		return r.Create(ctx, tr, dir, entity)
 	}
 
-	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, tuple.IncompleteVersionstamp(r.store.NextUserVersion())})
+	typeID, err := r.store.GetTypeID("AuditLog")
 	if err != nil {
 		return err
 	}
 
-	value, err := proto.Marshal(entity)
+	var old *AuditLog
+
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, fdblayer.BytesToVersionstamp(entity.LogId)})
+
+	if oldValue := tr.Get(key).MustGet(); oldValue != nil {
+		var unmarshaled AuditLog
+		if err := proto.Unmarshal(oldValue, &unmarshaled); err != nil {
+			return fmt.Errorf("failed to unmarshal existing auditlog: %w", err)
+		}
+		unmarshaled.LogId = entity.LogId
+		old = &unmarshaled
+	}
+
+	// Marshal without mutating the caller's struct in-place.
+	marshalTarget := entity
+	if len(entity.LogId) > 0 || entity.Views != 0 {
+		marshalTarget = &AuditLog{
+			Actor: entity.Actor,
+			Tags:  entity.Tags,
+		}
+	}
+	value, err := proto.Marshal(marshalTarget)
 	if err != nil {
 		return err
 	}
 
-	tr.SetVersionstampedKey(key, value)
+	tr.Set(key, value)
+
+	// Standard index
+	if old == nil || old.Actor != entity.Actor {
+		if old != nil {
+			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 244111290, old.Actor, fdblayer.BytesToVersionstamp(old.LogId)}))
+		}
+		tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 244111290, entity.Actor, fdblayer.BytesToVersionstamp(entity.LogId)}), []byte{})
+	}
+
+	// Fan-out index
+	if old != nil {
+		oldSet := make(map[string]struct{}, len(old.Tags))
+		for _, item := range old.Tags {
+			oldSet[item] = struct{}{}
+		}
+		newSet := make(map[string]struct{}, len(entity.Tags))
+		for _, item := range entity.Tags {
+			newSet[item] = struct{}{}
+		}
+		for _, item := range old.Tags {
+			if _, keep := newSet[item]; !keep {
+				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+					item,
+					fdblayer.BytesToVersionstamp(old.LogId),
+				}))
+			}
+		}
+		for _, item := range entity.Tags {
+			if _, existed := oldSet[item]; !existed {
+				tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+					item,
+					fdblayer.BytesToVersionstamp(entity.LogId),
+				}), []byte{})
+			}
+		}
+	} else {
+		for _, item := range entity.Tags {
+			tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+				item,
+				fdblayer.BytesToVersionstamp(entity.LogId),
+			}), []byte{})
+		}
+	}
 
 	return nil
 }
@@ -151,8 +273,30 @@ func (r *auditlogRepository) Delete(ctx context.Context, tr fdblayer.Transaction
 	}
 
 	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, fdblayer.BytesToVersionstamp(pk)})
+	value := tr.Get(key).MustGet()
+	if value != nil {
+		entity := &AuditLog{}
+		if err := proto.Unmarshal(value, entity); err != nil {
+			return fmt.Errorf("failed to unmarshal existing auditlog: %w", err)
+		}
+		entity.LogId = pk
+		// Standard index
+		tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 244111290, entity.Actor, fdblayer.BytesToVersionstamp(entity.LogId)}))
+		// Fan-out index
+		for _, item := range entity.Tags {
+			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+				item,
+				fdblayer.BytesToVersionstamp(entity.LogId),
+			}))
+		}
+	}
 	tr.Clear(key)
 
+	// Clear atomic fields
+	{
+		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, fdblayer.BytesToVersionstamp(pk), 4})
+		tr.Clear(fieldKey)
+	}
 	return nil
 }
 
@@ -168,6 +312,7 @@ func (r *auditlogRepository) BatchGetAuditLog(ctx context.Context, tr fdb.ReadTr
 
 	result := make(map[string]*AuditLog)
 	futures := make([]fdb.FutureByteSlice, len(ids))
+	fieldFutures := make([]fdblayer.RangeFuture, len(ids))
 
 	for i, id := range ids {
 		if err := ctx.Err(); err != nil {
@@ -177,8 +322,27 @@ func (r *auditlogRepository) BatchGetAuditLog(ctx context.Context, tr fdb.ReadTr
 		keyTpl[0] = typeID
 		keyTpl[1] = fdblayer.DataNamespace
 		copy(keyTpl[2:], id)
+		if len(id) > 0 {
+			if rawVS, ok := id[0].([]byte); ok {
+				keyTpl[2+0] = fdblayer.BytesToVersionstamp(rawVS)
+			}
+		}
 		key := dir.Pack(keyTpl)
 		futures[i] = tr.Get(key)
+		fieldTpl := make(tuple.Tuple, 2+len(id))
+		fieldTpl[0] = typeID
+		fieldTpl[1] = fdblayer.FieldNamespace
+		copy(fieldTpl[2:], id)
+		if len(id) > 0 {
+			if rawVS, ok := id[0].([]byte); ok {
+				fieldTpl[2+0] = fdblayer.BytesToVersionstamp(rawVS)
+			}
+		}
+		fieldRange, err := fdb.PrefixRange(dir.Pack(fieldTpl))
+		if err != nil {
+			return nil, err
+		}
+		fieldFutures[i] = fdblayer.GetRange(tr, fieldRange, fdb.RangeOptions{})
 	}
 
 	for i, future := range futures {
@@ -193,6 +357,32 @@ func (r *auditlogRepository) BatchGetAuditLog(ctx context.Context, tr fdb.ReadTr
 		err := proto.Unmarshal(value, entity)
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
+		}
+		if len(ids[i]) > 0 {
+			switch v := ids[i][0].(type) {
+			case tuple.Versionstamp:
+				entity.LogId = v.Bytes()
+			case []byte:
+				entity.LogId = append([]byte(nil), v...)
+			}
+		}
+		entity.Views = 0
+		for _, fkv := range fieldFutures[i].GetSliceOrPanic() {
+			if len(fkv.Value) < 8 {
+				continue
+			}
+			ftpl, err := dir.Unpack(fkv.Key)
+			if err != nil || len(ftpl) == 0 {
+				continue
+			}
+			fieldNum, ok := ftpl[len(ftpl)-1].(int64)
+			if !ok {
+				continue
+			}
+			switch fieldNum {
+			case 4:
+				entity.Views = int64(binary.LittleEndian.Uint64(fkv.Value))
+			}
 		}
 		result[ids[i].String()] = entity
 	}
@@ -218,6 +408,11 @@ func (r *auditlogRepository) ListAuditLog(ctx context.Context, tr fdb.ReadTransa
 	beginTpl[0] = typeID
 	beginTpl[1] = fdblayer.DataNamespace
 	copy(beginTpl[2:], opts.Begin)
+	if len(opts.Begin) > 0 {
+		if rawVS, ok := opts.Begin[0].([]byte); ok {
+			beginTpl[2+0] = fdblayer.BytesToVersionstamp(rawVS)
+		}
+	}
 	begin := dir.Pack(beginTpl)
 
 	// Scan only data keys under typeID namespace.
@@ -239,10 +434,19 @@ func (r *auditlogRepository) ListAuditLog(ctx context.Context, tr fdb.ReadTransa
 		End:   dataPrefixRange.End,
 	}, rangeOpts).GetSliceOrPanic()
 
-	var nextKey fdb.Key
-	for _, kv := range kvs {
+	for i, kv := range kvs {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if opts.Limit > 0 && i == opts.Limit {
+			tpl, err := dir.Unpack(kv.Key)
+			if err != nil {
+				return nil, fmt.Errorf("failed to unpack next key: %w", err)
+			}
+			// Remove typeID and DataNamespace to return just the PK tuple
+			result.HasMore = true
+			result.NextKey = tpl[2:]
+			break
 		}
 
 		entity := &AuditLog{}
@@ -258,24 +462,253 @@ func (r *auditlogRepository) ListAuditLog(ctx context.Context, tr fdb.ReadTransa
 			}
 		}
 		result.Items = append(result.Items, entity)
-		nextKey = kv.Key
-
-		// Stop once we have enough items for pagination check
-		if opts.Limit > 0 && len(result.Items) > opts.Limit {
-			break
-		}
 	}
 
-	result.HasMore = opts.Limit > 0 && len(result.Items) > opts.Limit
-	if result.HasMore {
-		tpl, err := dir.Unpack(nextKey)
+	// Populate atomic fields for all returned items in a single range read
+	if len(result.Items) > 0 {
+		first := result.Items[0]
+		last := result.Items[len(result.Items)-1]
+		fieldBegin := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, fdblayer.BytesToVersionstamp(first.LogId)})
+		fieldEndPrefix, err := fdb.PrefixRange(dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, fdblayer.BytesToVersionstamp(last.LogId)}))
 		if err != nil {
-			return nil, fmt.Errorf("failed to unpack next key: %w", err)
+			return nil, err
 		}
-		// Remove typeID and DataNamespace to return just the PK tuple
-		result.NextKey = tpl[2:]
-		result.Items = result.Items[:opts.Limit]
+		itemByPK := make(map[string]*AuditLog, len(result.Items))
+		for _, entity := range result.Items {
+			entity.Views = 0
+			pkKey := tuple.Tuple{fdblayer.BytesToVersionstamp(entity.LogId)}.String()
+			itemByPK[pkKey] = entity
+		}
+		fieldKVs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: fieldBegin, End: fieldEndPrefix.End}, fdb.RangeOptions{}).GetSliceOrPanic()
+		pkLen := 1
+		for _, fkv := range fieldKVs {
+			if len(fkv.Value) < 8 {
+				continue
+			}
+			ftpl, err := dir.Unpack(fkv.Key)
+			if err != nil || len(ftpl) < 3+pkLen {
+				continue
+			}
+			entity, ok := itemByPK[ftpl[2:2+pkLen].String()]
+			if !ok {
+				continue
+			}
+			fieldNum, ok := ftpl[2+pkLen].(int64)
+			if !ok {
+				continue
+			}
+			switch fieldNum {
+			case 4:
+				entity.Views = int64(binary.LittleEndian.Uint64(fkv.Value))
+			}
+		}
 	}
 
 	return result, nil
+}
+
+// GetAuditLogByActor retrieves AuditLog entities by their Actor index.
+func (r *auditlogRepository) GetAuditLogByActor(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Actor string) ([]*AuditLog, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	typeID, err := r.store.GetTypeID("AuditLog")
+	if err != nil {
+		return nil, err
+	}
+
+	entities := []*AuditLog{}
+	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 244111290, Actor})
+	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
+	if err != nil {
+		return nil, err
+	}
+	kvs := fdblayer.GetRange(tr, indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
+	futures := make([]fdb.FutureByteSlice, len(kvs))
+	pkTuples := make([]tuple.Tuple, len(kvs))
+	fieldFutures := make([]fdblayer.RangeFuture, len(kvs))
+	for i, kv := range kvs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		tpl, err := dir.Unpack(kv.Key)
+		if err != nil {
+			return nil, err
+		}
+		pkIndexStart := 3 + 1
+		if len(tpl) <= pkIndexStart {
+			continue
+		}
+		pkTuple := tpl[pkIndexStart:]
+		pkTuples[i] = pkTuple
+		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
+		keyTpl[0] = typeID
+		keyTpl[1] = fdblayer.DataNamespace
+		copy(keyTpl[2:], pkTuple)
+		key := dir.Pack(keyTpl)
+		futures[i] = tr.Get(key)
+		fieldTpl := make(tuple.Tuple, 2+len(pkTuple))
+		fieldTpl[0] = typeID
+		fieldTpl[1] = fdblayer.FieldNamespace
+		copy(fieldTpl[2:], pkTuple)
+		fieldRange, err := fdb.PrefixRange(dir.Pack(fieldTpl))
+		if err != nil {
+			return nil, err
+		}
+		fieldFutures[i] = fdblayer.GetRange(tr, fieldRange, fdb.RangeOptions{})
+	}
+	for i, future := range futures {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if future == nil {
+			continue
+		}
+		value := future.MustGet()
+		if value == nil {
+			continue
+		}
+		entity := &AuditLog{}
+		err = proto.Unmarshal(value, entity)
+		if err != nil {
+			return nil, err
+		}
+		if len(pkTuples[i]) > 0 {
+			if vs, ok := pkTuples[i][0].(tuple.Versionstamp); ok {
+				entity.LogId = vs.Bytes()
+			}
+		}
+		entity.Views = 0
+		for _, fkv := range fieldFutures[i].GetSliceOrPanic() {
+			if len(fkv.Value) < 8 {
+				continue
+			}
+			ftpl, err := dir.Unpack(fkv.Key)
+			if err != nil || len(ftpl) == 0 {
+				continue
+			}
+			fieldNum, ok := ftpl[len(ftpl)-1].(int64)
+			if !ok {
+				continue
+			}
+			switch fieldNum {
+			case 4:
+				entity.Views = int64(binary.LittleEndian.Uint64(fkv.Value))
+			}
+		}
+		entities = append(entities, entity)
+	}
+	return entities, nil
+}
+
+// GetAuditLogByTags retrieves AuditLog entities by their Tags index.
+func (r *auditlogRepository) GetAuditLogByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string) ([]*AuditLog, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	typeID, err := r.store.GetTypeID("AuditLog")
+	if err != nil {
+		return nil, err
+	}
+
+	entities := []*AuditLog{}
+	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816, Tags})
+	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
+	if err != nil {
+		return nil, err
+	}
+	kvs := fdblayer.GetRange(tr, indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
+	futures := make([]fdb.FutureByteSlice, len(kvs))
+	pkTuples := make([]tuple.Tuple, len(kvs))
+	fieldFutures := make([]fdblayer.RangeFuture, len(kvs))
+	for i, kv := range kvs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		tpl, err := dir.Unpack(kv.Key)
+		if err != nil {
+			return nil, err
+		}
+		pkIndexStart := 3 + 1
+		if len(tpl) <= pkIndexStart {
+			continue
+		}
+		pkTuple := tpl[pkIndexStart:]
+		pkTuples[i] = pkTuple
+		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
+		keyTpl[0] = typeID
+		keyTpl[1] = fdblayer.DataNamespace
+		copy(keyTpl[2:], pkTuple)
+		key := dir.Pack(keyTpl)
+		futures[i] = tr.Get(key)
+		fieldTpl := make(tuple.Tuple, 2+len(pkTuple))
+		fieldTpl[0] = typeID
+		fieldTpl[1] = fdblayer.FieldNamespace
+		copy(fieldTpl[2:], pkTuple)
+		fieldRange, err := fdb.PrefixRange(dir.Pack(fieldTpl))
+		if err != nil {
+			return nil, err
+		}
+		fieldFutures[i] = fdblayer.GetRange(tr, fieldRange, fdb.RangeOptions{})
+	}
+	for i, future := range futures {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if future == nil {
+			continue
+		}
+		value := future.MustGet()
+		if value == nil {
+			continue
+		}
+		entity := &AuditLog{}
+		err = proto.Unmarshal(value, entity)
+		if err != nil {
+			return nil, err
+		}
+		if len(pkTuples[i]) > 0 {
+			if vs, ok := pkTuples[i][0].(tuple.Versionstamp); ok {
+				entity.LogId = vs.Bytes()
+			}
+		}
+		entity.Views = 0
+		for _, fkv := range fieldFutures[i].GetSliceOrPanic() {
+			if len(fkv.Value) < 8 {
+				continue
+			}
+			ftpl, err := dir.Unpack(fkv.Key)
+			if err != nil || len(ftpl) == 0 {
+				continue
+			}
+			fieldNum, ok := ftpl[len(ftpl)-1].(int64)
+			if !ok {
+				continue
+			}
+			switch fieldNum {
+			case 4:
+				entity.Views = int64(binary.LittleEndian.Uint64(fkv.Value))
+			}
+		}
+		entities = append(entities, entity)
+	}
+	return entities, nil
+}
+
+// AddAuditLogViews applies an atomic mutation to the Views field of AuditLog.
+func (r *auditlogRepository) AddAuditLogViews(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, LogId []byte, val int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	typeID, err := r.store.GetTypeID("AuditLog")
+	if err != nil {
+		return err
+	}
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, fdblayer.BytesToVersionstamp(LogId), 4})
+
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, uint64(val))
+
+	tr.Add(key, buf)
+	return nil
 }

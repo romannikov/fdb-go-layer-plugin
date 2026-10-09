@@ -95,7 +95,16 @@ message Order {
 
 message AuditLog {
     option (annotations.primary_key) = "log_id";
+    option (annotations.secondary_index) = {
+        fields: ["actor"]
+    };
+    option (annotations.secondary_index) = {
+        fields: ["tags"]
+    };
 
     bytes log_id = 1 [(annotations.is_versionstamp) = true];
     string actor = 2;
+    repeated string tags = 3;
+    int64 views = 4 [(annotations.mutation) = MUTATION_ADD];
 }
+

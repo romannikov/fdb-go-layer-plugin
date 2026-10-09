@@ -84,6 +84,7 @@ func TestCrossLanguageConformance_GoAndRust(t *testing.T) {
 	postRepo := store.NewPostRepository(recordStore)
 	taskRepo := store.NewTaskMessageRepository(recordStore)
 	orderRepo := store.NewOrderRepository(recordStore)
+	auditRepo := store.NewAuditLogRepository(recordStore)
 	counterRepo := atomic.NewCounterRepository(recordStore)
 
 	// =========================================================================
@@ -91,7 +92,7 @@ func TestCrossLanguageConformance_GoAndRust(t *testing.T) {
 	// =========================================================================
 	withTx(t, db, func(tr fdb.Transaction) error {
 		return recordStore.SyncMetadata(ctx, tr, dir, []string{
-			"User", "Product", "Post", "TaskMessage", "Order", "Counter",
+			"User", "Product", "Post", "TaskMessage", "Order", "AuditLog", "Counter",
 		})
 	})
 
@@ -128,6 +129,13 @@ func TestCrossLanguageConformance_GoAndRust(t *testing.T) {
 				City:    "Zurich",
 				Country: "Switzerland",
 			},
+		}); err != nil {
+			return err
+		}
+		if err := auditRepo.Create(ctx, tr, dir, &store.AuditLog{
+			Actor: "go_actor",
+			Tags:  []string{"conformance", "from_go"},
+			Views: 10,
 		}); err != nil {
 			return err
 		}
@@ -301,5 +309,32 @@ func TestCrossLanguageConformance_GoAndRust(t *testing.T) {
 	if emptyTask != nil {
 		t.Fatalf("expected empty queue after dequeuing all items, got %+v", emptyTask)
 	}
+
+	// 8. Verify AuditLog updated in-place by Rust (secondary indexes, fan-out tags, and atomic views)
+	var oldAuditActor, newAuditActor, oldAuditTag, newAuditTag []*store.AuditLog
+	withTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		if oldAuditActor, err = auditRepo.GetAuditLogByActor(ctx, tr, dir, "go_actor"); err != nil {
+			return err
+		}
+		if newAuditActor, err = auditRepo.GetAuditLogByActor(ctx, tr, dir, "rust_actor"); err != nil {
+			return err
+		}
+		if oldAuditTag, err = auditRepo.GetAuditLogByTags(ctx, tr, dir, "from_go"); err != nil {
+			return err
+		}
+		newAuditTag, err = auditRepo.GetAuditLogByTags(ctx, tr, dir, "from_rust")
+		return err
+	})
+	if len(oldAuditActor) != 0 || len(oldAuditTag) != 0 {
+		t.Fatalf("expected old AuditLog indexes cleared by Rust, got actor=%+v tag=%+v", oldAuditActor, oldAuditTag)
+	}
+	if len(newAuditActor) != 1 || len(newAuditActor[0].LogId) != 12 || newAuditActor[0].Views != 15 {
+		t.Fatalf("unexpected updated AuditLog by actor from Rust: %+v", newAuditActor)
+	}
+	if len(newAuditTag) != 1 || newAuditTag[0].Views != 15 {
+		t.Fatalf("unexpected updated AuditLog by tag from Rust: %+v", newAuditTag)
+	}
 }
+
 

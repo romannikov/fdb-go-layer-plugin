@@ -227,4 +227,57 @@ func TestGenerateProstMessages_NestedMessagesAndEnums(t *testing.T) {
 	}
 }
 
+func TestGenerateRustRepository_NonQueueVersionstampWithIndexesAndAtomics(t *testing.T) {
+	logID := ir.FieldSpec{ProtoName: "log_id", GoName: "LogId", Number: 1, Kind: ir.KindBytes, IsVersionstamp: true}
+	actor := ir.FieldSpec{ProtoName: "actor", GoName: "Actor", Number: 2, Kind: ir.KindString}
+	tags := ir.FieldSpec{ProtoName: "tags", GoName: "Tags", Number: 3, Kind: ir.KindString, IsRepeated: true}
+	views := ir.FieldSpec{ProtoName: "views", GoName: "Views", Number: 4, Kind: ir.KindInt64, Mutation: ir.MutationAdd}
+
+	msg := ir.MessageSpec{
+		Name:             "AuditLog",
+		PrimaryKeyFields: []ir.FieldSpec{logID},
+		Fields:           []ir.FieldSpec{logID, actor, tags, views},
+		SecondaryIndexes: []ir.SecondaryIndexSpec{
+			{
+				Fields:  []ir.FieldSpec{actor},
+				IndexID: 1001,
+			},
+			{
+				Fields:      []ir.FieldSpec{tags},
+				IsFanOut:    true,
+				FanOutField: tags,
+				IndexID:     1002,
+			},
+		},
+	}
+
+	var buf BufferPrinter
+	GenerateMessage(&buf, msg)
+	code := buf.String()
+
+	expectedSubstrings := []string{
+		"let user_version = self.store.next_user_version();",
+		"let key = dir.pack_with_versionstamp(&(type_id, fdb_layer::DATA_NAMESPACE, fdb_layer::Versionstamp::incomplete(user_version)));",
+		"let field_key = dir.pack_with_versionstamp(&(type_id, fdb_layer::FIELD_NAMESPACE, fdb_layer::Versionstamp::incomplete(user_version), 4i64));",
+		"let idx_key = dir.pack_with_versionstamp(&(type_id, fdb_layer::INDEX_NAMESPACE, 1001i64, &entity.actor, fdb_layer::Versionstamp::incomplete(user_version)));",
+		"let idx_key = dir.pack_with_versionstamp(&(type_id, fdb_layer::INDEX_NAMESPACE, 1002i64, item, fdb_layer::Versionstamp::incomplete(user_version)));",
+		"entity.log_id = fdb_layer::bytes_to_versionstamp(pk).as_bytes().to_vec();",
+		"if !entity.log_id.is_empty() && entity.log_id.len() != 12 {",
+		"if !entity.log_id.iter().any(|&b| b != 0) {",
+		"return self.create(tr, dir, entity).await;",
+		"decoded.log_id = entity.log_id.clone();",
+		"entity.log_id = pk.to_vec();",
+		"begin_tpl.push(fdb_layer::Element::Versionstamp(fdb_layer::bytes_to_versionstamp(b.as_ref())));",
+		"let mut unpacked_tpls: Vec<Vec<fdb_layer::Element<'_>>> = Vec::with_capacity(kvs.len());",
+		"if let Some(vs) = unpacked_tpls.get(i).and_then(|t| t.get(4)).and_then(|e| e.as_versionstamp()) {",
+	}
+
+	for _, exp := range expectedSubstrings {
+		if !strings.Contains(code, exp) {
+			t.Errorf("expected generated Rust code for non-queue versionstamp message to contain %q, got:\n%s", exp, code)
+		}
+	}
+}
+
+
 

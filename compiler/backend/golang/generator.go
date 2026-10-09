@@ -256,7 +256,8 @@ func generateCreate(g Printer, msg ir.MessageSpec) {
 	g.P("	}")
 	g.P()
 	if hasVS {
-		g.P("	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, ", versionstampedPKTupleArgs(msg), "})")
+		g.P("	userVersion := r.store.NextUserVersion()")
+		g.P("	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, ", versionstampedPKTupleArgsWithVar(msg, "userVersion"), "})")
 		g.P("	if err != nil {")
 		g.P("		return err")
 		g.P("	}")
@@ -280,13 +281,24 @@ func generateCreate(g Printer, msg ir.MessageSpec) {
 	if hasMut {
 		g.P("	// Store non-zero initial atomic fields in separate keys")
 		pkArgs := pkTupleArgsFromEntity(msg, "entity")
+		vsPKArgs := versionstampedPKTupleArgsWithVar(msg, "userVersion")
 		for _, f := range msg.Fields {
 			if f.Mutation != ir.MutationNone {
 				g.P("	if entity.", f.GoName, " != 0 {")
-				g.P("		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, ", pkArgs, ", ", f.Number, "})")
-				g.P("		buf := make([]byte, 8)")
-				g.P("		binary.LittleEndian.PutUint64(buf, ", encodeAtomicUint64Expr("entity."+f.GoName, f), ")")
-				g.P("		tr.", MutationVerb(f.Mutation), "(fieldKey, buf)")
+				if hasVS {
+					g.P("		fieldKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.FieldNamespace, ", vsPKArgs, ", ", f.Number, "})")
+					g.P("		if err != nil {")
+					g.P("			return err")
+					g.P("		}")
+					g.P("		buf := make([]byte, 8)")
+					g.P("		binary.LittleEndian.PutUint64(buf, ", encodeAtomicUint64Expr("entity."+f.GoName, f), ")")
+					g.P("		tr.SetVersionstampedKey(fieldKey, buf)")
+				} else {
+					g.P("		fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, ", pkArgs, ", ", f.Number, "})")
+					g.P("		buf := make([]byte, 8)")
+					g.P("		binary.LittleEndian.PutUint64(buf, ", encodeAtomicUint64Expr("entity."+f.GoName, f), ")")
+					g.P("		tr.", MutationVerb(f.Mutation), "(fieldKey, buf)")
+				}
 				g.P("	}")
 			}
 		}
@@ -294,19 +306,34 @@ func generateCreate(g Printer, msg ir.MessageSpec) {
 	}
 
 	pkArgs := pkTupleArgsFromEntity(msg, "entity")
+	vsPKArgs := versionstampedPKTupleArgsWithVar(msg, "userVersion")
 	for _, idx := range msg.SecondaryIndexes {
 		if idx.IsFanOut {
 			g.P("	// Fan-out index")
 			for i, f := range idx.Fields {
 				if f.IsRepeated {
 					g.P("	for _, item := range entity.", f.GoName, " {")
-					emitFanOutIndexWrite(g, msg, idx, i, "entity", true, "\t\t")
+					if hasVS {
+						emitVersionstampedFanOutIndexWrite(g, msg, idx, i, "entity", "userVersion", "\t\t")
+					} else {
+						emitFanOutIndexWrite(g, msg, idx, i, "entity", true, "\t\t")
+					}
 					g.P("	}")
 				}
 			}
 		} else {
 			g.P("	// Standard index")
-			g.P("	tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, ", idx.IndexID, ", ", indexFieldTupleArgs(idx.Fields, "entity"), ", ", pkArgs, "}), []byte{})")
+			if hasVS {
+				g.P("	{")
+				g.P("		idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.IndexNamespace, ", idx.IndexID, ", ", indexFieldTupleArgs(idx.Fields, "entity"), ", ", vsPKArgs, "})")
+				g.P("		if err != nil {")
+				g.P("			return err")
+				g.P("		}")
+				g.P("		tr.SetVersionstampedKey(idxKey, []byte{})")
+				g.P("	}")
+			} else {
+				g.P("	tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, ", idx.IndexID, ", ", indexFieldTupleArgs(idx.Fields, "entity"), ", ", pkArgs, "}), []byte{})")
+			}
 		}
 		g.P()
 	}
@@ -353,17 +380,15 @@ func generateGet(g Printer, msg ir.MessageSpec) {
 	g.P("	}")
 	g.P()
 	if ir.MsgHasVersionstampPK(msg) {
-		g.P("	if tpl, unpackErr := dir.Unpack(key); unpackErr == nil {")
-		for i, f := range msg.PrimaryKeyFields {
+		for _, f := range msg.PrimaryKeyFields {
 			if f.IsVersionstamp {
-				g.P("		if len(tpl) > ", i, "+2 {")
-				g.P("			if vs, ok := tpl[", i, "+2].(tuple.Versionstamp); ok {")
-				g.P("				entity.", f.GoName, " = vs.Bytes()")
-				g.P("			}")
-				g.P("		}")
+				if len(msg.PrimaryKeyFields) == 1 {
+					g.P("	entity.", f.GoName, " = fdblayer.BytesToVersionstamp(pk).Bytes()")
+				} else {
+					g.P("	entity.", f.GoName, " = fdblayer.BytesToVersionstamp(pk.", f.GoName, ").Bytes()")
+				}
 			}
 		}
-		g.P("	}")
 	}
 	if hasMut {
 		generateUnmarshalAtomicFields(g, msg, "fieldFuture.GetSliceOrPanic()", "\t")
@@ -379,11 +404,35 @@ func generateSet(g Printer, msg ir.MessageSpec) {
 	pkArgsEntity := pkTupleArgsFromEntity(msg, "entity")
 	pkArgsOld := pkTupleArgsFromEntity(msg, "old")
 
+	var vsFieldName string
+	for _, f := range msg.PrimaryKeyFields {
+		if f.IsVersionstamp {
+			vsFieldName = f.GoName
+			break
+		}
+	}
+
 	g.P("// Set updates an existing ", msg.Name, " entity in the database.")
 	g.P("func (r *", lowerName, "Repository) Set(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *", msg.Name, ") error {")
 	g.P("	if err := ctx.Err(); err != nil {")
 	g.P("		return err")
 	g.P("	}")
+	if hasVS {
+		g.P("	if len(entity.", vsFieldName, ") != 0 && len(entity.", vsFieldName, ") != 12 {")
+		g.P(`		return fmt.Errorf("invalid versionstamp length %d for `, vsFieldName, `: must be 0 or 12 bytes", len(entity.`, vsFieldName, `))`)
+		g.P("	}")
+		g.P("	hasOldVS := false")
+		g.P("	for _, b := range entity.", vsFieldName, " {")
+		g.P("		if b != 0 {")
+		g.P("			hasOldVS = true")
+		g.P("			break")
+		g.P("		}")
+		g.P("	}")
+		g.P("	if !hasOldVS {")
+		g.P("		return r.Create(ctx, tr, dir, entity)")
+		g.P("	}")
+		g.P()
+	}
 	g.P(`	typeID, err := r.store.GetTypeID("`, msg.Name, `")`)
 	g.P("	if err != nil {")
 	g.P("		return err")
@@ -395,54 +444,25 @@ func generateSet(g Printer, msg ir.MessageSpec) {
 		g.P()
 	}
 
-	if hasVS {
-		var vsFieldName string
-		for _, f := range msg.PrimaryKeyFields {
-			if f.IsVersionstamp {
-				vsFieldName = f.GoName
-				break
-			}
-		}
-		g.P("	// If the entity already has a versionstamp, delete the old versionstamped record.")
-		g.P("	// (Since the primary key contains the versionstamp, an update changes the key itself).")
-		g.P("	hasOldVS := false")
-		g.P("	for _, b := range entity.", vsFieldName, " {")
-		g.P("		if b != 0 {")
-		g.P("			hasOldVS = true")
-		g.P("			break")
-		g.P("		}")
-		g.P("	}")
-		g.P("	if hasOldVS {")
-		g.P("		oldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, ", pkArgsEntity, "})")
-		g.P("		tr.Clear(oldKey)")
-		g.P("	}")
+	g.P("	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, ", pkArgsEntity, "})")
+	if len(msg.SecondaryIndexes) > 0 {
 		g.P()
-		g.P("	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, ", versionstampedPKTupleArgs(msg), "})")
-		g.P("	if err != nil {")
-		g.P("		return err")
-		g.P("	}")
-	} else {
-		g.P("	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, ", pkArgsEntity, "})")
-		if len(msg.SecondaryIndexes) > 0 {
-			g.P()
-			g.P("	if oldValue := tr.Get(key).MustGet(); oldValue != nil {")
-			g.P("		var unmarshaled ", msg.Name)
-			g.P("		if err := proto.Unmarshal(oldValue, &unmarshaled); err != nil {")
-			g.P(`			return fmt.Errorf("failed to unmarshal existing `, lowerName, `: %w", err)`)
-			g.P("		}")
-			g.P("		old = &unmarshaled")
-			g.P("	}")
+		g.P("	if oldValue := tr.Get(key).MustGet(); oldValue != nil {")
+		g.P("		var unmarshaled ", msg.Name)
+		g.P("		if err := proto.Unmarshal(oldValue, &unmarshaled); err != nil {")
+		g.P(`			return fmt.Errorf("failed to unmarshal existing `, lowerName, `: %w", err)`)
+		g.P("		}")
+		if hasVS {
+			g.P("		unmarshaled.", vsFieldName, " = entity.", vsFieldName)
 		}
+		g.P("		old = &unmarshaled")
+		g.P("	}")
 	}
 	g.P()
 
 	generateMarshalWithZeroedAtomics(g, msg)
 
-	if hasVS {
-		g.P("	tr.SetVersionstampedKey(key, value)")
-	} else {
-		g.P("	tr.Set(key, value)")
-	}
+	g.P("	tr.Set(key, value)")
 	g.P()
 
 	for _, idx := range msg.SecondaryIndexes {
@@ -535,6 +555,17 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 		g.P("		if err := proto.Unmarshal(value, entity); err != nil {")
 		g.P(`			return fmt.Errorf("failed to unmarshal existing `, lowerName, `: %w", err)`)
 		g.P("		}")
+		if ir.MsgHasVersionstampPK(msg) {
+			for _, f := range msg.PrimaryKeyFields {
+				if f.IsVersionstamp {
+					if len(msg.PrimaryKeyFields) == 1 {
+						g.P("		entity.", f.GoName, " = pk")
+					} else {
+						g.P("		entity.", f.GoName, " = pk.", f.GoName)
+					}
+				}
+			}
+		}
 		for _, idx := range msg.SecondaryIndexes {
 			if idx.IsFanOut {
 				g.P("		// Fan-out index")
@@ -573,6 +604,7 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 func generateBatchGet(g Printer, msg ir.MessageSpec) {
 	lowerName := strings.ToLower(msg.Name)
 	hasMut := ir.HasMutationFields(msg)
+	hasVS := ir.MsgHasVersionstampPK(msg)
 
 	g.P("// BatchGet", msg.Name, " retrieves multiple ", msg.Name, " entities by their primary keys.")
 	g.P("func (r *", lowerName, "Repository) BatchGet", msg.Name, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*", msg.Name, ", error) {")
@@ -598,6 +630,17 @@ func generateBatchGet(g Printer, msg ir.MessageSpec) {
 	g.P("		keyTpl[0] = typeID")
 	g.P("		keyTpl[1] = fdblayer.DataNamespace")
 	g.P("		copy(keyTpl[2:], id)")
+	if hasVS {
+		for j, f := range msg.PrimaryKeyFields {
+			if f.IsVersionstamp {
+				g.P("		if len(id) > ", j, " {")
+				g.P("			if rawVS, ok := id[", j, "].([]byte); ok {")
+				g.P("				keyTpl[2+", j, "] = fdblayer.BytesToVersionstamp(rawVS)")
+				g.P("			}")
+				g.P("		}")
+			}
+		}
+	}
 	g.P("		key := dir.Pack(keyTpl)")
 	g.P("		futures[i] = tr.Get(key)")
 	if hasMut {
@@ -605,6 +648,17 @@ func generateBatchGet(g Printer, msg ir.MessageSpec) {
 		g.P("		fieldTpl[0] = typeID")
 		g.P("		fieldTpl[1] = fdblayer.FieldNamespace")
 		g.P("		copy(fieldTpl[2:], id)")
+		if hasVS {
+			for j, f := range msg.PrimaryKeyFields {
+				if f.IsVersionstamp {
+					g.P("		if len(id) > ", j, " {")
+					g.P("			if rawVS, ok := id[", j, "].([]byte); ok {")
+					g.P("				fieldTpl[2+", j, "] = fdblayer.BytesToVersionstamp(rawVS)")
+					g.P("			}")
+					g.P("		}")
+				}
+			}
+		}
 		g.P("		fieldRange, err := fdb.PrefixRange(dir.Pack(fieldTpl))")
 		g.P("		if err != nil {")
 		g.P("			return nil, err")
@@ -626,6 +680,20 @@ func generateBatchGet(g Printer, msg ir.MessageSpec) {
 	g.P("		if err != nil {")
 	g.P(`			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)`)
 	g.P("		}")
+	if hasVS {
+		for j, f := range msg.PrimaryKeyFields {
+			if f.IsVersionstamp {
+				g.P("		if len(ids[i]) > ", j, " {")
+				g.P("			switch v := ids[i][", j, "].(type) {")
+				g.P("			case tuple.Versionstamp:")
+				g.P("				entity.", f.GoName, " = v.Bytes()")
+				g.P("			case []byte:")
+				g.P("				entity.", f.GoName, " = append([]byte(nil), v...)")
+				g.P("			}")
+				g.P("		}")
+			}
+		}
+	}
 	if hasMut {
 		generateUnmarshalAtomicFields(g, msg, "fieldFutures[i].GetSliceOrPanic()", "\t\t")
 	}
@@ -659,6 +727,17 @@ func generateList(g Printer, msg ir.MessageSpec) {
 	g.P("	beginTpl[0] = typeID")
 	g.P("	beginTpl[1] = fdblayer.DataNamespace")
 	g.P("	copy(beginTpl[2:], opts.Begin)")
+	if ir.MsgHasVersionstampPK(msg) {
+		for j, f := range msg.PrimaryKeyFields {
+			if f.IsVersionstamp {
+				g.P("	if len(opts.Begin) > ", j, " {")
+				g.P("		if rawVS, ok := opts.Begin[", j, "].([]byte); ok {")
+				g.P("			beginTpl[2+", j, "] = fdblayer.BytesToVersionstamp(rawVS)")
+				g.P("		}")
+				g.P("	}")
+			}
+		}
+	}
 	g.P("	begin := dir.Pack(beginTpl)")
 	g.P()
 	g.P("	// Scan only data keys under typeID namespace.")
@@ -680,18 +759,27 @@ func generateList(g Printer, msg ir.MessageSpec) {
 	g.P("		End:   dataPrefixRange.End,")
 	g.P("	}, rangeOpts).GetSliceOrPanic()")
 	g.P()
-	g.P("	var nextKey fdb.Key")
-	g.P("	for _, kv := range kvs {")
-	g.P("		if err := ctx.Err(); err != nil {")
-	g.P("			return nil, err")
-	g.P("		}")
-	g.P()
-	g.P("		entity := &", msg.Name, "{}")
-	g.P("		err = proto.Unmarshal(kv.Value, entity)")
-	g.P("		if err != nil {")
-	g.P(`			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)`)
-	g.P("		}")
 	if ir.MsgHasVersionstampPK(msg) {
+		g.P("	for i, kv := range kvs {")
+		g.P("		if err := ctx.Err(); err != nil {")
+		g.P("			return nil, err")
+		g.P("		}")
+		g.P("		if opts.Limit > 0 && i == opts.Limit {")
+		g.P("			tpl, err := dir.Unpack(kv.Key)")
+		g.P("			if err != nil {")
+		g.P(`				return nil, fmt.Errorf("failed to unpack next key: %w", err)`)
+		g.P("			}")
+		g.P("			// Remove typeID and DataNamespace to return just the PK tuple")
+		g.P("			result.HasMore = true")
+		g.P("			result.NextKey = tpl[2:]")
+		g.P("			break")
+		g.P("		}")
+		g.P()
+		g.P("		entity := &", msg.Name, "{}")
+		g.P("		err = proto.Unmarshal(kv.Value, entity)")
+		g.P("		if err != nil {")
+		g.P(`			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)`)
+		g.P("		}")
 		g.P("		if tpl, unpackErr := dir.Unpack(kv.Key); unpackErr == nil {")
 		for i, f := range msg.PrimaryKeyFields {
 			if f.IsVersionstamp {
@@ -703,26 +791,40 @@ func generateList(g Printer, msg ir.MessageSpec) {
 			}
 		}
 		g.P("		}")
+		g.P("		result.Items = append(result.Items, entity)")
+		g.P("	}")
+	} else {
+		g.P("	var nextKey fdb.Key")
+		g.P("	for _, kv := range kvs {")
+		g.P("		if err := ctx.Err(); err != nil {")
+		g.P("			return nil, err")
+		g.P("		}")
+		g.P()
+		g.P("		entity := &", msg.Name, "{}")
+		g.P("		err = proto.Unmarshal(kv.Value, entity)")
+		g.P("		if err != nil {")
+		g.P(`			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)`)
+		g.P("		}")
+		g.P("		result.Items = append(result.Items, entity)")
+		g.P("		nextKey = kv.Key")
+		g.P()
+		g.P("		// Stop once we have enough items for pagination check")
+		g.P("		if opts.Limit > 0 && len(result.Items) > opts.Limit {")
+		g.P("			break")
+		g.P("		}")
+		g.P("	}")
+		g.P()
+		g.P("	result.HasMore = opts.Limit > 0 && len(result.Items) > opts.Limit")
+		g.P("	if result.HasMore {")
+		g.P("		tpl, err := dir.Unpack(nextKey)")
+		g.P("		if err != nil {")
+		g.P(`			return nil, fmt.Errorf("failed to unpack next key: %w", err)`)
+		g.P("		}")
+		g.P("		// Remove typeID and DataNamespace to return just the PK tuple")
+		g.P("		result.NextKey = tpl[2:]")
+		g.P("		result.Items = result.Items[:opts.Limit]")
+		g.P("	}")
 	}
-	g.P("		result.Items = append(result.Items, entity)")
-	g.P("		nextKey = kv.Key")
-	g.P()
-	g.P("		// Stop once we have enough items for pagination check")
-	g.P("		if opts.Limit > 0 && len(result.Items) > opts.Limit {")
-	g.P("			break")
-	g.P("		}")
-	g.P("	}")
-	g.P()
-	g.P("	result.HasMore = opts.Limit > 0 && len(result.Items) > opts.Limit")
-	g.P("	if result.HasMore {")
-	g.P("		tpl, err := dir.Unpack(nextKey)")
-	g.P("		if err != nil {")
-	g.P(`			return nil, fmt.Errorf("failed to unpack next key: %w", err)`)
-	g.P("		}")
-	g.P("		// Remove typeID and DataNamespace to return just the PK tuple")
-	g.P("		result.NextKey = tpl[2:]")
-	g.P("		result.Items = result.Items[:opts.Limit]")
-	g.P("	}")
 	g.P()
 	if hasMut {
 		firstPKArgs := pkTupleArgsFromEntity(msg, "first")
@@ -787,6 +889,7 @@ func generateGetByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec
 	lowerName := strings.ToLower(msg.Name)
 	joinedNames := JoinFieldNames(idx.Fields)
 	hasMut := ir.HasMutationFields(msg)
+	hasVS := ir.MsgHasVersionstampPK(msg)
 
 	var idxPackArgs []string
 	for _, f := range idx.Fields {
@@ -811,6 +914,9 @@ func generateGetByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec
 	g.P("	}")
 	g.P("	kvs := fdblayer.GetRange(tr, indexRange, fdb.RangeOptions{}).GetSliceOrPanic()")
 	g.P("	futures := make([]fdb.FutureByteSlice, len(kvs))")
+	if hasVS {
+		g.P("	pkTuples := make([]tuple.Tuple, len(kvs))")
+	}
 	if hasMut {
 		g.P("	fieldFutures := make([]fdblayer.RangeFuture, len(kvs))")
 	}
@@ -827,6 +933,9 @@ func generateGetByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec
 	g.P("			continue")
 	g.P("		}")
 	g.P("		pkTuple := tpl[pkIndexStart:]")
+	if hasVS {
+		g.P("		pkTuples[i] = pkTuple")
+	}
 	g.P("		keyTpl := make(tuple.Tuple, 2+len(pkTuple))")
 	g.P("		keyTpl[0] = typeID")
 	g.P("		keyTpl[1] = fdblayer.DataNamespace")
@@ -846,7 +955,7 @@ func generateGetByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec
 	}
 	g.P("	}")
 	iterVar := "_"
-	if hasMut {
+	if hasMut || hasVS {
 		iterVar = "i"
 	}
 	g.P("	for ", iterVar, ", future := range futures {")
@@ -865,6 +974,17 @@ func generateGetByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec
 	g.P("		if err != nil {")
 	g.P("			return nil, err")
 	g.P("		}")
+	if hasVS {
+		for j, f := range msg.PrimaryKeyFields {
+			if f.IsVersionstamp {
+				g.P("		if len(pkTuples[i]) > ", j, " {")
+				g.P("			if vs, ok := pkTuples[i][", j, "].(tuple.Versionstamp); ok {")
+				g.P("				entity.", f.GoName, " = vs.Bytes()")
+				g.P("			}")
+				g.P("		}")
+			}
+		}
+	}
 	if hasMut {
 		generateUnmarshalAtomicFields(g, msg, "fieldFutures[i].GetSliceOrPanic()", "\t\t")
 	}
@@ -931,11 +1051,14 @@ func decodeAtomicGoExpr(sliceExpr string, f ir.FieldSpec) string {
 
 func generateMarshalWithZeroedAtomics(g Printer, msg ir.MessageSpec) {
 	hasMut := ir.HasMutationFields(msg)
-	if hasMut {
+	hasVS := ir.MsgHasVersionstampPK(msg)
+	if hasMut || hasVS {
 		var nonZeroChecks []string
 		for _, f := range msg.Fields {
 			if f.Mutation != ir.MutationNone {
 				nonZeroChecks = append(nonZeroChecks, fmt.Sprintf("entity.%s != 0", f.GoName))
+			} else if f.IsVersionstamp {
+				nonZeroChecks = append(nonZeroChecks, fmt.Sprintf("len(entity.%s) > 0", f.GoName))
 			}
 		}
 		g.P("	// Marshal without mutating the caller's struct in-place.")
@@ -943,7 +1066,7 @@ func generateMarshalWithZeroedAtomics(g Printer, msg ir.MessageSpec) {
 		g.P("	if ", strings.Join(nonZeroChecks, " || "), " {")
 		g.P("		marshalTarget = &", msg.Name, "{")
 		for _, f := range msg.Fields {
-			if f.Mutation == ir.MutationNone {
+			if f.Mutation == ir.MutationNone && !f.IsVersionstamp {
 				g.P("			", f.GoName, ": entity.", f.GoName, ",")
 			}
 		}
@@ -1163,10 +1286,14 @@ func pkTupleArgsFromParam(msg ir.MessageSpec) string {
 }
 
 func versionstampedPKTupleArgs(msg ir.MessageSpec) string {
+	return versionstampedPKTupleArgsWithVar(msg, "r.store.NextUserVersion()")
+}
+
+func versionstampedPKTupleArgsWithVar(msg ir.MessageSpec, userVersionExpr string) string {
 	parts := make([]string, 0, len(msg.PrimaryKeyFields))
 	for _, f := range msg.PrimaryKeyFields {
 		if f.IsVersionstamp {
-			parts = append(parts, "tuple.IncompleteVersionstamp(r.store.NextUserVersion())")
+			parts = append(parts, "tuple.IncompleteVersionstamp("+userVersionExpr+")")
 		} else {
 			parts = append(parts, PackField("entity."+f.GoName, f))
 		}
@@ -1211,4 +1338,27 @@ func emitFanOutIndexWrite(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSp
 	} else {
 		g.P(indent, "}))")
 	}
+}
+
+func emitVersionstampedFanOutIndexWrite(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec, repeatedIdx int, varName string, userVersionVar string, indent string) {
+	g.P(indent, "idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.IndexNamespace, ", idx.IndexID, ",")
+	for j, sf := range idx.Fields {
+		if j == repeatedIdx {
+			g.P(indent, "\t", PackField("item", sf), ",")
+		} else {
+			g.P(indent, "\t", PackField(varName+"."+sf.GoName, sf), ",")
+		}
+	}
+	for _, pkf := range msg.PrimaryKeyFields {
+		if pkf.IsVersionstamp {
+			g.P(indent, "\t", "tuple.IncompleteVersionstamp(", userVersionVar, "),")
+		} else {
+			g.P(indent, "\t", PackField(varName+"."+pkf.GoName, pkf), ",")
+		}
+	}
+	g.P(indent, "})")
+	g.P(indent, "if err != nil {")
+	g.P(indent, "	return err")
+	g.P(indent, "}")
+	g.P(indent, "tr.SetVersionstampedKey(idxKey, []byte{})")
 }
