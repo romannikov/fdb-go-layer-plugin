@@ -767,3 +767,163 @@ func TestQueue_CorruptedPayloadPreservesEntry(t *testing.T) {
 	}
 }
 
+func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
+	ctx := context.Background()
+	recordStore, tr, dir, _ := tests.SyncAndSetup()
+	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Order"}); err != nil {
+		t.Fatalf("failed to sync Order metadata: %v", err)
+	}
+	orderRepo := store.NewOrderRepository(recordStore)
+	typeID := recordStore.Metadata()["Order"]
+
+	countOrderIndexKeys := func() int {
+		prefix, err := fdb.PrefixRange(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace}))
+		if err != nil {
+			t.Fatalf("PrefixRange failed: %v", err)
+		}
+		return len(tr.GetRangeSlice(prefix, fdb.RangeOptions{}))
+	}
+
+	hashA := []byte{0x0A}
+	hashB := []byte{0x0B}
+	hashC := []byte{0x0C}
+	hashD := []byte{0x0D}
+	pk := store.OrderPrimaryKey{TenantId: "t1", OrderSeq: 7}
+
+	// 1. Create with 2 attachment hashes:
+	//    - 1 key for (status, created_at) [id=1001]
+	//    - 1 key for (receipt_hash)
+	//    - 2 keys for fan-out (attachment_hashes)
+	//    - 2 keys for composite fan-out (status, attachment_hashes)
+	//    Total = 6 index keys.
+	if err := orderRepo.Create(ctx, tr, dir, &store.Order{
+		TenantId:         pk.TenantId,
+		OrderSeq:         pk.OrderSeq,
+		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
+		CreatedAt:        100,
+		ReceiptHash:      []byte{0x01},
+		AttachmentHashes: [][]byte{hashA, hashB, hashA}, // duplicate hashA must be deduplicated
+	}); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if got := countOrderIndexKeys(); got != 6 {
+		t.Fatalf("expected 6 index keys after Create, got %d", got)
+	}
+	if res, err := orderRepo.GetOrderByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashA); err != nil || len(res) != 1 {
+		t.Fatalf("expected 1 order for (PENDING, hashA), got %+v, err=%v", res, err)
+	}
+	if res, err := orderRepo.GetOrderByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashB); err != nil || len(res) != 1 {
+		t.Fatalf("expected 1 order for (PENDING, hashB), got %+v, err=%v", res, err)
+	}
+
+	// 2. Set with UNCHANGED Status (PENDING) and updated AttachmentHashes ({hashB, hashC}):
+	//    Delta path must remove hashA, keep hashB, and add hashC on both fan-out indexes.
+	if err := orderRepo.Set(ctx, tr, dir, &store.Order{
+		TenantId:         pk.TenantId,
+		OrderSeq:         pk.OrderSeq,
+		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
+		CreatedAt:        100,
+		ReceiptHash:      []byte{0x01},
+		AttachmentHashes: [][]byte{hashB, hashC},
+	}); err != nil {
+		t.Fatalf("Set (same status) failed: %v", err)
+	}
+	if got := countOrderIndexKeys(); got != 6 {
+		t.Fatalf("expected 6 index keys after Set (same status), got %d", got)
+	}
+	if res, _ := orderRepo.GetOrderByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashA); len(res) != 0 {
+		t.Fatalf("expected (PENDING, hashA) cleared after Set, got %+v", res)
+	}
+	if res, _ := orderRepo.GetOrderByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashC); len(res) != 1 {
+		t.Fatalf("expected (PENDING, hashC) added after Set, got %+v", res)
+	}
+
+	// 3. Set with CHANGED Status (PENDING -> SHIPPED) and overlapping AttachmentHashes ({hashC, hashD}):
+	//    Non-repeated field changed in composite fan-out index (status, attachment_hashes),
+	//    so ALL old (PENDING, hashB) and (PENDING, hashC) keys must be cleared, and (SHIPPED, hashC) + (SHIPPED, hashD) written!
+	if err := orderRepo.Set(ctx, tr, dir, &store.Order{
+		TenantId:         pk.TenantId,
+		OrderSeq:         pk.OrderSeq,
+		Status:           store.OrderStatus_ORDER_STATUS_SHIPPED,
+		CreatedAt:        200,
+		ReceiptHash:      []byte{0x02},
+		AttachmentHashes: [][]byte{hashC, hashD},
+	}); err != nil {
+		t.Fatalf("Set (changed status) failed: %v", err)
+	}
+	if got := countOrderIndexKeys(); got != 6 {
+		t.Fatalf("expected 6 index keys after Set (changed status), got %d", got)
+	}
+	if res, _ := orderRepo.GetOrderByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashC); len(res) != 0 {
+		t.Fatalf("stale composite fan-out key (PENDING, hashC) was not cleared when status changed: %+v", res)
+	}
+	if res, _ := orderRepo.GetOrderByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, hashC); len(res) != 1 {
+		t.Fatalf("missing composite fan-out key (SHIPPED, hashC) after status change: %+v", res)
+	}
+	if res, _ := orderRepo.GetOrderByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, hashD); len(res) != 1 {
+		t.Fatalf("missing composite fan-out key (SHIPPED, hashD) after status change: %+v", res)
+	}
+
+	// 4. Set with empty AttachmentHashes (nil): all fan-out keys must be cleared, leaving only the 2 standard index keys.
+	if err := orderRepo.Set(ctx, tr, dir, &store.Order{
+		TenantId:         pk.TenantId,
+		OrderSeq:         pk.OrderSeq,
+		Status:           store.OrderStatus_ORDER_STATUS_SHIPPED,
+		CreatedAt:        200,
+		ReceiptHash:      []byte{0x02},
+		AttachmentHashes: nil,
+	}); err != nil {
+		t.Fatalf("Set (empty fan-out) failed: %v", err)
+	}
+	if got := countOrderIndexKeys(); got != 2 {
+		t.Fatalf("expected 2 standard index keys after clearing fan-out slice, got %d", got)
+	}
+
+	// 5. Delete must clear all remaining index keys, leaving 0 keys in IndexNamespace.
+	if err := orderRepo.Delete(ctx, tr, dir, pk); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+	if got := countOrderIndexKeys(); got != 0 {
+		t.Fatalf("expected 0 index keys after Delete, got %d", got)
+	}
+
+	// 6. Upsert via Set on a non-existent record must write all standard and fan-out index keys,
+	//    and Delete must still clear all index keys even if primary key fields inside the stored
+	//    protobuf value were omitted.
+	pk2 := store.OrderPrimaryKey{TenantId: "t2", OrderSeq: 9}
+	if err := orderRepo.Set(ctx, tr, dir, &store.Order{
+		TenantId:         pk2.TenantId,
+		OrderSeq:         pk2.OrderSeq,
+		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
+		CreatedAt:        300,
+		ReceiptHash:      []byte{0x09},
+		AttachmentHashes: [][]byte{hashA, hashB},
+	}); err != nil {
+		t.Fatalf("Upsert via Set failed: %v", err)
+	}
+	if got := countOrderIndexKeys(); got != 6 {
+		t.Fatalf("expected 6 index keys after Upsert via Set, got %d", got)
+	}
+
+	// Simulate a stored protobuf value whose PK fields were omitted from the serialized body.
+	rawDataKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk2.TenantId, int64(pk2.OrderSeq)})
+	strippedBytes, err := proto.Marshal(&store.Order{
+		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
+		CreatedAt:        300,
+		ReceiptHash:      []byte{0x09},
+		AttachmentHashes: [][]byte{hashA, hashB},
+	})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	tr.Set(rawDataKey, strippedBytes)
+
+	if err := orderRepo.Delete(ctx, tr, dir, pk2); err != nil {
+		t.Fatalf("Delete after PK-stripped payload failed: %v", err)
+	}
+	if got := countOrderIndexKeys(); got != 0 {
+		t.Fatalf("expected 0 index keys after Delete of PK-stripped payload, got %d", got)
+	}
+}
+
+

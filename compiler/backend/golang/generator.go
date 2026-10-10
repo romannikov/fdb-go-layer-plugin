@@ -138,10 +138,11 @@ func generateEnqueue(g Printer, msg ir.MessageSpec) {
 	g.P("	}")
 	g.P()
 	if hasVS {
-		g.P("	if err := r.store.PrepareUserVersion(tr); err != nil {")
+		g.P("	userVersion, err := r.store.NextUserVersion()")
+		g.P("	if err != nil {")
 		g.P("		return err")
 		g.P("	}")
-		g.P("	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, ", versionstampedPKTupleArgs(msg), "})")
+		g.P("	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, ", versionstampedPKTupleArgsWithVar(msg, "userVersion"), "})")
 		g.P("	if err != nil {")
 		g.P("		return err")
 		g.P("	}")
@@ -382,10 +383,10 @@ func generateCreate(g Printer, msg ir.MessageSpec) {
 	g.P("	}")
 	g.P()
 	if hasVS {
-		g.P("	if err := r.store.PrepareUserVersion(tr); err != nil {")
+		g.P("	userVersion, err := r.store.NextUserVersion()")
+		g.P("	if err != nil {")
 		g.P("		return err")
 		g.P("	}")
-		g.P("	userVersion := r.store.NextUserVersion()")
 		g.P("	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, ", versionstampedPKTupleArgsWithVar(msg, "userVersion"), "})")
 		g.P("	if err != nil {")
 		g.P("		return err")
@@ -594,8 +595,8 @@ func generateSet(g Printer, msg ir.MessageSpec) {
 		g.P("		if err := proto.Unmarshal(oldValue, &unmarshaled); err != nil {")
 		g.P(`			return fmt.Errorf("failed to unmarshal existing `, lowerName, `: %w", err)`)
 		g.P("		}")
-		if hasVS {
-			g.P("		unmarshaled.", vsFieldName, " = entity.", vsFieldName)
+		for _, f := range msg.PrimaryKeyFields {
+			g.P("		unmarshaled.", f.GoName, " = entity.", f.GoName)
 		}
 		g.P("		old = &unmarshaled")
 		g.P("	}")
@@ -738,15 +739,11 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 		g.P("		if err := proto.Unmarshal(value, entity); err != nil {")
 		g.P(`			return fmt.Errorf("failed to unmarshal existing `, lowerName, `: %w", err)`)
 		g.P("		}")
-		if ir.MsgHasVersionstampPK(msg) {
-			for _, f := range msg.PrimaryKeyFields {
-				if f.IsVersionstamp {
-					if len(msg.PrimaryKeyFields) == 1 {
-						g.P("		entity.", f.GoName, " = pk")
-					} else {
-						g.P("		entity.", f.GoName, " = pk.", f.GoName)
-					}
-				}
+		for _, f := range msg.PrimaryKeyFields {
+			if len(msg.PrimaryKeyFields) == 1 {
+				g.P("		entity.", f.GoName, " = pk")
+			} else {
+				g.P("		entity.", f.GoName, " = pk.", f.GoName)
 			}
 		}
 		for _, idx := range msg.SecondaryIndexes {
@@ -756,13 +753,15 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 					if f.IsRepeated {
 						mapType := MapKeyType(f)
 						mapExpr := MapKeyExpr("item", f)
-						g.P("		seen := make(map[", mapType, "]struct{}, len(entity.", f.GoName, "))")
-						g.P("		for _, item := range entity.", f.GoName, " {")
-						g.P("			if _, dup := seen[", mapExpr, "]; dup {")
-						g.P("				continue")
+						g.P("		{")
+						g.P("			seen := make(map[", mapType, "]struct{}, len(entity.", f.GoName, "))")
+						g.P("			for _, item := range entity.", f.GoName, " {")
+						g.P("				if _, dup := seen[", mapExpr, "]; dup {")
+						g.P("					continue")
+						g.P("				}")
+						g.P("				seen[", mapExpr, "] = struct{}{}")
+						emitFanOutIndexWrite(g, msg, idx, i, "entity", false, "\t\t\t\t")
 						g.P("			}")
-						g.P("			seen[", mapExpr, "] = struct{}{}")
-						emitFanOutIndexWrite(g, msg, idx, i, "entity", false, "\t\t\t")
 						g.P("		}")
 					}
 				}
@@ -1763,10 +1762,6 @@ func pkTupleArgsFromParam(msg ir.MessageSpec) string {
 		parts = append(parts, PackField("pk."+f.GoName, f))
 	}
 	return strings.Join(parts, ", ")
-}
-
-func versionstampedPKTupleArgs(msg ir.MessageSpec) string {
-	return versionstampedPKTupleArgsWithVar(msg, "r.store.NextUserVersion()")
 }
 
 func versionstampedPKTupleArgsWithVar(msg ir.MessageSpec, userVersionExpr string) string {

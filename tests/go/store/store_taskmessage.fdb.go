@@ -39,10 +39,11 @@ func (r *taskmessageRepository) Enqueue(ctx context.Context, tr fdblayer.Transac
 		return err
 	}
 
-	if err := r.store.PrepareUserVersion(tr); err != nil {
+	userVersion, err := r.store.NextUserVersion()
+	if err != nil {
 		return err
 	}
-	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.QueueName, tuple.IncompleteVersionstamp(r.store.NextUserVersion()), uint64(entity.ShardId)})
+	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.QueueName, tuple.IncompleteVersionstamp(userVersion), uint64(entity.ShardId)})
 	if err != nil {
 		return err
 	}

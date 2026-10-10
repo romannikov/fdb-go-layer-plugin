@@ -737,27 +737,16 @@ func TestIntegration_GenericRepository(t *testing.T) {
 	}
 }
 
-func TestIntegration_EnsureMetadata_AndPaginatedIndexQuery(t *testing.T) {
+func TestIntegration_SyncMetadata_AndPaginatedIndexQuery(t *testing.T) {
 	ctx := context.Background()
 	db := fdb.MustOpenDefault()
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
 	recordStore := fdblayer.NewRecordStore()
-	if recordStore.HasAllMetadata([]string{"User", "Product"}) {
-		t.Fatal("expected HasAllMetadata=false on fresh store")
-	}
-	if err := recordStore.EnsureMetadata(ctx, db, dir, []string{"User", "Product"}); err != nil {
-		t.Fatalf("EnsureMetadata failed: %v", err)
-	}
-	if !recordStore.HasAllMetadata([]string{"User", "Product"}) {
-		t.Fatal("expected HasAllMetadata=true after EnsureMetadata")
-	}
-	// Second call hits fast path without error
-	if err := recordStore.EnsureMetadata(ctx, db, dir, []string{"User", "Product"}); err != nil {
-		t.Fatalf("second EnsureMetadata failed: %v", err)
-	}
-
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product"})
+	})
 	// Simulate an aborted transaction that calls SyncMetadata for "AbortedEntity"
 	_, _ = db.Transact(func(tr fdb.Transaction) (interface{}, error) {
 		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"AbortedEntity"}); err != nil {
@@ -765,14 +754,11 @@ func TestIntegration_EnsureMetadata_AndPaginatedIndexQuery(t *testing.T) {
 		}
 		return nil, fmt.Errorf("abort transaction")
 	})
-	if recordStore.HasAllMetadata([]string{"User", "Product"}) {
-		t.Fatal("expected HasAllMetadata=false after uncommitted SyncMetadata")
-	}
-	if err := recordStore.EnsureMetadata(ctx, db, dir, []string{"User", "Product"}); err != nil {
-		t.Fatalf("EnsureMetadata after aborted SyncMetadata failed: %v", err)
-	}
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product"})
+	})
 	if _, err := recordStore.GetTypeID("AbortedEntity"); err == nil {
-		t.Fatal("expected uncommitted AbortedEntity to be purged from in-memory metadata after EnsureMetadata")
+		t.Fatal("expected uncommitted AbortedEntity to be purged from in-memory metadata after SyncMetadata")
 	}
 
 	productRepo := store.NewProductRepository(recordStore)

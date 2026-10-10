@@ -133,6 +133,7 @@ func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 		if err := proto.Unmarshal(oldValue, &unmarshaled); err != nil {
 			return fmt.Errorf("failed to unmarshal existing post: %w", err)
 		}
+		unmarshaled.Id = entity.Id
 		old = &unmarshaled
 	}
 
@@ -205,17 +206,20 @@ func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 		if err := proto.Unmarshal(value, entity); err != nil {
 			return fmt.Errorf("failed to unmarshal existing post: %w", err)
 		}
+		entity.Id = pk
 		// Fan-out index
-		seen := make(map[string]struct{}, len(entity.Tags))
-		for _, item := range entity.Tags {
-			if _, dup := seen[item]; dup {
-				continue
+		{
+			seen := make(map[string]struct{}, len(entity.Tags))
+			for _, item := range entity.Tags {
+				if _, dup := seen[item]; dup {
+					continue
+				}
+				seen[item] = struct{}{}
+				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+					item,
+					entity.Id,
+				}))
 			}
-			seen[item] = struct{}{}
-			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
-				item,
-				entity.Id,
-			}))
 		}
 	}
 	tr.Clear(key)

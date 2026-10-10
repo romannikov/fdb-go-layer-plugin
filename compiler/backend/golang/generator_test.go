@@ -193,9 +193,9 @@ func TestGenerateMessage_EntityAndQueue(t *testing.T) {
 		"func (r *taskmessageRepository) Enqueue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *TaskMessage)",
 		"func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string)",
 		"func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string, limit int)",
-		"r.store.PrepareUserVersion(tr)",
+		"userVersion, err := r.store.NextUserVersion()",
 		"tr.SetVersionstampedKey(key, value)",
-		"tuple.IncompleteVersionstamp(r.store.NextUserVersion())",
+		"tuple.IncompleteVersionstamp(userVersion)",
 	} {
 		if !strings.Contains(qOut, expectedSnippet) {
 			t.Errorf("expected generated Go queue code to contain %q, got:\n%s", expectedSnippet, qOut)
@@ -267,7 +267,7 @@ func TestGenerateMessage_NonQueueVersionstampWithIndexesAndAtomics(t *testing.T)
 	}
 
 	for _, expectedSnippet := range []string{
-		"userVersion := r.store.NextUserVersion()",
+		"userVersion, err := r.store.NextUserVersion()",
 		"tuple.IncompleteVersionstamp(userVersion)",
 		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.IndexNamespace, 1001, entity.Actor, tuple.IncompleteVersionstamp(userVersion)})",
 		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.IndexNamespace, 1002,",

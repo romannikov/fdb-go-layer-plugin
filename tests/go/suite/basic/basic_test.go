@@ -718,33 +718,24 @@ func TestErrNotFound_SentinelWrapping(t *testing.T) {
 	}
 }
 
-func TestUserVersionSequence_CrossTransactionResetAndOverflow(t *testing.T) {
+func TestUserVersionSequence_OverflowAndReset(t *testing.T) {
 	recordStore := fdblayer.NewRecordStore()
-	tr1 := tests.NewMockTransaction(tests.NewMockKV())
-	tr2 := tests.NewMockTransaction(tests.NewMockKV())
-
-	// Allocate 65536 user versions in tr1 (0..65535)
 	for i := 0; i < 65536; i++ {
-		if err := recordStore.PrepareUserVersion(tr1); err != nil {
+		uv, err := recordStore.NextUserVersion()
+		if err != nil {
 			t.Fatalf("unexpected error at iteration %d: %v", i, err)
 		}
-		uv := recordStore.NextUserVersion()
 		if int(uv) != i {
 			t.Fatalf("expected UserVersion=%d, got %d", i, uv)
 		}
 	}
-
-	// 65537th allocation in the same transaction MUST return ErrUserVersionOverflow instead of wrapping to 0
-	if err := recordStore.PrepareUserVersion(tr1); !errors.Is(err, fdblayer.ErrUserVersionOverflow) {
-		t.Fatalf("expected ErrUserVersionOverflow at 65537th allocation in same transaction, got: %v", err)
+	if _, err := recordStore.NextUserVersion(); !errors.Is(err, fdblayer.ErrUserVersionOverflow) {
+		t.Fatalf("expected ErrUserVersionOverflow at 65537th call, got: %v", err)
 	}
-
-	// Switching to a new transaction tr2 MUST automatically reset the counter back to 0
-	if err := recordStore.PrepareUserVersion(tr2); err != nil {
-		t.Fatalf("PrepareUserVersion on new transaction tr2 failed: %v", err)
-	}
-	if uv := recordStore.NextUserVersion(); uv != 0 {
-		t.Fatalf("expected UserVersion=0 on new transaction tr2, got %d", uv)
+	recordStore.ResetUserVersion()
+	uv, err := recordStore.NextUserVersion()
+	if err != nil || uv != 0 {
+		t.Fatalf("expected UserVersion=0 after ResetUserVersion, got uv=%d, err=%v", uv, err)
 	}
 }
 
@@ -829,59 +820,6 @@ func TestQueryProductByCategory_PaginatedAndReverse(t *testing.T) {
 		t.Fatalf("unexpected error for reverse Begin at start of index range: %v", err)
 	}
 	_ = oobReverseBefore
-}
-
-func TestUserVersionSequence_ConcurrentInterleavedTransactions(t *testing.T) {
-	recordStore := fdblayer.NewRecordStore()
-	tr1 := tests.NewMockTransaction(tests.NewMockKV())
-	tr2 := tests.NewMockTransaction(tests.NewMockKV())
-
-	// Interleave PrepareUserVersion + NextUserVersion across tr1 and tr2
-	for i := uint16(0); i < 5; i++ {
-		if err := recordStore.PrepareUserVersion(tr1); err != nil {
-			t.Fatalf("tr1 PrepareUserVersion(%d) failed: %v", i, err)
-		}
-		if uv1 := recordStore.NextUserVersion(); uv1 != i {
-			t.Fatalf("expected tr1 UserVersion=%d, got %d", i, uv1)
-		}
-
-		if err := recordStore.PrepareUserVersion(tr2); err != nil {
-			t.Fatalf("tr2 PrepareUserVersion(%d) failed: %v", i, err)
-		}
-		if uv2 := recordStore.NextUserVersion(); uv2 != i {
-			t.Fatalf("expected tr2 UserVersion=%d, got %d", i, uv2)
-		}
-	}
-}
-
-func TestHasAllMetadata_RequiresCommittedMetadata(t *testing.T) {
-	ctx := context.Background()
-	kv := tests.NewMockKV()
-	dir := &tests.MockDirectorySubspace{}
-	recordStore := fdblayer.NewRecordStore()
-
-	tr1 := tests.NewMockTransaction(kv)
-	if err := recordStore.SyncMetadata(ctx, tr1, dir, []string{"User"}); err != nil {
-		t.Fatalf("SyncMetadata(User) failed: %v", err)
-	}
-	// SyncMetadata only stages writes on tr1 without knowing if tr1 committed,
-	// so HasAllMetadata must return false until EnsureMetadata commits.
-	if recordStore.HasAllMetadata([]string{"User"}) {
-		t.Fatalf("expected HasAllMetadata=false after raw SyncMetadata (uncommitted)")
-	}
-}
-
-func TestUserVersionSequence_NilTxOverflow(t *testing.T) {
-	recordStore := fdblayer.NewRecordStore()
-	for i := 0; i < 65536; i++ {
-		if err := recordStore.PrepareUserVersion(nil); err != nil {
-			t.Fatalf("unexpected error at iteration %d: %v", i, err)
-		}
-		_ = recordStore.NextUserVersion()
-	}
-	if err := recordStore.PrepareUserVersion(nil); !errors.Is(err, fdblayer.ErrUserVersionOverflow) {
-		t.Fatalf("expected ErrUserVersionOverflow at 65537th call with nil tx, got %v", err)
-	}
 }
 
 

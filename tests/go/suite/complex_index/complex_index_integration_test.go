@@ -975,9 +975,9 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 	defer cleanup()
 
 	recordStore := fdblayer.NewRecordStore()
-	if err := recordStore.EnsureMetadata(ctx, db, dir, []string{"TaskMessage", "Order"}); err != nil {
-		t.Fatalf("EnsureMetadata failed: %v", err)
-	}
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return recordStore.SyncMetadata(ctx, tr, dir, []string{"TaskMessage", "Order"})
+	})
 
 	taskRepo := store.NewTaskMessageRepository(recordStore)
 	orderRepo := store.NewOrderRepository(recordStore)

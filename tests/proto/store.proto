@@ -71,6 +71,9 @@ message Order {
     option (annotations.secondary_index) = {
         fields: ["attachment_hashes"]
     };
+    option (annotations.secondary_index) = {
+        fields: ["status", "attachment_hashes"]
+    };
 
     enum Priority {
         PRIORITY_LOW = 0;

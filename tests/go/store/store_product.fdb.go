@@ -121,6 +121,7 @@ func (r *productRepository) Set(ctx context.Context, tr fdblayer.Transaction, di
 		if err := proto.Unmarshal(oldValue, &unmarshaled); err != nil {
 			return fmt.Errorf("failed to unmarshal existing product: %w", err)
 		}
+		unmarshaled.Id = entity.Id
 		old = &unmarshaled
 	}
 
@@ -159,6 +160,7 @@ func (r *productRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 		if err := proto.Unmarshal(value, entity); err != nil {
 			return fmt.Errorf("failed to unmarshal existing product: %w", err)
 		}
+		entity.Id = pk
 		// Standard index
 		tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 3475980913, entity.Category, entity.Id}))
 	}

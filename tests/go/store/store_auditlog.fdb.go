@@ -64,10 +64,10 @@ func (r *auditlogRepository) Create(ctx context.Context, tr fdblayer.Transaction
 		return err
 	}
 
-	if err := r.store.PrepareUserVersion(tr); err != nil {
+	userVersion, err := r.store.NextUserVersion()
+	if err != nil {
 		return err
 	}
-	userVersion := r.store.NextUserVersion()
 	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, tuple.IncompleteVersionstamp(userVersion)})
 	if err != nil {
 		return err
@@ -312,16 +312,18 @@ func (r *auditlogRepository) Delete(ctx context.Context, tr fdblayer.Transaction
 		// Standard index
 		tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 244111290, entity.Actor, fdblayer.BytesToVersionstamp(entity.LogId)}))
 		// Fan-out index
-		seen := make(map[string]struct{}, len(entity.Tags))
-		for _, item := range entity.Tags {
-			if _, dup := seen[item]; dup {
-				continue
+		{
+			seen := make(map[string]struct{}, len(entity.Tags))
+			for _, item := range entity.Tags {
+				if _, dup := seen[item]; dup {
+					continue
+				}
+				seen[item] = struct{}{}
+				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+					item,
+					fdblayer.BytesToVersionstamp(entity.LogId),
+				}))
 			}
-			seen[item] = struct{}{}
-			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
-				item,
-				fdblayer.BytesToVersionstamp(entity.LogId),
-			}))
 		}
 	}
 	tr.Clear(key)

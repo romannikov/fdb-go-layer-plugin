@@ -51,6 +51,8 @@ type OrderRepository interface {
 	QueryOrderByReceiptHash(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ReceiptHash []byte, opts OrderPaginationOptions) (*OrderPaginatedResult, error)
 	GetOrderByAttachmentHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, AttachmentHashes []byte) ([]*Order, error)
 	QueryOrderByAttachmentHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, AttachmentHashes []byte, opts OrderPaginationOptions) (*OrderPaginatedResult, error)
+	GetOrderByStatusAndAttachmentHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, AttachmentHashes []byte) ([]*Order, error)
+	QueryOrderByStatusAndAttachmentHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, AttachmentHashes []byte, opts OrderPaginationOptions) (*OrderPaginatedResult, error)
 }
 
 type orderRepository struct {
@@ -106,6 +108,23 @@ func (r *orderRepository) Create(ctx context.Context, tr fdblayer.Transaction, d
 		}
 	}
 
+	// Fan-out index
+	{
+		seen := make(map[string]struct{}, len(entity.AttachmentHashes))
+		for _, item := range entity.AttachmentHashes {
+			if _, dup := seen[string(item)]; dup {
+				continue
+			}
+			seen[string(item)] = struct{}{}
+			tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2040727576,
+				int64(entity.Status),
+				item,
+				entity.TenantId,
+				int64(entity.OrderSeq),
+			}), []byte{})
+		}
+	}
+
 	return nil
 }
 
@@ -153,6 +172,8 @@ func (r *orderRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir 
 		if err := proto.Unmarshal(oldValue, &unmarshaled); err != nil {
 			return fmt.Errorf("failed to unmarshal existing order: %w", err)
 		}
+		unmarshaled.TenantId = entity.TenantId
+		unmarshaled.OrderSeq = entity.OrderSeq
 		old = &unmarshaled
 	}
 
@@ -224,6 +245,69 @@ func (r *orderRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir 
 		}
 	}
 
+	// Fan-out index
+	if old != nil && old.Status == entity.Status {
+		oldSet := make(map[string]struct{}, len(old.AttachmentHashes))
+		for _, item := range old.AttachmentHashes {
+			oldSet[string(item)] = struct{}{}
+		}
+		newSet := make(map[string]struct{}, len(entity.AttachmentHashes))
+		for _, item := range entity.AttachmentHashes {
+			newSet[string(item)] = struct{}{}
+		}
+		for _, item := range old.AttachmentHashes {
+			if _, keep := newSet[string(item)]; !keep {
+				newSet[string(item)] = struct{}{}
+				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2040727576,
+					int64(old.Status),
+					item,
+					old.TenantId,
+					int64(old.OrderSeq),
+				}))
+			}
+		}
+		for _, item := range entity.AttachmentHashes {
+			if _, existed := oldSet[string(item)]; !existed {
+				oldSet[string(item)] = struct{}{}
+				tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2040727576,
+					int64(entity.Status),
+					item,
+					entity.TenantId,
+					int64(entity.OrderSeq),
+				}), []byte{})
+			}
+		}
+	} else {
+		if old != nil {
+			seenOld := make(map[string]struct{}, len(old.AttachmentHashes))
+			for _, item := range old.AttachmentHashes {
+				if _, dup := seenOld[string(item)]; dup {
+					continue
+				}
+				seenOld[string(item)] = struct{}{}
+				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2040727576,
+					int64(old.Status),
+					item,
+					old.TenantId,
+					int64(old.OrderSeq),
+				}))
+			}
+		}
+		seen := make(map[string]struct{}, len(entity.AttachmentHashes))
+		for _, item := range entity.AttachmentHashes {
+			if _, dup := seen[string(item)]; dup {
+				continue
+			}
+			seen[string(item)] = struct{}{}
+			tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2040727576,
+				int64(entity.Status),
+				item,
+				entity.TenantId,
+				int64(entity.OrderSeq),
+			}), []byte{})
+		}
+	}
+
 	return nil
 }
 
@@ -244,22 +328,42 @@ func (r *orderRepository) Delete(ctx context.Context, tr fdblayer.Transaction, d
 		if err := proto.Unmarshal(value, entity); err != nil {
 			return fmt.Errorf("failed to unmarshal existing order: %w", err)
 		}
+		entity.TenantId = pk.TenantId
+		entity.OrderSeq = pk.OrderSeq
 		// Standard index
 		tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 1001, int64(entity.Status), int64(entity.CreatedAt), entity.TenantId, int64(entity.OrderSeq)}))
 		// Standard index
 		tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4117767939, entity.ReceiptHash, entity.TenantId, int64(entity.OrderSeq)}))
 		// Fan-out index
-		seen := make(map[string]struct{}, len(entity.AttachmentHashes))
-		for _, item := range entity.AttachmentHashes {
-			if _, dup := seen[string(item)]; dup {
-				continue
+		{
+			seen := make(map[string]struct{}, len(entity.AttachmentHashes))
+			for _, item := range entity.AttachmentHashes {
+				if _, dup := seen[string(item)]; dup {
+					continue
+				}
+				seen[string(item)] = struct{}{}
+				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 1605301564,
+					item,
+					entity.TenantId,
+					int64(entity.OrderSeq),
+				}))
 			}
-			seen[string(item)] = struct{}{}
-			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 1605301564,
-				item,
-				entity.TenantId,
-				int64(entity.OrderSeq),
-			}))
+		}
+		// Fan-out index
+		{
+			seen := make(map[string]struct{}, len(entity.AttachmentHashes))
+			for _, item := range entity.AttachmentHashes {
+				if _, dup := seen[string(item)]; dup {
+					continue
+				}
+				seen[string(item)] = struct{}{}
+				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2040727576,
+					int64(entity.Status),
+					item,
+					entity.TenantId,
+					int64(entity.OrderSeq),
+				}))
+			}
 		}
 	}
 	tr.Clear(key)
@@ -1031,6 +1135,165 @@ func (r *orderRepository) QueryOrderByAttachmentHashes(ctx context.Context, tr f
 	kvs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: rangeBegin, End: rangeEnd}, rangeOpts).GetSliceOrPanic()
 	pageLen := len(kvs)
 	pkIndexStart := 3 + 1
+	if opts.Limit > 0 && pageLen > opts.Limit {
+		nextTpl, err := dir.Unpack(kvs[opts.Limit].Key)
+		if err != nil {
+			return nil, err
+		}
+		if len(nextTpl) > pkIndexStart {
+			result.HasMore = true
+			result.NextKey = nextTpl[pkIndexStart:]
+		}
+		kvs = kvs[:opts.Limit]
+	}
+	futures := make([]fdb.FutureByteSlice, len(kvs))
+	for i, kv := range kvs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		tpl, err := dir.Unpack(kv.Key)
+		if err != nil {
+			return nil, err
+		}
+		if len(tpl) <= pkIndexStart {
+			continue
+		}
+		pkTuple := tpl[pkIndexStart:]
+		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
+		keyTpl[0] = typeID
+		keyTpl[1] = fdblayer.DataNamespace
+		copy(keyTpl[2:], pkTuple)
+		futures[i] = tr.Get(dir.Pack(keyTpl))
+	}
+	for _, future := range futures {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if future == nil {
+			continue
+		}
+		value := future.MustGet()
+		if value == nil {
+			continue
+		}
+		entity := &Order{}
+		if err := proto.Unmarshal(value, entity); err != nil {
+			return nil, err
+		}
+		result.Items = append(result.Items, entity)
+	}
+	return result, nil
+}
+
+// GetOrderByStatusAndAttachmentHashes retrieves Order entities by their StatusAndAttachmentHashes index.
+func (r *orderRepository) GetOrderByStatusAndAttachmentHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, AttachmentHashes []byte) ([]*Order, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	typeID, err := r.store.GetTypeID("Order")
+	if err != nil {
+		return nil, err
+	}
+
+	entities := []*Order{}
+	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2040727576, int64(Status), AttachmentHashes})
+	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
+	if err != nil {
+		return nil, err
+	}
+	kvs := fdblayer.GetRange(tr, indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
+	futures := make([]fdb.FutureByteSlice, len(kvs))
+	for i, kv := range kvs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		tpl, err := dir.Unpack(kv.Key)
+		if err != nil {
+			return nil, err
+		}
+		pkIndexStart := 3 + 2
+		if len(tpl) <= pkIndexStart {
+			continue
+		}
+		pkTuple := tpl[pkIndexStart:]
+		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
+		keyTpl[0] = typeID
+		keyTpl[1] = fdblayer.DataNamespace
+		copy(keyTpl[2:], pkTuple)
+		key := dir.Pack(keyTpl)
+		futures[i] = tr.Get(key)
+	}
+	for _, future := range futures {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if future == nil {
+			continue
+		}
+		value := future.MustGet()
+		if value == nil {
+			continue
+		}
+		entity := &Order{}
+		err = proto.Unmarshal(value, entity)
+		if err != nil {
+			return nil, err
+		}
+		entities = append(entities, entity)
+	}
+	return entities, nil
+}
+
+// QueryOrderByStatusAndAttachmentHashes retrieves a paginated page of Order entities by their StatusAndAttachmentHashes index.
+func (r *orderRepository) QueryOrderByStatusAndAttachmentHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, AttachmentHashes []byte, opts OrderPaginationOptions) (*OrderPaginatedResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	typeID, err := r.store.GetTypeID("Order")
+	if err != nil {
+		return nil, err
+	}
+
+	result := &OrderPaginatedResult{
+		Items: make([]*Order, 0),
+	}
+	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, 2040727576, int64(Status), AttachmentHashes}
+	indexKeyPrefix := dir.Pack(baseTpl)
+	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
+	if err != nil {
+		return nil, err
+	}
+	rangeBegin := indexRange.Begin
+	rangeEnd := indexRange.End
+	if len(opts.Begin) > 0 {
+		cursorTpl := make(tuple.Tuple, len(baseTpl)+len(opts.Begin))
+		copy(cursorTpl, baseTpl)
+		for j, el := range opts.Begin {
+			cursorTpl[len(baseTpl)+j] = fdblayer.NormalizeTupleElement(el)
+		}
+		cursorKey := dir.Pack(cursorTpl)
+		if opts.Reverse {
+			cursorRange, err := fdb.PrefixRange(cursorKey)
+			if err != nil {
+				return nil, err
+			}
+			if string(cursorRange.End.FDBKey()) < string(rangeEnd.FDBKey()) {
+				rangeEnd = cursorRange.End
+			}
+		} else if string(cursorKey) > string(rangeBegin.FDBKey()) {
+			rangeBegin = cursorKey
+		}
+	}
+	if string(rangeBegin.FDBKey()) >= string(rangeEnd.FDBKey()) {
+		return result, nil
+	}
+	rangeOpts := fdb.RangeOptions{Reverse: opts.Reverse}
+	if opts.Limit > 0 {
+		rangeOpts.Limit = opts.Limit + 1
+	}
+	kvs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: rangeBegin, End: rangeEnd}, rangeOpts).GetSliceOrPanic()
+	pageLen := len(kvs)
+	pkIndexStart := 3 + 2
 	if opts.Limit > 0 && pageLen > opts.Limit {
 		nextTpl, err := dir.Unpack(kvs[opts.Limit].Key)
 		if err != nil {
