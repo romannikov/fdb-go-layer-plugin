@@ -279,10 +279,119 @@ func TestBuildMessageSpec_ValidationErrors(t *testing.T) {
 		t.Fatalf("expected [id, vs1], got [%s, %s]", reordered2[0].ProtoName, reordered2[1].ProtoName)
 	}
 
-	// 15. EscapeRustIdent for non-rawable Rust keywords
-	for _, kw := range []string{"self", "Self", "super", "crate"} {
-		if got := EscapeRustIdent(kw); got != kw+"_" {
-			t.Fatalf("EscapeRustIdent(%q) = %q, want %q", kw, got, kw+"_")
+	// 15. Repeated atomic mutation field in ValidateFieldSpec
+	err = ValidateFieldSpec(FieldSpec{
+		ProtoName:  "scores",
+		Kind:       KindInt64,
+		Mutation:   MutationAdd,
+		IsRepeated: true,
+	}, "InvalidMsg")
+	if err == nil || !strings.Contains(err.Error(), "cannot be repeated") {
+		t.Fatalf("expected repeated atomic mutation error, got %v", err)
+	}
+
+	// 16. Unsupported key types (float, double, message) in primary_key or secondary_index
+	for _, badKind := range []FieldKind{KindFloat, KindDouble, KindMessage, KindUnknown} {
+		badField := FieldSpec{ProtoName: "bad", GoName: "Bad", Kind: badKind}
+		badFields := []FieldSpec{fields[0], badField}
+		badMap := map[string]FieldSpec{
+			"id":  fields[0],
+			"bad": badField,
+		}
+		if _, err := BuildMessageSpec("InvalidMsg", badFields, badMap, []string{"bad"}, nil, false); err == nil || !strings.Contains(err.Error(), "unsupported kind") {
+			t.Fatalf("expected unsupported primary key type error for kind %v, got %v", badKind, err)
+		}
+		if _, err := BuildMessageSpec("InvalidMsg", badFields, badMap, []string{"id"}, []*annotationspb.SecondaryIndex{
+			{Fields: []string{"bad"}},
+		}, false); err == nil || !strings.Contains(err.Error(), "unsupported kind") {
+			t.Fatalf("expected unsupported secondary index key type error for kind %v, got %v", badKind, err)
 		}
 	}
 }
+
+func TestEffectiveIndexPrefixes(t *testing.T) {
+	status := FieldSpec{ProtoName: "status", GoName: "Status", Kind: KindString}
+	createdAt := FieldSpec{ProtoName: "created_at", GoName: "CreatedAt", Kind: KindInt64}
+	region := FieldSpec{ProtoName: "region", GoName: "Region", Kind: KindString}
+
+	indexes := []SecondaryIndexSpec{
+		{
+			Fields: []FieldSpec{status, createdAt, region},
+		},
+		{
+			// Exact match with the 1-field prefix of index 0; should prevent index 0 from emitting a duplicate "Status" prefix.
+			Fields: []FieldSpec{status},
+		},
+		{
+			// Shares the 2-field prefix "StatusCreatedAt" with index 0; only index 0 should emit "StatusCreatedAt".
+			Fields: []FieldSpec{status, createdAt, status},
+		},
+	}
+
+	indexes = PopulateIndexPrefixes(indexes)
+
+	// Index 0 has 3 fields: Status, CreatedAt, Region.
+	// Prefix "Status" collides with full index 1 ("Status"), so only [status, createdAt] should be emitted.
+	if len(indexes[0].Prefixes) != 1 {
+		t.Fatalf("expected 1 prefix on indexes[0], got %d: %+v", len(indexes[0].Prefixes), indexes[0].Prefixes)
+	}
+	if len(indexes[0].Prefixes[0].Fields) != 2 || indexes[0].Prefixes[0].Fields[0].GoName != "Status" || indexes[0].Prefixes[0].Fields[1].GoName != "CreatedAt" {
+		t.Fatalf("unexpected prefix on indexes[0]: %+v", indexes[0].Prefixes[0])
+	}
+
+	// Index 1 is single-field -> 0 prefixes.
+	if len(indexes[1].Prefixes) != 0 {
+		t.Fatalf("expected 0 prefixes on indexes[1], got %d", len(indexes[1].Prefixes))
+	}
+
+	// Index 2's prefixes ("Status" and "StatusCreatedAt") are already covered -> 0 prefixes.
+	if len(indexes[2].Prefixes) != 0 {
+		t.Fatalf("expected 0 prefixes on indexes[2], got %d", len(indexes[2].Prefixes))
+	}
+}
+
+func TestFileSpec_AnnotatedMessages(t *testing.T) {
+	idField := FieldSpec{ProtoName: "id", GoName: "Id", Kind: KindString}
+	file := &FileSpec{
+		GoPackageName: "store",
+		Messages: []MessageSpec{
+			{Name: "Helper"},
+			{Name: "User", PrimaryKeyFields: []FieldSpec{idField}},
+			{Name: "Order", PrimaryKeyFields: []FieldSpec{idField}},
+		},
+	}
+	annotated := file.AnnotatedMessages()
+	if len(annotated) != 2 || annotated[0].Name != "User" || annotated[1].Name != "Order" {
+		t.Fatalf("unexpected AnnotatedMessages: %+v", annotated)
+	}
+}
+
+func TestNilGuards(t *testing.T) {
+	if _, err := ParsePlugin(nil); err == nil {
+		t.Fatal("expected error for ParsePlugin(nil)")
+	}
+	if _, err := ProcessMessage(nil, nil); err == nil {
+		t.Fatal("expected error for ProcessMessage(nil, nil)")
+	}
+	if _, err := ProcessMessageAll(nil, nil); err == nil {
+		t.Fatal("expected error for ProcessMessageAll(nil, nil)")
+	}
+	if got := ProcessEnum(nil); got.Name != "" || len(got.Values) != 0 {
+		t.Fatalf("expected empty EnumSpec for ProcessEnum(nil), got %+v", got)
+	}
+	if got := ProcessEnum(&protogen.Enum{GoIdent: protogen.GoIdent{GoName: "Role"}}); got.Name != "" {
+		t.Fatalf("expected empty EnumSpec when Desc is nil, got %+v", got)
+	}
+	fieldMap := map[string]FieldSpec{
+		"email": {ProtoName: "email", GoName: "Email", Kind: KindString},
+	}
+	if _, err := BuildSecondaryIndex(nil, fieldMap, nil, "User"); err == nil {
+		t.Fatal("expected error for BuildSecondaryIndex(nil, ...)")
+	}
+	si, err := BuildSecondaryIndex(&annotationspb.SecondaryIndex{Fields: []string{"email"}}, fieldMap, nil, "User")
+	if err != nil || si.IndexID == 0 {
+		t.Fatalf("expected BuildSecondaryIndex with nil usedHashes to succeed, got si=%+v, err=%v", si, err)
+	}
+}
+
+

@@ -155,6 +155,7 @@ func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 		}
 		for _, item := range old.Tags {
 			if _, keep := newSet[item]; !keep {
+				newSet[item] = struct{}{}
 				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
 					item,
 					old.Id,
@@ -163,6 +164,7 @@ func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 		}
 		for _, item := range entity.Tags {
 			if _, existed := oldSet[item]; !existed {
+				oldSet[item] = struct{}{}
 				tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
 					item,
 					entity.Id,
@@ -204,7 +206,12 @@ func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 			return fmt.Errorf("failed to unmarshal existing post: %w", err)
 		}
 		// Fan-out index
+		seen := make(map[string]struct{}, len(entity.Tags))
 		for _, item := range entity.Tags {
+			if _, dup := seen[item]; dup {
+				continue
+			}
+			seen[item] = struct{}{}
 			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
 				item,
 				entity.Id,

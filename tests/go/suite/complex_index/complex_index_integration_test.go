@@ -1071,8 +1071,51 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 	if len(byPK) != 2 {
 		t.Fatalf("expected 2 orders from BatchGetOrderByPK, got %+v", byPK)
 	}
+
+	// 3. Partial-prefix queries on composite index (status, created_at): GetOrderByStatus & QueryOrderByStatus
+	var allPending []*store.Order
+	var statusFwd1, statusFwd2, statusRev1, statusRev2 *store.OrderPaginatedResult
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		allPending, err = orderRepo.GetOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING)
+		if err != nil {
+			return err
+		}
+		statusFwd1, err = orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+			Limit: 2,
+		})
+		if err != nil {
+			return err
+		}
+		statusFwd2, err = orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+			Begin: statusFwd1.NextKey,
+			Limit: 3,
+		})
+		if err != nil {
+			return err
+		}
+		statusRev1, err = orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+			Limit:   2,
+			Reverse: true,
+		})
+		if err != nil {
+			return err
+		}
+		statusRev2, err = orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+			Begin:   statusRev1.NextKey,
+			Limit:   3,
+			Reverse: true,
+		})
+		return err
+	})
+	if len(allPending) != 4 {
+		t.Fatalf("expected 4 PENDING orders from GetOrderByStatus, got %d", len(allPending))
+	}
+	if len(statusFwd1.Items) != 2 || !statusFwd1.HasMore || len(statusFwd2.Items) != 2 || statusFwd2.HasMore {
+		t.Fatalf("unexpected QueryOrderByStatus forward pages: p1=%+v, p2=%+v", statusFwd1, statusFwd2)
+	}
+	if len(statusRev1.Items) != 2 || !statusRev1.HasMore || len(statusRev2.Items) != 2 || statusRev2.HasMore {
+		t.Fatalf("unexpected QueryOrderByStatus reverse pages: p1=%+v, p2=%+v", statusRev1, statusRev2)
+	}
 }
-
-
-
 

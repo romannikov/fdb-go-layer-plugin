@@ -258,6 +258,7 @@ func (r *auditlogRepository) Set(ctx context.Context, tr fdblayer.Transaction, d
 		}
 		for _, item := range old.Tags {
 			if _, keep := newSet[item]; !keep {
+				newSet[item] = struct{}{}
 				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
 					item,
 					fdblayer.BytesToVersionstamp(old.LogId),
@@ -266,6 +267,7 @@ func (r *auditlogRepository) Set(ctx context.Context, tr fdblayer.Transaction, d
 		}
 		for _, item := range entity.Tags {
 			if _, existed := oldSet[item]; !existed {
+				oldSet[item] = struct{}{}
 				tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
 					item,
 					fdblayer.BytesToVersionstamp(entity.LogId),
@@ -310,7 +312,12 @@ func (r *auditlogRepository) Delete(ctx context.Context, tr fdblayer.Transaction
 		// Standard index
 		tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 244111290, entity.Actor, fdblayer.BytesToVersionstamp(entity.LogId)}))
 		// Fan-out index
+		seen := make(map[string]struct{}, len(entity.Tags))
 		for _, item := range entity.Tags {
+			if _, dup := seen[item]; dup {
+				continue
+			}
+			seen[item] = struct{}{}
 			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
 				item,
 				fdblayer.BytesToVersionstamp(entity.LogId),

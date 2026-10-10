@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/romannikov/fdb-layer/compiler/backend"
 	"github.com/romannikov/fdb-layer/compiler/ir"
 )
 
@@ -158,6 +159,8 @@ func TestGenerateMessage_EntityAndQueue(t *testing.T) {
 		"func (r *orderRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk OrderPrimaryKey)",
 		"func (r *orderRepository) GetOrderByStatusAndOrderSeq(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, OrderSeq uint64)",
 		"func (r *orderRepository) QueryOrderByStatusAndOrderSeq(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, OrderSeq uint64, opts OrderPaginationOptions)",
+		"func (r *orderRepository) GetOrderByStatus(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus)",
+		"func (r *orderRepository) QueryOrderByStatus(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, opts OrderPaginationOptions)",
 		"func (r *orderRepository) GetOrderByHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Hashes []byte)",
 		"func (r *orderRepository) AddOrderCounter(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, TenantId string, OrderSeq uint64, val int64)",
 		"func (r *orderRepository) SetOrderCounter(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, TenantId string, OrderSeq uint64, val int64)",
@@ -287,25 +290,83 @@ func TestGenerateMessage_NonQueueVersionstampWithIndexesAndAtomics(t *testing.T)
 }
 
 func TestGenerateGoRepository_KeywordQueueParam(t *testing.T) {
-	qType := ir.FieldSpec{ProtoName: "type", GoName: "Type", Number: 1, Kind: ir.KindString}
 	vs := ir.FieldSpec{ProtoName: "vs", GoName: "Vs", Number: 2, Kind: ir.KindBytes, IsVersionstamp: true}
-	spec := ir.MessageSpec{
-		Name:             "JobQueue",
-		GoPackageName:    "testspb",
-		IsQueue:          true,
-		Fields:           []ir.FieldSpec{qType, vs},
-		PrimaryKeyFields: []ir.FieldSpec{qType, vs},
-	}
+	for _, reserved := range []struct {
+		protoName string
+		goName    string
+	}{
+		{"type", "Type"},
+		{"limit", "Limit"},
+		{"items", "Items"},
+		{"row", "Row"},
+		{"tuple", "Tuple"},
+		{"len", "Len"},
+		{"string", "String"},
+	} {
+		qField := ir.FieldSpec{ProtoName: reserved.protoName, GoName: reserved.goName, Number: 1, Kind: ir.KindString}
+		spec := ir.MessageSpec{
+			Name:             "JobQueue",
+			GoPackageName:    "testspb",
+			IsQueue:          true,
+			Fields:           []ir.FieldSpec{vs, qField},
+			PrimaryKeyFields: []ir.FieldSpec{vs, qField}, // versionstamp first to verify GenerateMessage reorders PK
+		}
 
-	var p bufferPrinter
-	GenerateMessage(&p, spec)
-	out := p.sb.String()
+		var p bufferPrinter
+		GenerateMessage(&p, spec)
+		out := p.sb.String()
 
-	fset := token.NewFileSet()
-	if _, err := parser.ParseFile(fset, "jobqueue.fdb.go", out, parser.AllErrors); err != nil {
-		t.Fatalf("generated Go queue code with 'type' partition key failed to parse: %v\n%s", err, out)
-	}
-	if !strings.Contains(out, "typeParam string") {
-		t.Errorf("expected 'typeParam string' in Dequeue signature, got:\n%s", out)
+		fset := token.NewFileSet()
+		if _, err := parser.ParseFile(fset, "jobqueue.fdb.go", out, parser.AllErrors); err != nil {
+			t.Fatalf("generated Go queue code with %q partition key failed to parse: %v\n%s", reserved.protoName, err, out)
+		}
+		expectedParam := reserved.protoName + "Param string"
+		if !strings.Contains(out, expectedParam) {
+			t.Errorf("expected %q in Dequeue/DequeueBatch signature, got:\n%s", expectedParam, out)
+		}
 	}
 }
+
+func TestBackend_GenerateFile(t *testing.T) {
+	gen := NewBackend()
+	if gen.Language() != "go" {
+		t.Fatalf("expected Language() = \"go\", got %q", gen.Language())
+	}
+
+	idField := ir.FieldSpec{ProtoName: "id", GoName: "Id", Number: 1, Kind: ir.KindString}
+	fileSpec := &ir.FileSpec{
+		ProtoPath:               "store.proto",
+		Package:                 "store",
+		GoImportPath:            "example.com/store",
+		GoPackageName:           "store",
+		GeneratedFilenamePrefix: "tests/go/store/store",
+		Messages: []ir.MessageSpec{
+			{Name: "Address"},
+			{
+				Name:             "User",
+				Fields:           []ir.FieldSpec{idField},
+				PrimaryKeyFields: []ir.FieldSpec{idField},
+			},
+		},
+	}
+
+	files, err := gen.GenerateFile(fileSpec, backend.Options{})
+	if err != nil {
+		t.Fatalf("unexpected error from GenerateFile: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 generated file (skipping unannotated Address), got %d", len(files))
+	}
+	if files[0].Filename != "tests/go/store/store_user.fdb.go" {
+		t.Fatalf("unexpected filename: %q", files[0].Filename)
+	}
+	if files[0].GoImportPath != "example.com/store" {
+		t.Fatalf("expected GoImportPath \"example.com/store\", got %q", files[0].GoImportPath)
+	}
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, files[0].Filename, files[0].Content, parser.AllErrors); err != nil {
+		t.Fatalf("generated file failed to parse: %v", err)
+	}
+}
+
+

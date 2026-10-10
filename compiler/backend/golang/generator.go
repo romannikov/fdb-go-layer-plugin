@@ -4,16 +4,63 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/romannikov/fdb-layer/compiler/backend"
 	"github.com/romannikov/fdb-layer/compiler/ir"
 )
 
 // Printer abstracts protogen.GeneratedFile.P so Go repository generation can be unit-tested without protogen.
-type Printer interface {
-	P(v ...any)
+type Printer = backend.Printer
+
+// Backend implements backend.Generator for Go repository code generation.
+type Backend struct{}
+
+// NewBackend returns a new Go code generator backend.
+func NewBackend() *Backend {
+	return &Backend{}
+}
+
+// Language returns the canonical language identifier ("go").
+func (b *Backend) Language() string {
+	return "go"
+}
+
+// GenerateFile transforms a language-neutral ir.FileSpec into one .fdb.go file per annotated message.
+func (b *Backend) GenerateFile(file *ir.FileSpec, opts backend.Options) ([]backend.GeneratedFile, error) {
+	if file == nil {
+		return nil, nil
+	}
+	annotated := file.AnnotatedMessages()
+	if len(annotated) == 0 {
+		return nil, nil
+	}
+	outputs := make([]backend.GeneratedFile, 0, len(annotated))
+	for _, msg := range annotated {
+		if msg.GoPackagePath == "" {
+			msg.GoPackagePath = file.GoImportPath
+		}
+		if msg.GoPackageName == "" {
+			msg.GoPackageName = file.GoPackageName
+		}
+		if msg.FilePrefix == "" {
+			msg.FilePrefix = file.GeneratedFilenamePrefix
+		}
+		var buf backend.BufferPrinter
+		GenerateMessage(&buf, msg)
+		fileName := msg.FilePrefix + "_" + strings.ToLower(msg.Name) + ".fdb.go"
+		outputs = append(outputs, backend.GeneratedFile{
+			Filename:     fileName,
+			GoImportPath: msg.GoPackagePath,
+			Content:      buf.Bytes(),
+		})
+	}
+	return outputs, nil
 }
 
 // GenerateMessage emits the complete Go repository code for a single Protobuf message.
 func GenerateMessage(g Printer, msg ir.MessageSpec) {
+	if msg.IsQueue {
+		msg.PrimaryKeyFields = ir.ReorderQueuePrimaryKeyFields(msg.PrimaryKeyFields)
+	}
 	generateHeader(g, msg)
 	if msg.IsQueue {
 		generateQueueRepository(g, msg)
@@ -146,8 +193,6 @@ func generateDequeue(g Printer, msg ir.MessageSpec) {
 	g.P("	keyToDelete := firstItem.Key")
 	g.P("	payload := firstItem.Value")
 	g.P()
-	g.P("	tr.Clear(keyToDelete)")
-	g.P()
 	g.P("	entity := &", msg.Name, "{}")
 	g.P("	err = proto.Unmarshal(payload, entity)")
 	g.P("	if err != nil {")
@@ -170,6 +215,7 @@ func generateDequeue(g Printer, msg ir.MessageSpec) {
 		}
 		g.P()
 	}
+	g.P("	tr.Clear(keyToDelete)")
 	g.P("	return entity, nil")
 	g.P("}")
 	g.P()
@@ -209,7 +255,6 @@ func generateDequeueBatch(g Printer, msg ir.MessageSpec) {
 	g.P("		if err := ctx.Err(); err != nil {")
 	g.P("			return nil, err")
 	g.P("		}")
-	g.P("		tr.Clear(row.Key)")
 	g.P("		entity := &", msg.Name, "{}")
 	g.P("		if err := proto.Unmarshal(row.Value, entity); err != nil {")
 	g.P("			return nil, err")
@@ -229,6 +274,7 @@ func generateDequeueBatch(g Printer, msg ir.MessageSpec) {
 			}
 		}
 	}
+	g.P("		tr.Clear(row.Key)")
 	g.P("		items = append(items, entity)")
 	g.P("	}")
 	g.P("	return items, nil")
@@ -243,9 +289,13 @@ func generateEntityRepository(g Printer, msg ir.MessageSpec) {
 	generateDelete(g, msg)
 	generateBatchGet(g, msg)
 	generateList(g, msg)
-	for _, idx := range msg.SecondaryIndexes {
-		generateGetByIndex(g, msg, idx)
-		generateQueryByIndex(g, msg, idx)
+	for i, idx := range msg.SecondaryIndexes {
+		generateGetByIndex(g, msg, idx, idx.Fields)
+		generateQueryByIndex(g, msg, idx, idx.Fields)
+		for _, prefix := range ir.EffectiveIndexPrefixes(msg.SecondaryIndexes, i) {
+			generateGetByIndex(g, msg, idx, prefix.Fields)
+			generateQueryByIndex(g, msg, idx, prefix.Fields)
+		}
 	}
 	generateAtomicMutators(g, msg)
 }
@@ -287,10 +337,15 @@ func generateTypesAndInterface(g Printer, msg ir.MessageSpec) {
 	g.P("	BatchGet", msg.Name, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*", msg.Name, ", error)")
 	g.P("	BatchGet", msg.Name, "ByPK(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []", pkType, ") ([]*", msg.Name, ", error)")
 	g.P("	List", msg.Name, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts ", msg.Name, "PaginationOptions) (*", msg.Name, "PaginatedResult, error)")
-	for _, idx := range msg.SecondaryIndexes {
+	for i, idx := range msg.SecondaryIndexes {
 		joined := JoinFieldNames(idx.Fields)
 		g.P("	Get", msg.Name, "By", joined, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ", fieldParamDecls(idx.Fields), ") ([]*", msg.Name, ", error)")
 		g.P("	Query", msg.Name, "By", joined, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ", fieldParamDecls(idx.Fields), ", opts ", msg.Name, "PaginationOptions) (*", msg.Name, "PaginatedResult, error)")
+		for _, prefix := range ir.EffectiveIndexPrefixes(msg.SecondaryIndexes, i) {
+			prefixJoined := JoinFieldNames(prefix.Fields)
+			g.P("	Get", msg.Name, "By", prefixJoined, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ", fieldParamDecls(prefix.Fields), ") ([]*", msg.Name, ", error)")
+			g.P("	Query", msg.Name, "By", prefixJoined, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ", fieldParamDecls(prefix.Fields), ", opts ", msg.Name, "PaginationOptions) (*", msg.Name, "PaginatedResult, error)")
+		}
 	}
 	for _, f := range msg.Fields {
 		if f.Mutation != ir.MutationNone {
@@ -604,18 +659,25 @@ func generateSet(g Printer, msg ir.MessageSpec) {
 					g.P("		}")
 					g.P("		for _, item := range old.", f.GoName, " {")
 					g.P("			if _, keep := newSet[", mapExpr, "]; !keep {")
+					g.P("				newSet[", mapExpr, "] = struct{}{}")
 					emitFanOutIndexWrite(g, msg, idx, i, "old", false, "\t\t\t\t")
 					g.P("			}")
 					g.P("		}")
 					g.P("		for _, item := range entity.", f.GoName, " {")
 					g.P("			if _, existed := oldSet[", mapExpr, "]; !existed {")
+					g.P("				oldSet[", mapExpr, "] = struct{}{}")
 					emitFanOutIndexWrite(g, msg, idx, i, "entity", true, "\t\t\t\t")
 					g.P("			}")
 					g.P("		}")
 					g.P("	} else {")
 					if HasNonRepeatedFields(idx.Fields) {
 						g.P("		if old != nil {")
+						g.P("			seenOld := make(map[", mapType, "]struct{}, len(old.", f.GoName, "))")
 						g.P("			for _, item := range old.", f.GoName, " {")
+						g.P("				if _, dup := seenOld[", mapExpr, "]; dup {")
+						g.P("					continue")
+						g.P("				}")
+						g.P("				seenOld[", mapExpr, "] = struct{}{}")
 						emitFanOutIndexWrite(g, msg, idx, i, "old", false, "\t\t\t\t")
 						g.P("			}")
 						g.P("		}")
@@ -692,7 +754,14 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 				g.P("		// Fan-out index")
 				for i, f := range idx.Fields {
 					if f.IsRepeated {
+						mapType := MapKeyType(f)
+						mapExpr := MapKeyExpr("item", f)
+						g.P("		seen := make(map[", mapType, "]struct{}, len(entity.", f.GoName, "))")
 						g.P("		for _, item := range entity.", f.GoName, " {")
+						g.P("			if _, dup := seen[", mapExpr, "]; dup {")
+						g.P("				continue")
+						g.P("			}")
+						g.P("			seen[", mapExpr, "] = struct{}{}")
 						emitFanOutIndexWrite(g, msg, idx, i, "entity", false, "\t\t\t")
 						g.P("		}")
 					}
@@ -1099,19 +1168,19 @@ func generateList(g Printer, msg ir.MessageSpec) {
 	g.P()
 }
 
-func generateGetByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec) {
+func generateGetByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec, queryFields []ir.FieldSpec) {
 	lowerName := strings.ToLower(msg.Name)
-	joinedNames := JoinFieldNames(idx.Fields)
+	joinedNames := JoinFieldNames(queryFields)
 	hasMut := ir.HasMutationFields(msg)
 	hasVS := ir.MsgHasVersionstampPK(msg)
 
 	var idxPackArgs []string
-	for _, f := range idx.Fields {
+	for _, f := range queryFields {
 		idxPackArgs = append(idxPackArgs, PackField(f.GoName, f))
 	}
 
 	g.P("// Get", msg.Name, "By", joinedNames, " retrieves ", msg.Name, " entities by their ", joinedNames, " index.")
-	g.P("func (r *", lowerName, "Repository) Get", msg.Name, "By", joinedNames, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ", fieldParamDecls(idx.Fields), ") ([]*", msg.Name, ", error) {")
+	g.P("func (r *", lowerName, "Repository) Get", msg.Name, "By", joinedNames, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ", fieldParamDecls(queryFields), ") ([]*", msg.Name, ", error) {")
 	g.P("	if err := ctx.Err(); err != nil {")
 	g.P("		return nil, err")
 	g.P("	}")
@@ -1209,19 +1278,20 @@ func generateGetByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec
 	g.P()
 }
 
-func generateQueryByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec) {
+func generateQueryByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec, queryFields []ir.FieldSpec) {
 	lowerName := strings.ToLower(msg.Name)
-	joinedNames := JoinFieldNames(idx.Fields)
+	joinedNames := JoinFieldNames(queryFields)
 	hasMut := ir.HasMutationFields(msg)
 	hasVS := ir.MsgHasVersionstampPK(msg)
+	isPartialPrefix := len(queryFields) < len(idx.Fields)
 
 	var idxPackArgs []string
-	for _, f := range idx.Fields {
+	for _, f := range queryFields {
 		idxPackArgs = append(idxPackArgs, PackField(f.GoName, f))
 	}
 
 	g.P("// Query", msg.Name, "By", joinedNames, " retrieves a paginated page of ", msg.Name, " entities by their ", joinedNames, " index.")
-	g.P("func (r *", lowerName, "Repository) Query", msg.Name, "By", joinedNames, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ", fieldParamDecls(idx.Fields), ", opts ", msg.Name, "PaginationOptions) (*", msg.Name, "PaginatedResult, error) {")
+	g.P("func (r *", lowerName, "Repository) Query", msg.Name, "By", joinedNames, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ", fieldParamDecls(queryFields), ", opts ", msg.Name, "PaginationOptions) (*", msg.Name, "PaginatedResult, error) {")
 	g.P("	if err := ctx.Err(); err != nil {")
 	g.P("		return nil, err")
 	g.P("	}")
@@ -1248,11 +1318,13 @@ func generateQueryByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSp
 	g.P("			cursorTpl[len(baseTpl)+j] = fdblayer.NormalizeTupleElement(el)")
 	g.P("		}")
 	if hasVS {
+		suffixIdxFields := len(idx.Fields) - len(queryFields)
 		for j, f := range msg.PrimaryKeyFields {
 			if f.IsVersionstamp {
-				g.P("		if len(opts.Begin) > ", j, " {")
-				g.P("			if rawVS, ok := opts.Begin[", j, "].([]byte); ok {")
-				g.P("				cursorTpl[len(baseTpl)+", j, "] = fdblayer.BytesToVersionstamp(rawVS)")
+				vsOffset := suffixIdxFields + j
+				g.P("		if len(opts.Begin) > ", vsOffset, " {")
+				g.P("			if rawVS, ok := opts.Begin[", vsOffset, "].([]byte); ok {")
+				g.P("				cursorTpl[len(baseTpl)+", vsOffset, "] = fdblayer.BytesToVersionstamp(rawVS)")
 				g.P("			}")
 				g.P("		}")
 			}
@@ -1281,14 +1353,19 @@ func generateQueryByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSp
 	g.P("	kvs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: rangeBegin, End: rangeEnd}, rangeOpts).GetSliceOrPanic()")
 	g.P("	pageLen := len(kvs)")
 	g.P("	pkIndexStart := 3 + ", len(idx.Fields))
+	cursorStartVar := "pkIndexStart"
+	if isPartialPrefix {
+		g.P("	cursorStart := 3 + ", len(queryFields))
+		cursorStartVar = "cursorStart"
+	}
 	g.P("	if opts.Limit > 0 && pageLen > opts.Limit {")
 	g.P("		nextTpl, err := dir.Unpack(kvs[opts.Limit].Key)")
 	g.P("		if err != nil {")
 	g.P("			return nil, err")
 	g.P("		}")
-	g.P("		if len(nextTpl) > pkIndexStart {")
+	g.P("		if len(nextTpl) > ", cursorStartVar, " {")
 	g.P("			result.HasMore = true")
-	g.P("			result.NextKey = nextTpl[pkIndexStart:]")
+	g.P("			result.NextKey = nextTpl[", cursorStartVar, ":]")
 	g.P("		}")
 	g.P("		kvs = kvs[:opts.Limit]")
 	g.P("	}")
@@ -1776,6 +1853,14 @@ var goKeywordsAndReservedLocals = map[string]bool{
 	"prefixTuple": true, "prefixRange": true, "options": true, "rows": true,
 	"firstItem": true, "keyToDelete": true, "payload": true, "entity": true,
 	"tpl": true, "unpackErr": true, "vs": true, "ok": true, "val": true,
+	"limit": true, "items": true, "row": true,
+	"fdb": true, "tuple": true, "fdblayer": true, "proto": true, "directory": true,
+	"context": true, "bytes": true, "binary": true, "fmt": true,
+	"len": true, "make": true, "append": true, "copy": true, "new": true, "panic": true,
+	"int": true, "int8": true, "int16": true, "int32": true, "int64": true,
+	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
+	"float32": true, "float64": true, "string": true, "bool": true,
+	"byte": true, "rune": true, "any": true, "error": true, "nil": true, "true": true, "false": true,
 }
 
 func safeGoParamName(name string) string {

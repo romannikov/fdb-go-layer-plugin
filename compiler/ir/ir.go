@@ -49,6 +49,19 @@ func (k FieldKind) IsInteger() bool {
 	}
 }
 
+// IsValidKeyKind returns true if k can be used in a primary key or secondary index tuple.
+func (k FieldKind) IsValidKeyKind() bool {
+	switch k {
+	case KindInt32, KindSint32, KindSfixed32,
+		KindInt64, KindSint64, KindSfixed64,
+		KindUint32, KindFixed32, KindUint64, KindFixed64,
+		KindString, KindBool, KindBytes, KindEnum:
+		return true
+	default:
+		return false
+	}
+}
+
 // MutationType represents an FDB atomic mutation operation in the language-neutral IR.
 type MutationType int
 
@@ -62,7 +75,6 @@ const (
 // EnumValueSpec describes a single value in a Protobuf enum.
 type EnumValueSpec struct {
 	ProtoName string // Original UPPER_SNAKE_CASE name in .proto
-	RustName  string // PascalCase variant name for prost::Enumeration
 	Number    int32  // Enum numeric value
 }
 
@@ -74,20 +86,22 @@ type EnumSpec struct {
 
 // FieldSpec describes a single Protobuf field in a language-neutral representation.
 type FieldSpec struct {
-	ProtoName       string       // Original snake_case name in .proto
-	GoName          string       // CamelCase name from protogen (for Go backend)
-	RustName        string       // snake_case / r#escaped name (for Rust backend)
-	Number          int32        // Protobuf field tag number
-	Kind            FieldKind
-	EnumGoName      string       // If Kind == KindEnum
-	EnumRustName    string       // If Kind == KindEnum (Rust path from file root, e.g. "Role" or "user::Status")
-	MessageGoName   string       // If Kind == KindMessage
-	MessageRustName string       // If Kind == KindMessage (Rust path from file root, e.g. "Address" or "user::Profile")
-	IsRepeated      bool
-	IsUnsigned      bool         // uint32, fixed32, uint64, fixed64
-	IsEnum          bool
-	IsVersionstamp  bool
-	Mutation        MutationType
+	ProtoName      string       // Original snake_case name in .proto
+	GoName         string       // UpperCamelCase identifier
+	Number         int32        // Protobuf field tag number
+	Kind           FieldKind
+	EnumGoName     string       // Scoped enum type name if Kind == KindEnum
+	MessageGoName  string       // Scoped message type name if Kind == KindMessage
+	IsRepeated     bool
+	IsUnsigned     bool         // uint32, fixed32, uint64, fixed64
+	IsEnum         bool
+	IsVersionstamp bool
+	Mutation       MutationType
+}
+
+// IndexPrefixSpec describes a non-colliding leading prefix of a composite secondary index.
+type IndexPrefixSpec struct {
+	Fields []FieldSpec
 }
 
 // SecondaryIndexSpec describes a secondary index on a message.
@@ -96,6 +110,7 @@ type SecondaryIndexSpec struct {
 	IsFanOut    bool
 	FanOutField FieldSpec
 	IndexID     int64
+	Prefixes    []IndexPrefixSpec
 }
 
 // MessageSpec describes an FDB-persisted Protobuf message, FIFO queue, or helper message.
@@ -117,38 +132,114 @@ func (m MessageSpec) HasRepository() bool {
 	return len(m.PrimaryKeyFields) > 0 || m.IsQueue
 }
 
-// ParsePlugin extracts all annotated MessageSpecs from a protogen.Plugin.
-func ParsePlugin(plugin *protogen.Plugin) ([]MessageSpec, error) {
-	var messages []MessageSpec
-	processedMessages := make(map[string]bool)
+// FileSpec describes a single parsed .proto file in the language-neutral IR.
+type FileSpec struct {
+	ProtoPath               string
+	Package                 string
+	GoImportPath            string
+	GoPackageName           string
+	GeneratedFilenamePrefix string
+	Enums                   []EnumSpec
+	Messages                []MessageSpec
+}
 
-	for _, file := range plugin.Files {
-		if !file.Generate {
+// AnnotatedMessages returns only the top-level messages in the file that require repository generation.
+func (f *FileSpec) AnnotatedMessages() []MessageSpec {
+	if f == nil {
+		return nil
+	}
+	var out []MessageSpec
+	for _, m := range f.Messages {
+		if m.HasRepository() {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// ParseFile extracts and validates a language-neutral FileSpec from a protogen.File.
+func ParseFile(file *protogen.File) (*FileSpec, error) {
+	if file == nil {
+		return nil, fmt.Errorf("cannot parse nil protogen.File")
+	}
+	var protoPath, pkg string
+	if file.Desc != nil {
+		protoPath = file.Desc.Path()
+		pkg = string(file.Desc.Package())
+	}
+	goImportPath := string(file.GoImportPath)
+	goPackageName := string(file.GoPackageName)
+	prefix := file.GeneratedFilenamePrefix
+
+	spec := &FileSpec{
+		ProtoPath:               protoPath,
+		Package:                 pkg,
+		GoImportPath:            goImportPath,
+		GoPackageName:           goPackageName,
+		GeneratedFilenamePrefix: prefix,
+	}
+
+	for _, enum := range file.Enums {
+		spec.Enums = append(spec.Enums, ProcessEnum(enum))
+	}
+
+	processed := make(map[string]bool, len(file.Messages))
+	for _, message := range file.Messages {
+		msgName := message.GoIdent.GoName
+		dedupKey := goImportPath + "." + msgName
+		if message.Desc != nil {
+			dedupKey = string(message.Desc.FullName())
+		}
+		if processed[dedupKey] {
 			continue
 		}
-		goPackagePath := string(file.GoImportPath)
-		for _, message := range file.Messages {
-			msgName := message.GoIdent.GoName
-			dedupKey := goPackagePath + "." + msgName
-			if message.Desc != nil {
-				dedupKey = string(message.Desc.FullName())
-			}
-			if processedMessages[dedupKey] {
-				continue
-			}
-			processedMessages[dedupKey] = true
+		processed[dedupKey] = true
 
-			spec, err := ProcessMessage(message, message.Desc.Options())
-			if err != nil {
-				return nil, err
-			}
-			if spec != nil {
-				spec.GoPackagePath = goPackagePath
-				spec.GoPackageName = string(file.GoPackageName)
-				spec.FilePrefix = file.GeneratedFilenamePrefix
-				messages = append(messages, *spec)
-			}
+		var opts proto.Message
+		if message.Desc != nil {
+			opts = message.Desc.Options()
 		}
+		msgSpec, err := ProcessMessageAll(message, opts)
+		if err != nil {
+			return nil, err
+		}
+		if msgSpec != nil {
+			msgSpec.GoPackagePath = goImportPath
+			msgSpec.GoPackageName = goPackageName
+			msgSpec.FilePrefix = prefix
+			spec.Messages = append(spec.Messages, *msgSpec)
+		}
+	}
+
+	return spec, nil
+}
+
+// ParsePlugin extracts all annotated MessageSpecs from a protogen.Plugin.
+func ParsePlugin(plugin *protogen.Plugin) ([]MessageSpec, error) {
+	if plugin == nil {
+		return nil, fmt.Errorf("cannot parse nil protogen.Plugin")
+	}
+	var messages []MessageSpec
+	processedFiles := make(map[string]bool)
+
+	for _, file := range plugin.Files {
+		if file == nil || !file.Generate {
+			continue
+		}
+		fileKey := file.GeneratedFilenamePrefix
+		if file.Desc != nil {
+			fileKey = file.Desc.Path()
+		}
+		if processedFiles[fileKey] {
+			continue
+		}
+		processedFiles[fileKey] = true
+
+		fileSpec, err := ParseFile(file)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, fileSpec.AnnotatedMessages()...)
 	}
 	return messages, nil
 }
@@ -169,6 +260,9 @@ func ProcessMessage(message *protogen.Message, msgOptions proto.Message) (*Messa
 // ProcessMessageAll extracts a MessageSpec from a protogen.Message (including unannotated
 // helper messages, nested messages, and nested enums).
 func ProcessMessageAll(message *protogen.Message, msgOptions proto.Message) (*MessageSpec, error) {
+	if message == nil {
+		return nil, fmt.Errorf("cannot process nil protogen.Message")
+	}
 	msgName := message.GoIdent.GoName
 	if message.Desc != nil {
 		if _, isNested := message.Desc.Parent().(protoreflect.MessageDescriptor); isNested || msgName == "" {
@@ -179,6 +273,9 @@ func ProcessMessageAll(message *protogen.Message, msgOptions proto.Message) (*Me
 	fieldMap := make(map[string]FieldSpec, len(message.Fields))
 	fields := make([]FieldSpec, 0, len(message.Fields))
 	for _, field := range message.Fields {
+		if field == nil || field.Desc == nil {
+			continue
+		}
 		f, err := extractField(field, msgName)
 		if err != nil {
 			return nil, err
@@ -238,6 +335,9 @@ func ProcessMessageAll(message *protogen.Message, msgOptions proto.Message) (*Me
 		spec.NestedEnums = append(spec.NestedEnums, ProcessEnum(nestedEnum))
 	}
 	for _, nestedMsg := range message.Messages {
+		if nestedMsg == nil {
+			continue
+		}
 		if nestedMsg.Desc != nil && nestedMsg.Desc.IsMapEntry() {
 			continue
 		}
@@ -259,44 +359,20 @@ func ProcessMessageAll(message *protogen.Message, msgOptions proto.Message) (*Me
 
 // ProcessEnum extracts a language-neutral EnumSpec from a protogen.Enum.
 func ProcessEnum(enum *protogen.Enum) EnumSpec {
+	if enum == nil || enum.Desc == nil {
+		return EnumSpec{}
+	}
 	enumName := string(enum.Desc.Name())
-	prefix := strings.ToUpper(toSnakeCase(enumName)) + "_"
-
-	rawNames := make([]string, len(enum.Values))
-	numbers := make([]int32, len(enum.Values))
-	strippedNames := make([]string, len(enum.Values))
-	seen := make(map[string]int)
-
-	for i, v := range enum.Values {
-		raw := string(v.Desc.Name())
-		rawNames[i] = raw
-		numbers[i] = int32(v.Desc.Number())
-
-		candidate := raw
-		if strings.HasPrefix(raw, prefix) {
-			rem := strings.TrimPrefix(raw, prefix)
-			if len(rem) > 0 && unicode.IsLetter(rune(rem[0])) {
-				candidate = rem
-			}
+	values := make([]EnumValueSpec, 0, len(enum.Values))
+	for _, v := range enum.Values {
+		if v == nil || v.Desc == nil {
+			continue
 		}
-		pascal := EscapeRustIdent(toPascalCase(candidate))
-		strippedNames[i] = pascal
-		seen[pascal]++
+		values = append(values, EnumValueSpec{
+			ProtoName: string(v.Desc.Name()),
+			Number:    int32(v.Desc.Number()),
+		})
 	}
-
-	values := make([]EnumValueSpec, len(enum.Values))
-	for i := range enum.Values {
-		rustName := strippedNames[i]
-		if seen[rustName] > 1 {
-			rustName = EscapeRustIdent(toPascalCase(rawNames[i]))
-		}
-		values[i] = EnumValueSpec{
-			ProtoName: rawNames[i],
-			RustName:  rustName,
-			Number:    numbers[i],
-		}
-	}
-
 	return EnumSpec{
 		Name:   enumName,
 		Values: values,
@@ -354,7 +430,7 @@ func buildMessageSpecInternal(
 		if f.Mutation != MutationNone {
 			return nil, fmt.Errorf("primary key field %q in message %s cannot have an atomic mutation", pkName, msgName)
 		}
-		if f.Kind == KindMessage || f.Kind == KindUnknown {
+		if !f.Kind.IsValidKeyKind() {
 			return nil, fmt.Errorf("primary key field %q in message %s has unsupported kind %v", pkName, msgName, f.Kind)
 		}
 		pkSet[pkName] = true
@@ -376,6 +452,7 @@ func buildMessageSpecInternal(
 		}
 		secondaryIndexes = append(secondaryIndexes, si)
 	}
+	secondaryIndexes = PopulateIndexPrefixes(secondaryIndexes)
 
 	if !allowUnannotated && len(primaryKeyFields) == 0 && !isQueue {
 		return nil, nil
@@ -407,6 +484,9 @@ func ValidateFieldSpec(f FieldSpec, msgName string) error {
 	}
 	if f.IsVersionstamp && f.IsRepeated {
 		return fmt.Errorf("field %q in message %s is marked is_versionstamp=true but cannot be repeated", f.ProtoName, msgName)
+	}
+	if f.Mutation != MutationNone && f.IsRepeated {
+		return fmt.Errorf("field %q in message %s has atomic mutation %v but cannot be repeated", f.ProtoName, msgName, f.Mutation)
 	}
 	if f.Mutation != MutationNone && !f.Kind.IsInteger() {
 		return fmt.Errorf("field %q in message %s has atomic mutation %v but is not a 32-bit or 64-bit integer type", f.ProtoName, msgName, f.Mutation)
@@ -444,73 +524,34 @@ func extractField(field *protogen.Field, msgName string) (FieldSpec, error) {
 	protoKind := field.Desc.Kind()
 	kind := MapProtoKind(protoKind)
 
-	var enumGoName, enumRustName string
+	var enumGoName string
 	if protoKind == protoreflect.EnumKind && field.Enum != nil {
 		enumGoName = field.Enum.GoIdent.GoName
-		enumRustName = rustPathFromFileRoot(field.Enum.Desc)
 	}
 
-	var msgGoName, msgRustName string
+	var msgGoName string
 	if protoKind == protoreflect.MessageKind && field.Message != nil && !field.Desc.IsMap() {
 		msgGoName = field.Message.GoIdent.GoName
-		msgRustName = rustPathFromFileRoot(field.Message.Desc)
 	}
 
 	protoName := string(field.Desc.Name())
 	spec := FieldSpec{
-		ProtoName:       protoName,
-		GoName:          field.GoName,
-		RustName:        EscapeRustIdent(protoName),
-		Number:          int32(field.Desc.Number()),
-		Kind:            kind,
-		EnumGoName:      enumGoName,
-		EnumRustName:    enumRustName,
-		MessageGoName:   msgGoName,
-		MessageRustName: msgRustName,
-		IsRepeated:      field.Desc.IsList(),
-		IsUnsigned:      kind == KindUint32 || kind == KindFixed32 || kind == KindUint64 || kind == KindFixed64,
-		IsEnum:          kind == KindEnum,
-		IsVersionstamp:  isVersionstamp,
-		Mutation:        mutation,
+		ProtoName:      protoName,
+		GoName:         field.GoName,
+		Number:         int32(field.Desc.Number()),
+		Kind:           kind,
+		EnumGoName:     enumGoName,
+		MessageGoName:  msgGoName,
+		IsRepeated:     field.Desc.IsList(),
+		IsUnsigned:     kind == KindUint32 || kind == KindFixed32 || kind == KindUint64 || kind == KindFixed64,
+		IsEnum:         kind == KindEnum,
+		IsVersionstamp: isVersionstamp,
+		Mutation:       mutation,
 	}
 	if err := ValidateFieldSpec(spec, msgName); err != nil {
 		return FieldSpec{}, err
 	}
 	return spec, nil
-}
-
-func rustPathFromFileRoot(desc protoreflect.Descriptor) string {
-	if desc == nil {
-		return ""
-	}
-	parts := []string{string(desc.Name())}
-	for p := desc.Parent(); p != nil; p = p.Parent() {
-		if msgDesc, ok := p.(protoreflect.MessageDescriptor); ok {
-			parts = append([]string{EscapeRustIdent(toSnakeCase(string(msgDesc.Name())))}, parts...)
-		} else {
-			break
-		}
-	}
-	return strings.Join(parts, "::")
-}
-
-func toSnakeCase(s string) string {
-	if s == "" {
-		return ""
-	}
-	var out strings.Builder
-	runes := []rune(s)
-	for i, r := range runes {
-		if unicode.IsUpper(r) {
-			if i > 0 && runes[i-1] != '_' && (unicode.IsLower(runes[i-1]) || (i+1 < len(runes) && unicode.IsLower(runes[i+1]))) {
-				out.WriteByte('_')
-			}
-			out.WriteRune(unicode.ToLower(r))
-		} else {
-			out.WriteRune(r)
-		}
-	}
-	return out.String()
 }
 
 func toPascalCase(s string) string {
@@ -530,6 +571,18 @@ func toPascalCase(s string) string {
 	return out.String()
 }
 
+func fieldsSignature(fields []FieldSpec) string {
+	names := make([]string, 0, len(fields))
+	for _, f := range fields {
+		name := f.GoName
+		if name == "" {
+			name = toPascalCase(f.ProtoName)
+		}
+		names = append(names, strings.ToLower(name))
+	}
+	return strings.Join(names, ",")
+}
+
 // BuildSecondaryIndex validates and constructs a SecondaryIndexSpec.
 func BuildSecondaryIndex(
 	idx *annotationspb.SecondaryIndex,
@@ -537,7 +590,7 @@ func BuildSecondaryIndex(
 	usedHashes map[int64]string,
 	msgName string,
 ) (SecondaryIndexSpec, error) {
-	if len(idx.GetFields()) == 0 {
+	if idx == nil || len(idx.GetFields()) == 0 {
 		return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s must specify at least one field", msgName)
 	}
 	seenFields := make(map[string]bool, len(idx.GetFields()))
@@ -557,7 +610,7 @@ func BuildSecondaryIndex(
 		if f.IsVersionstamp {
 			return SecondaryIndexSpec{}, fmt.Errorf("secondary index field %q in message %s cannot be a versionstamp field", idxFieldName, msgName)
 		}
-		if f.Kind == KindMessage || f.Kind == KindUnknown {
+		if !f.Kind.IsValidKeyKind() {
 			return SecondaryIndexSpec{}, fmt.Errorf("secondary index field %q in message %s has unsupported kind %v", idxFieldName, msgName, f.Kind)
 		}
 		idxFields = append(idxFields, f)
@@ -575,15 +628,7 @@ func BuildSecondaryIndex(
 		}
 	}
 
-	fieldNames := make([]string, 0, len(idxFields))
-	for _, f := range idxFields {
-		name := f.GoName
-		if name == "" {
-			name = toPascalCase(f.ProtoName)
-		}
-		fieldNames = append(fieldNames, strings.ToLower(name))
-	}
-	signature := strings.Join(fieldNames, ",")
+	signature := fieldsSignature(idxFields)
 
 	var indexID int64
 	if idx.GetId() != 0 {
@@ -595,7 +640,9 @@ func BuildSecondaryIndex(
 	if existingSig, ok := usedHashes[indexID]; ok {
 		return SecondaryIndexSpec{}, fmt.Errorf("secondary index ID collision detected in message %s: indices with fields %q and %q share the same ID %d", msgName, signature, existingSig, indexID)
 	}
-	usedHashes[indexID] = signature
+	if usedHashes != nil {
+		usedHashes[indexID] = signature
+	}
 
 	return SecondaryIndexSpec{
 		Fields:      idxFields,
@@ -603,6 +650,63 @@ func BuildSecondaryIndex(
 		FanOutField: fanOutField,
 		IndexID:     indexID,
 	}, nil
+}
+
+// PopulateIndexPrefixes populates non-colliding leading prefix specs (1 <= k < len(Fields))
+// for each composite non-fan-out secondary index on a message.
+func PopulateIndexPrefixes(indexes []SecondaryIndexSpec) []SecondaryIndexSpec {
+	if len(indexes) == 0 {
+		return indexes
+	}
+	out := make([]SecondaryIndexSpec, len(indexes))
+	copy(out, indexes)
+	for i := range out {
+		out[i].Prefixes = EffectiveIndexPrefixes(out, i)
+	}
+	return out
+}
+
+// EffectiveIndexPrefixes returns the non-colliding leading prefixes for indexes[idxPos].
+// If a prefix matches another full index on the same message or an earlier composite index's
+// prefix, it is skipped to prevent duplicate method generation.
+func EffectiveIndexPrefixes(indexes []SecondaryIndexSpec, idxPos int) []IndexPrefixSpec {
+	if idxPos < 0 || idxPos >= len(indexes) {
+		return nil
+	}
+	target := indexes[idxPos]
+	if target.IsFanOut || len(target.Fields) <= 1 {
+		return nil
+	}
+	if len(target.Prefixes) > 0 {
+		return target.Prefixes
+	}
+
+	claimed := make(map[string]bool, len(indexes)*2)
+	for _, idx := range indexes {
+		claimed[fieldsSignature(idx.Fields)] = true
+	}
+
+	var prefixes []IndexPrefixSpec
+	for i := 0; i <= idxPos; i++ {
+		idx := indexes[i]
+		if idx.IsFanOut || len(idx.Fields) <= 1 {
+			continue
+		}
+		for k := 1; k < len(idx.Fields); k++ {
+			prefixFields := idx.Fields[:k]
+			sig := fieldsSignature(prefixFields)
+			if claimed[sig] {
+				continue
+			}
+			claimed[sig] = true
+			if i == idxPos {
+				copied := make([]FieldSpec, k)
+				copy(copied, prefixFields)
+				prefixes = append(prefixes, IndexPrefixSpec{Fields: copied})
+			}
+		}
+	}
+	return prefixes
 }
 
 // ComputeIndexID computes the 32-bit FNV-1a hash of the lowercase comma-joined field signature as int64.
@@ -683,28 +787,6 @@ func MapProtoKind(kind protoreflect.Kind) FieldKind {
 	default:
 		return KindUnknown
 	}
-}
-
-var rustKeywords = map[string]bool{
-	"as": true, "break": true, "const": true, "continue": true, "crate": true,
-	"else": true, "enum": true, "extern": true, "false": true, "fn": true,
-	"for": true, "if": true, "impl": true, "in": true, "let": true,
-	"loop": true, "match": true, "mod": true, "move": true, "mut": true,
-	"pub": true, "ref": true, "return": true, "self": true, "Self": true,
-	"static": true, "struct": true, "super": true, "trait": true, "true": true,
-	"type": true, "unsafe": true, "use": true, "where": true, "while": true,
-	"async": true, "await": true, "dyn": true,
-}
-
-// EscapeRustIdent escapes Rust reserved keywords with r# matching prost's field naming.
-func EscapeRustIdent(ident string) string {
-	if ident == "self" || ident == "Self" || ident == "super" || ident == "crate" {
-		return ident + "_"
-	}
-	if rustKeywords[ident] {
-		return "r#" + ident
-	}
-	return ident
 }
 
 // HasMutationFields returns true if the message has any atomic mutation fields.

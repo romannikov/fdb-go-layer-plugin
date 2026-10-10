@@ -117,6 +117,9 @@ func (s *RecordStore) PrepareUserVersion(tr Transaction) error {
 
 	isComparable := tr != nil && reflect.TypeOf(tr).Comparable()
 	if !isComparable {
+		if s.userVersionSeq.Load() >= 65536 {
+			return ErrUserVersionOverflow
+		}
 		return nil
 	}
 	if s.txCounts == nil {

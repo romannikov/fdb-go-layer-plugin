@@ -17,36 +17,25 @@ jobs:
       with:
         go-version-file: 'go.mod'
 
-    - name: Set up Rust
-      uses: dtolnay/rust-toolchain@stable
-
     - name: Install FoundationDB client and protoc
       run: |
-        sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev
+        sudo apt-get update && sudo apt-get install -y protobuf-compiler
         curl -LO https://github.com/apple/foundationdb/releases/download/7.3.43/foundationdb-clients_7.3.43-1_amd64.deb
         sudo dpkg -i foundationdb-clients_7.3.43-1_amd64.deb
 
     - name: Build Go packages
       run: go build -v ./...
 
-    - name: Verify generated Go and Rust repository code is up-to-date
+    - name: Verify generated Go repository code is up-to-date
       run: |
         go build -o protoc-gen-fdb-go ./compiler/cmd/protoc-gen-fdb-go
-        go build -o protoc-gen-fdb-rust ./compiler/cmd/protoc-gen-fdb-rust
         protoc -I proto -I tests/proto \
           --plugin=protoc-gen-fdb-go=./protoc-gen-fdb-go \
-          --plugin=protoc-gen-fdb-rust=./protoc-gen-fdb-rust \
           --fdb-go_out=. --fdb-go_opt=module=github.com/romannikov/fdb-layer \
-          --fdb-rust_out=tests/rust/src/gen --fdb-rust_opt=generate_messages=true \
           tests/proto/store.proto \
           tests/proto/atomic.proto
-        rm -f protoc-gen-fdb-go protoc-gen-fdb-rust
-        git diff --exit-code tests/go/ tests/rust/
+        rm -f protoc-gen-fdb-go
+        git diff --exit-code tests/go/
 
     - name: Run Go unit tests
       run: go test -race -v ./...
-
-    - name: Check Rust runtime and generated repositories
-      run: |
-        cargo check --manifest-path runtimes/rust/Cargo.toml
-        cargo check --manifest-path tests/rust/Cargo.toml --tests

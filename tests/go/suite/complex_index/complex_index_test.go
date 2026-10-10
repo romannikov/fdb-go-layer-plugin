@@ -631,7 +631,139 @@ func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 	}
 }
 
+func TestOrder_CompositeIndexPrefixQueries(t *testing.T) {
+	ctx := context.Background()
+	recordStore, tr, dir, _ := tests.SyncAndSetup()
+	_ = recordStore.SyncMetadata(ctx, tr, dir, []string{"Order"})
+	orderRepo := store.NewOrderRepository(recordStore)
 
+	// Create 3 PENDING orders with distinct CreatedAt timestamps and 1 SHIPPED order
+	for i, ts := range []int64{1000, 2000, 3000} {
+		if err := orderRepo.Create(ctx, tr, dir, &store.Order{
+			TenantId:  "acme",
+			OrderSeq:  int32(i + 1),
+			Status:    store.OrderStatus_ORDER_STATUS_PENDING,
+			CreatedAt: ts,
+		}); err != nil {
+			t.Fatalf("Create pending order %d failed: %v", i+1, err)
+		}
+	}
+	if err := orderRepo.Create(ctx, tr, dir, &store.Order{
+		TenantId:  "acme",
+		OrderSeq:  99,
+		Status:    store.OrderStatus_ORDER_STATUS_SHIPPED,
+		CreatedAt: 1500,
+	}); err != nil {
+		t.Fatalf("Create shipped order failed: %v", err)
+	}
 
+	// 1. GetOrderByStatus (partial prefix of (status, created_at)) returns all 3 PENDING orders ordered by CreatedAt
+	pending, err := orderRepo.GetOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING)
+	if err != nil || len(pending) != 3 {
+		t.Fatalf("GetOrderByStatus(PENDING) expected 3 orders, got %+v, err=%v", pending, err)
+	}
+	if pending[0].CreatedAt != 1000 || pending[1].CreatedAt != 2000 || pending[2].CreatedAt != 3000 {
+		t.Fatalf("unexpected CreatedAt order from GetOrderByStatus: [%d, %d, %d]", pending[0].CreatedAt, pending[1].CreatedAt, pending[2].CreatedAt)
+	}
 
+	// 2. QueryOrderByStatus forward pagination (Limit=2) across different CreatedAt values
+	fwd1, err := orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+		Limit: 2,
+	})
+	if err != nil || len(fwd1.Items) != 2 || !fwd1.HasMore {
+		t.Fatalf("QueryOrderByStatus forward page 1 failed: %+v, err=%v", fwd1, err)
+	}
+	if fwd1.Items[0].OrderSeq != 1 || fwd1.Items[1].OrderSeq != 2 {
+		t.Fatalf("expected OrderSeq [1, 2], got [%d, %d]", fwd1.Items[0].OrderSeq, fwd1.Items[1].OrderSeq)
+	}
+
+	fwd2, err := orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+		Begin: fwd1.NextKey,
+		Limit: 2,
+	})
+	if err != nil || len(fwd2.Items) != 1 || fwd2.HasMore || fwd2.Items[0].OrderSeq != 3 {
+		t.Fatalf("QueryOrderByStatus forward page 2 failed: %+v, err=%v", fwd2, err)
+	}
+
+	// 3. QueryOrderByStatus reverse pagination (Limit=2, Reverse=true)
+	rev1, err := orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+		Limit:   2,
+		Reverse: true,
+	})
+	if err != nil || len(rev1.Items) != 2 || !rev1.HasMore {
+		t.Fatalf("QueryOrderByStatus reverse page 1 failed: %+v, err=%v", rev1, err)
+	}
+	if rev1.Items[0].OrderSeq != 3 || rev1.Items[1].OrderSeq != 2 {
+		t.Fatalf("expected reverse OrderSeq [3, 2], got [%d, %d]", rev1.Items[0].OrderSeq, rev1.Items[1].OrderSeq)
+	}
+
+	rev2, err := orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+		Begin:   rev1.NextKey,
+		Limit:   2,
+		Reverse: true,
+	})
+	if err != nil || len(rev2.Items) != 1 || rev2.HasMore || rev2.Items[0].OrderSeq != 1 {
+		t.Fatalf("QueryOrderByStatus reverse page 2 failed: %+v, err=%v", rev2, err)
+	}
+}
+
+func TestFanOutIndex_SetAndDeleteDeduplicateRepeatedTags(t *testing.T) {
+	ctx := context.Background()
+	recordStore, tr, dir, _ := tests.SyncAndSetup()
+	postRepo := store.NewPostRepository(recordStore)
+
+	if err := postRepo.Create(ctx, tr, dir, &store.Post{
+		Id:   "p_dup",
+		Tags: []string{"a", "a", "b"},
+	}); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	tr.ResetLog()
+	if err := postRepo.Set(ctx, tr, dir, &store.Post{
+		Id:   "p_dup",
+		Tags: []string{"b", "c", "c", "c"},
+	}); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+	if len(tr.ClearCalls) != 1 || len(tr.SetCalls) != 2 {
+		t.Fatalf("expected 1 ClearCall and 2 SetCalls on Set with duplicate tags, got %d ClearCalls and %d SetCalls", len(tr.ClearCalls), len(tr.SetCalls))
+	}
+
+	tr.ResetLog()
+	if err := postRepo.Delete(ctx, tr, dir, "p_dup"); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+	if len(tr.ClearCalls) != 3 {
+		t.Fatalf("expected 3 ClearCalls (1 primary + 2 unique tags) on Delete with duplicate tags, got %d", len(tr.ClearCalls))
+	}
+}
+
+func TestQueue_CorruptedPayloadPreservesEntry(t *testing.T) {
+	ctx := context.Background()
+	recordStore, tr, dir, kv := tests.SyncAndSetup()
+	taskRepo := store.NewTaskMessageRepository(recordStore)
+
+	typeID := recordStore.Metadata()["TaskMessage"]
+	dummyVS := tuple.Versionstamp{
+		TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+		UserVersion:        0,
+	}
+	corruptKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "corrupt_q", dummyVS, uint64(1)})
+	tr.Set(corruptKey, []byte{0x00, 0xff, 0xff})
+
+	if _, err := taskRepo.Dequeue(ctx, tr, dir, "corrupt_q"); err == nil {
+		t.Fatal("expected unmarshal error from Dequeue on corrupted payload")
+	}
+	if !kv.HasKey(corruptKey) {
+		t.Fatal("expected corrupted queue item to remain in store after Dequeue error")
+	}
+
+	if _, err := taskRepo.DequeueBatch(ctx, tr, dir, "corrupt_q", 5); err == nil {
+		t.Fatal("expected unmarshal error from DequeueBatch on corrupted payload")
+	}
+	if !kv.HasKey(corruptKey) {
+		t.Fatal("expected corrupted queue item to remain in store after DequeueBatch error")
+	}
+}
 

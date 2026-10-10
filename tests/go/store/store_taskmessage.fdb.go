@@ -93,8 +93,6 @@ func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transac
 	keyToDelete := firstItem.Key
 	payload := firstItem.Value
 
-	tr.Clear(keyToDelete)
-
 	entity := &TaskMessage{}
 	err = proto.Unmarshal(payload, entity)
 	if err != nil {
@@ -111,6 +109,7 @@ func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transac
 		}
 	}
 
+	tr.Clear(keyToDelete)
 	return entity, nil
 }
 
@@ -143,7 +142,6 @@ func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tr fdblayer.Tr
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		tr.Clear(row.Key)
 		entity := &TaskMessage{}
 		if err := proto.Unmarshal(row.Value, entity); err != nil {
 			return nil, err
@@ -157,6 +155,7 @@ func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tr fdblayer.Tr
 				entity.Versionstamp = vs.Bytes()
 			}
 		}
+		tr.Clear(row.Key)
 		items = append(items, entity)
 	}
 	return items, nil

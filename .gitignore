@@ -1,12 +1,5 @@
-# Rust build artifacts
-target/
-**/target/
-**/Cargo.lock
-
 # Built binaries in repo root
 /protoc-gen-fdb-go
-/protoc-gen-fdb-rust
-/conformance-rust
 *.exe
 *.test
 *.out

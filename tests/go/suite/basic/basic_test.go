@@ -871,5 +871,19 @@ func TestHasAllMetadata_RequiresCommittedMetadata(t *testing.T) {
 	}
 }
 
+func TestUserVersionSequence_NilTxOverflow(t *testing.T) {
+	recordStore := fdblayer.NewRecordStore()
+	for i := 0; i < 65536; i++ {
+		if err := recordStore.PrepareUserVersion(nil); err != nil {
+			t.Fatalf("unexpected error at iteration %d: %v", i, err)
+		}
+		_ = recordStore.NextUserVersion()
+	}
+	if err := recordStore.PrepareUserVersion(nil); !errors.Is(err, fdblayer.ErrUserVersionOverflow) {
+		t.Fatalf("expected ErrUserVersionOverflow at 65537th call with nil tx, got %v", err)
+	}
+}
+
+
 
 
