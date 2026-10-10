@@ -356,17 +356,17 @@ impl RecordStore {
         if self.metadata_committed.load(Ordering::Acquire) && self.has_all_metadata(messages) {
             return Ok(());
         }
+        let mut tr = db.create_trx()?;
         let map = loop {
-            let tr = db.create_trx()?;
             match self.compute_and_write_metadata(&tr, meta_dir, messages).await {
                 Ok(m) => match tr.commit().await {
                     Ok(_) => break m,
-                    Err(err) => {
-                        tr.on_error(err).await?;
+                    Err(commit_err) => {
+                        tr = commit_err.on_error().await?;
                     }
                 },
                 Err(FdbLayerError::Fdb(err)) => {
-                    tr.on_error(err).await?;
+                    tr = tr.on_error(err).await?;
                 }
                 Err(other) => return Err(other),
             }
