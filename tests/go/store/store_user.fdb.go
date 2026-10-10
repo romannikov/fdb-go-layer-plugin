@@ -33,11 +33,9 @@ type UserPaginatedResult struct {
 type UserRepository interface {
 	fdblayer.GenericRepository[*User, string]
 
-	BatchGetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error)
-	BatchGetUserByPK(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*User, error)
-	ListUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
-	GetUserByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error)
-	QueryUserByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string, opts UserPaginationOptions) (*UserPaginatedResult, error)
+	BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*User, error)
+	List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
+	GetByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string, opts UserPaginationOptions) (*UserPaginatedResult, error)
 }
 
 type userRepository struct {
@@ -169,54 +167,8 @@ func (r *userRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 	return nil
 }
 
-// BatchGetUser retrieves multiple User entities by their primary keys.
-func (r *userRepository) BatchGetUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*User, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	typeID, err := r.store.GetTypeID("User")
-	if err != nil {
-		return nil, err
-	}
-
-	result := make(map[string]*User)
-	futures := make([]fdb.FutureByteSlice, len(ids))
-
-	for i, id := range ids {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		keyTpl := make(tuple.Tuple, 2+len(id))
-		keyTpl[0] = typeID
-		keyTpl[1] = fdblayer.DataNamespace
-		for j, el := range id {
-			keyTpl[2+j] = fdblayer.NormalizeTupleElement(el)
-		}
-		key := dir.Pack(keyTpl)
-		futures[i] = tr.Get(key)
-	}
-
-	for i, future := range futures {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		value := future.MustGet()
-		if value == nil {
-			continue
-		}
-		entity := &User{}
-		err := proto.Unmarshal(value, entity)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
-		}
-		result[ids[i].String()] = entity
-	}
-
-	return result, nil
-}
-
-// BatchGetUserByPK retrieves multiple User entities by their strongly-typed primary keys.
-func (r *userRepository) BatchGetUserByPK(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*User, error) {
+// BatchGet retrieves multiple User entities by their primary keys.
+func (r *userRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*User, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -248,14 +200,13 @@ func (r *userRepository) BatchGetUserByPK(ctx context.Context, tr fdb.ReadTransa
 		if err := proto.Unmarshal(value, entity); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
-		_ = i
 		entities = append(entities, entity)
 	}
 	return entities, nil
 }
 
-// ListUser retrieves a list of User entities starting from the given key.
-func (r *userRepository) ListUser(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error) {
+// List retrieves a list of User entities starting from the given key.
+func (r *userRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -346,67 +297,8 @@ func (r *userRepository) ListUser(ctx context.Context, tr fdb.ReadTransaction, d
 	return result, nil
 }
 
-// GetUserByEmail retrieves User entities by their Email index.
-func (r *userRepository) GetUserByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string) ([]*User, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	typeID, err := r.store.GetTypeID("User")
-	if err != nil {
-		return nil, err
-	}
-
-	entities := []*User{}
-	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, Email})
-	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
-	if err != nil {
-		return nil, err
-	}
-	kvs := fdblayer.GetRange(tr, indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
-	futures := make([]fdb.FutureByteSlice, len(kvs))
-	for i, kv := range kvs {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		tpl, err := dir.Unpack(kv.Key)
-		if err != nil {
-			return nil, err
-		}
-		pkIndexStart := 3 + 1
-		if len(tpl) <= pkIndexStart {
-			continue
-		}
-		pkTuple := tpl[pkIndexStart:]
-		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
-		keyTpl[0] = typeID
-		keyTpl[1] = fdblayer.DataNamespace
-		copy(keyTpl[2:], pkTuple)
-		key := dir.Pack(keyTpl)
-		futures[i] = tr.Get(key)
-	}
-	for _, future := range futures {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if future == nil {
-			continue
-		}
-		value := future.MustGet()
-		if value == nil {
-			continue
-		}
-		entity := &User{}
-		err = proto.Unmarshal(value, entity)
-		if err != nil {
-			return nil, err
-		}
-		entities = append(entities, entity)
-	}
-	return entities, nil
-}
-
-// QueryUserByEmail retrieves a paginated page of User entities by their Email index.
-func (r *userRepository) QueryUserByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string, opts UserPaginationOptions) (*UserPaginatedResult, error) {
+// GetByEmail retrieves a paginated page of User entities by their Email index.
+func (r *userRepository) GetByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string, opts UserPaginationOptions) (*UserPaginatedResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

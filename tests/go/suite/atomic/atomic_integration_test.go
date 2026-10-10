@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
-	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 
 	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
 	tests "github.com/romannikov/fdb-layer/tests/go"
@@ -118,22 +117,21 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	}
 
 	// 5. Verify BatchGetCounter populates atomic fields
-	var batchRes map[string]*atomic.Counter
+	var batchRes []*atomic.Counter
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		batchRes, err = counterRepo.BatchGetCounter(ctx, tr, dir, []tuple.Tuple{{"c1"}})
+		batchRes, err = counterRepo.BatchGet(ctx, tr, dir, []string{"c1"})
 		return err
 	})
-	batchItem := batchRes[`("c1")`]
-	if batchItem == nil || batchItem.Value != 15 || batchItem.MaxValue != 150 || batchItem.MinValue != 2 {
-		t.Fatalf("BatchGetCounter did not populate atomic fields: %+v", batchItem)
+	if len(batchRes) != 1 || batchRes[0] == nil || batchRes[0].Value != 15 || batchRes[0].MaxValue != 150 || batchRes[0].MinValue != 2 {
+		t.Fatalf("BatchGetCounter did not populate atomic fields: %+v", batchRes)
 	}
 
 	// 6. Verify ListCounter populates atomic fields
 	var listRes *atomic.CounterPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		listRes, err = counterRepo.ListCounter(ctx, tr, dir, atomic.CounterPaginationOptions{Limit: 10})
+		listRes, err = counterRepo.List(ctx, tr, dir, atomic.CounterPaginationOptions{Limit: 10})
 		return err
 	})
 	if len(listRes.Items) != 1 {
@@ -339,7 +337,7 @@ func TestIntegration_DeleteAndUnsigned32BitAtomic(t *testing.T) {
 	var revList *atomic.CounterPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		revList, err = counterRepo.ListCounter(ctx, tr, dir, atomic.CounterPaginationOptions{
+		revList, err = counterRepo.List(ctx, tr, dir, atomic.CounterPaginationOptions{
 			Limit:   10,
 			Reverse: true,
 		})

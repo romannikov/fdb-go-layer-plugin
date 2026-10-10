@@ -76,9 +76,12 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 	// "go" should match p1 and p2
 	var posts []*store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		posts, err = postRepo.GetPostByTags(ctx, tr, dir, "go")
-		return err
+		res, err := postRepo.GetByTags(ctx, tr, dir, "go", store.PostPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		posts = res.Items
+		return nil
 	})
 	if len(posts) != 2 {
 		t.Fatalf("expected 2 posts tagged 'go', got %d", len(posts))
@@ -86,9 +89,12 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 
 	// "rust" should match p2 and p3
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		posts, err = postRepo.GetPostByTags(ctx, tr, dir, "rust")
-		return err
+		res, err := postRepo.GetByTags(ctx, tr, dir, "rust", store.PostPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		posts = res.Items
+		return nil
 	})
 	if len(posts) != 2 {
 		t.Fatalf("expected 2 posts tagged 'rust', got %d", len(posts))
@@ -96,9 +102,12 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 
 	// "fdb" should match only p1
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		posts, err = postRepo.GetPostByTags(ctx, tr, dir, "fdb")
-		return err
+		res, err := postRepo.GetByTags(ctx, tr, dir, "fdb", store.PostPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		posts = res.Items
+		return nil
 	})
 	if len(posts) != 1 || posts[0].Id != "p1" {
 		t.Fatalf("expected p1 for 'fdb', got %+v", posts)
@@ -106,9 +115,12 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 
 	// "wasm" should match only p3
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		posts, err = postRepo.GetPostByTags(ctx, tr, dir, "wasm")
-		return err
+		res, err := postRepo.GetByTags(ctx, tr, dir, "wasm", store.PostPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		posts = res.Items
+		return nil
 	})
 	if len(posts) != 1 || posts[0].Id != "p3" {
 		t.Fatalf("expected p3 for 'wasm', got %+v", posts)
@@ -116,9 +128,12 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 
 	// Nonexistent tag
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		posts, err = postRepo.GetPostByTags(ctx, tr, dir, "python")
-		return err
+		res, err := postRepo.GetByTags(ctx, tr, dir, "python", store.PostPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		posts = res.Items
+		return nil
 	})
 	if len(posts) != 0 {
 		t.Fatalf("expected 0 posts for 'python', got %d", len(posts))
@@ -149,9 +164,12 @@ func TestIntegration_SetPost_FanOutIndexUpdated(t *testing.T) {
 	// "alpha" should no longer return any results (stale index cleared)
 	var posts []*store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		posts, err = postRepo.GetPostByTags(ctx, tr, dir, "alpha")
-		return err
+		res, err := postRepo.GetByTags(ctx, tr, dir, "alpha", store.PostPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		posts = res.Items
+		return nil
 	})
 	if len(posts) != 0 {
 		t.Fatal("stale fan-out index: 'alpha' still returns results after update")
@@ -159,9 +177,12 @@ func TestIntegration_SetPost_FanOutIndexUpdated(t *testing.T) {
 
 	// "beta" should still find the post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		posts, err = postRepo.GetPostByTags(ctx, tr, dir, "beta")
-		return err
+		res, err := postRepo.GetByTags(ctx, tr, dir, "beta", store.PostPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		posts = res.Items
+		return nil
 	})
 	if len(posts) != 1 || posts[0].Id != "p1" {
 		t.Fatalf("expected p1 for 'beta', got %+v", posts)
@@ -169,9 +190,12 @@ func TestIntegration_SetPost_FanOutIndexUpdated(t *testing.T) {
 
 	// "gamma" should find the post (new index entry)
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		posts, err = postRepo.GetPostByTags(ctx, tr, dir, "gamma")
-		return err
+		res, err := postRepo.GetByTags(ctx, tr, dir, "gamma", store.PostPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		posts = res.Items
+		return nil
 	})
 	if len(posts) != 1 || posts[0].Id != "p1" {
 		t.Fatalf("expected p1 for 'gamma', got %+v", posts)
@@ -202,9 +226,12 @@ func TestIntegration_DeletePost_ClearsFanOutIndex(t *testing.T) {
 	for _, tag := range []string{"x", "y", "z"} {
 		var posts []*store.Post
 		tests.WithTx(t, db, func(tr fdb.Transaction) error {
-			var err error
-			posts, err = postRepo.GetPostByTags(ctx, tr, dir, tag)
-			return err
+			res, err := postRepo.GetByTags(ctx, tr, dir, tag, store.PostPaginationOptions{})
+			if err != nil {
+				return err
+			}
+			posts = res.Items
+			return nil
 		})
 		if len(posts) != 0 {
 			t.Fatalf("fan-out index not cleared for tag %q after delete", tag)
@@ -249,7 +276,7 @@ func TestIntegration_ListPost_WithFanOutIndex(t *testing.T) {
 	var result *store.PostPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = postRepo.ListPost(ctx, tr, dir, store.PostPaginationOptions{Limit: 10})
+		result, err = postRepo.List(ctx, tr, dir, store.PostPaginationOptions{Limit: 10})
 		return err
 	})
 	if len(result.Items) != 5 {
@@ -288,7 +315,7 @@ func TestIntegration_ListPost_Pagination(t *testing.T) {
 	var page1 *store.PostPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = postRepo.ListPost(ctx, tr, dir, store.PostPaginationOptions{Limit: 2})
+		page1, err = postRepo.List(ctx, tr, dir, store.PostPaginationOptions{Limit: 2})
 		return err
 	})
 	if len(page1.Items) != 2 {
@@ -301,7 +328,7 @@ func TestIntegration_ListPost_Pagination(t *testing.T) {
 	var page2 *store.PostPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page2, err = postRepo.ListPost(ctx, tr, dir, store.PostPaginationOptions{Begin: page1.NextKey, Limit: 2})
+		page2, err = postRepo.List(ctx, tr, dir, store.PostPaginationOptions{Begin: page1.NextKey, Limit: 2})
 		return err
 	})
 	if len(page2.Items) != 2 {
@@ -311,7 +338,7 @@ func TestIntegration_ListPost_Pagination(t *testing.T) {
 	var page3 *store.PostPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page3, err = postRepo.ListPost(ctx, tr, dir, store.PostPaginationOptions{Begin: page2.NextKey, Limit: 2})
+		page3, err = postRepo.List(ctx, tr, dir, store.PostPaginationOptions{Begin: page2.NextKey, Limit: 2})
 		return err
 	})
 	if len(page3.Items) != 1 {
@@ -373,10 +400,10 @@ func TestIntegration_BatchGetPost(t *testing.T) {
 		return nil
 	})
 
-	var result map[string]*store.Post
+	var result []*store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = postRepo.BatchGetPost(ctx, tr, dir, []tuple.Tuple{{"p1"}, {"p2"}, {"p3"}})
+		result, err = postRepo.BatchGet(ctx, tr, dir, []string{"p1", "p2", "p3"})
 		return err
 	})
 	if len(result) != 3 {
@@ -416,9 +443,12 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 	// Each type's operations should be completely isolated
 	var users []*store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		users, err = userRepo.GetUserByEmail(ctx, tr, dir, "a@test.com")
-		return err
+		res, err := userRepo.GetByEmail(ctx, tr, dir, "a@test.com", store.UserPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		users = res.Items
+		return nil
 	})
 	if len(users) != 1 {
 		t.Fatalf("expected 1 user, got %d", len(users))
@@ -426,9 +456,12 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 
 	var posts []*store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		posts, err = postRepo.GetPostByTags(ctx, tr, dir, "go")
-		return err
+		res, err := postRepo.GetByTags(ctx, tr, dir, "go", store.PostPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		posts = res.Items
+		return nil
 	})
 	if len(posts) != 1 {
 		t.Fatalf("expected 1 post, got %d", len(posts))
@@ -438,7 +471,7 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 	var userResult *store.UserPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		userResult, err = userRepo.ListUser(ctx, tr, dir, store.UserPaginationOptions{Limit: 10})
+		userResult, err = userRepo.List(ctx, tr, dir, store.UserPaginationOptions{Limit: 10})
 		return err
 	})
 	if len(userResult.Items) != 1 {
@@ -448,7 +481,7 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 	var postResult *store.PostPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		postResult, err = postRepo.ListPost(ctx, tr, dir, store.PostPaginationOptions{Limit: 10})
+		postResult, err = postRepo.List(ctx, tr, dir, store.PostPaginationOptions{Limit: 10})
 		return err
 	})
 	if len(postResult.Items) != 1 {
@@ -694,9 +727,12 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	// Compound index lookup
 	var byStatus []*store.Order
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		byStatus, err = orderRepo.GetOrderByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000)
-		return err
+		res, err := orderRepo.GetByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000, store.OrderPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		byStatus = res.Items
+		return nil
 	})
 	if len(byStatus) != 1 || byStatus[0].OrderSeq != 101 {
 		t.Fatalf("GetOrderByStatusAndCreatedAt failed: %+v", byStatus)
@@ -705,9 +741,12 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	// Scalar bytes index lookup
 	var byReceipt []*store.Order
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		byReceipt, err = orderRepo.GetOrderByReceiptHash(ctx, tr, dir, []byte{0xAA, 0xBB, 0x01})
-		return err
+		res, err := orderRepo.GetByReceiptHash(ctx, tr, dir, []byte{0xAA, 0xBB, 0x01}, store.OrderPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		byReceipt = res.Items
+		return nil
 	})
 	if len(byReceipt) != 1 || byReceipt[0].OrderSeq != 101 {
 		t.Fatalf("GetOrderByReceiptHash failed: %+v", byReceipt)
@@ -716,9 +755,12 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	// Fan-out repeated bytes index lookup
 	var byAttach []*store.Order
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		byAttach, err = orderRepo.GetOrderByAttachmentHashes(ctx, tr, dir, []byte{0x10, 0x20})
-		return err
+		res, err := orderRepo.GetByAttachmentHashes(ctx, tr, dir, []byte{0x10, 0x20}, store.OrderPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		byAttach = res.Items
+		return nil
 	})
 	if len(byAttach) != 1 || byAttach[0].OrderSeq != 101 {
 		t.Fatalf("GetOrderByAttachmentHashes failed: %+v", byAttach)
@@ -738,18 +780,24 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		byStatus, err = orderRepo.GetOrderByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000)
-		return err
+		res, err := orderRepo.GetByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000, store.OrderPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		byStatus = res.Items
+		return nil
 	})
 	if len(byStatus) != 0 {
 		t.Fatalf("stale compound index after Set: %+v", byStatus)
 	}
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		byAttach, err = orderRepo.GetOrderByAttachmentHashes(ctx, tr, dir, []byte{0x50, 0x60})
-		return err
+		res, err := orderRepo.GetByAttachmentHashes(ctx, tr, dir, []byte{0x50, 0x60}, store.OrderPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		byAttach = res.Items
+		return nil
 	})
 	if len(byAttach) != 1 || byAttach[0].OrderSeq != 101 {
 		t.Fatalf("missing new fan-out bytes index after Set: %+v", byAttach)
@@ -760,9 +808,12 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 		return orderRepo.Delete(ctx, tr, dir, pk)
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		byStatus, err = orderRepo.GetOrderByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000)
-		return err
+		res, err := orderRepo.GetByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000, store.OrderPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		byStatus = res.Items
+		return nil
 	})
 	if len(byStatus) != 0 {
 		t.Fatalf("compound index not cleared after Delete: %+v", byStatus)
@@ -803,7 +854,7 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	var listed *store.AuditLogPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		listed, err = auditRepo.ListAuditLog(ctx, tr, dir, store.AuditLogPaginationOptions{Limit: 10})
+		listed, err = auditRepo.List(ctx, tr, dir, store.AuditLogPaginationOptions{Limit: 10})
 		return err
 	})
 	if len(listed.Items) != 2 || len(listed.Items[0].LogId) != 12 || len(listed.Items[1].LogId) != 12 {
@@ -832,13 +883,17 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	// 4. Query by standard index (GetAuditLogByActor) and fan-out index (GetAuditLogByTags)
 	var byActor, byTagAuth []*store.AuditLog
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		byActor, err = auditRepo.GetAuditLogByActor(ctx, tr, dir, "alice")
+		resActor, err := auditRepo.GetByActor(ctx, tr, dir, "alice", store.AuditLogPaginationOptions{})
 		if err != nil {
 			return err
 		}
-		byTagAuth, err = auditRepo.GetAuditLogByTags(ctx, tr, dir, "auth")
-		return err
+		byActor = resActor.Items
+		resTag, err := auditRepo.GetByTags(ctx, tr, dir, "auth", store.AuditLogPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		byTagAuth = resTag.Items
+		return nil
 	})
 	if len(byActor) != 1 || !bytes.Equal(byActor[0].LogId, firstID) || byActor[0].Views != 10 {
 		t.Fatalf("unexpected GetAuditLogByActor('alice') result: %+v", byActor)
@@ -847,14 +902,11 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 		t.Fatalf("unexpected GetAuditLogByTags('auth') result: %+v", byTagAuth)
 	}
 
-	// 5. BatchGetAuditLog with both tuple.Versionstamp and raw []byte elements
-	var batchRes map[string]*store.AuditLog
+	// 5. BatchGetAuditLog with 12-byte versionstamp primary keys
+	var batchRes []*store.AuditLog
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		batchRes, err = auditRepo.BatchGetAuditLog(ctx, tr, dir, []tuple.Tuple{
-			{fdblayer.BytesToVersionstamp(firstID)},
-			{secondID},
-		})
+		batchRes, err = auditRepo.BatchGet(ctx, tr, dir, [][]byte{firstID, secondID})
 		return err
 	})
 	if len(batchRes) != 2 {
@@ -897,20 +949,32 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 		if got, err = auditRepo.Get(ctx, tr, dir, firstID); err != nil {
 			return err
 		}
-		if oldActor, err = auditRepo.GetAuditLogByActor(ctx, tr, dir, "alice"); err != nil {
+		res, err := auditRepo.GetByActor(ctx, tr, dir, "alice", store.AuditLogPaginationOptions{})
+		if err != nil {
 			return err
 		}
-		if newActor, err = auditRepo.GetAuditLogByActor(ctx, tr, dir, "alice_admin"); err != nil {
+		oldActor = res.Items
+		res, err = auditRepo.GetByActor(ctx, tr, dir, "alice_admin", store.AuditLogPaginationOptions{})
+		if err != nil {
 			return err
 		}
-		if oldTag, err = auditRepo.GetAuditLogByTags(ctx, tr, dir, "login"); err != nil {
+		newActor = res.Items
+		res, err = auditRepo.GetByTags(ctx, tr, dir, "login", store.AuditLogPaginationOptions{})
+		if err != nil {
 			return err
 		}
-		if newTag, err = auditRepo.GetAuditLogByTags(ctx, tr, dir, "elevated"); err != nil {
+		oldTag = res.Items
+		res, err = auditRepo.GetByTags(ctx, tr, dir, "elevated", store.AuditLogPaginationOptions{})
+		if err != nil {
 			return err
 		}
-		charlieLogs, err = auditRepo.GetAuditLogByActor(ctx, tr, dir, "charlie")
-		return err
+		newTag = res.Items
+		res, err = auditRepo.GetByActor(ctx, tr, dir, "charlie", store.AuditLogPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		charlieLogs = res.Items
+		return nil
 	})
 	if got.Actor != "alice_admin" || got.Views != 17 || !bytes.Equal(got.LogId, firstID) {
 		t.Fatalf("unexpected AuditLog after Set: %+v", got)
@@ -935,7 +999,7 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 			t.Fatalf("expected Set with 3-byte LogId to fail")
 		}
 		var err error
-		pageFromSecond, err = auditRepo.ListAuditLog(ctx, tr, dir, store.AuditLogPaginationOptions{
+		pageFromSecond, err = auditRepo.List(ctx, tr, dir, store.AuditLogPaginationOptions{
 			Begin: tuple.Tuple{secondID},
 			Limit: 1,
 		})
@@ -950,15 +1014,22 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 		return auditRepo.Delete(ctx, tr, dir, firstID)
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		if newActor, err = auditRepo.GetAuditLogByActor(ctx, tr, dir, "alice_admin"); err != nil {
+		res, err := auditRepo.GetByActor(ctx, tr, dir, "alice_admin", store.AuditLogPaginationOptions{})
+		if err != nil {
 			return err
 		}
-		if newTag, err = auditRepo.GetAuditLogByTags(ctx, tr, dir, "elevated"); err != nil {
+		newActor = res.Items
+		res, err = auditRepo.GetByTags(ctx, tr, dir, "elevated", store.AuditLogPaginationOptions{})
+		if err != nil {
 			return err
 		}
-		byTagAuth, err = auditRepo.GetAuditLogByTags(ctx, tr, dir, "auth")
-		return err
+		newTag = res.Items
+		res, err = auditRepo.GetByTags(ctx, tr, dir, "auth", store.AuditLogPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		byTagAuth = res.Items
+		return nil
 	})
 	if len(newActor) != 0 || len(newTag) != 0 {
 		t.Fatalf("expected indexes for deleted AuditLog to be cleared, got actor=%+v tag=%+v", newActor, newTag)
@@ -1039,7 +1110,7 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 	var byPK []*store.Order
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+		page1, err = orderRepo.List(ctx, tr, dir, store.OrderPaginationOptions{
 			Prefix:  tuple.Tuple{"tenant_a"},
 			Limit:   2,
 			Reverse: true,
@@ -1047,7 +1118,7 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		page2, err = orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+		page2, err = orderRepo.List(ctx, tr, dir, store.OrderPaginationOptions{
 			Prefix:  tuple.Tuple{"tenant_a"},
 			Begin:   page1.NextKey,
 			Limit:   2,
@@ -1056,7 +1127,7 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		byPK, err = orderRepo.BatchGetOrderByPK(ctx, tr, dir, []store.OrderPrimaryKey{
+		byPK, err = orderRepo.BatchGet(ctx, tr, dir, []store.OrderPrimaryKey{
 			{TenantId: "tenant_a", OrderSeq: 10},
 			{TenantId: "tenant_b", OrderSeq: 99},
 		})
@@ -1069,39 +1140,39 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 		t.Fatalf("unexpected live ListOrder(Prefix:tenant_a, Reverse:true) page 2: %+v", page2)
 	}
 	if len(byPK) != 2 {
-		t.Fatalf("expected 2 orders from BatchGetOrderByPK, got %+v", byPK)
+		t.Fatalf("expected 2 orders from BatchGetOrder, got %+v", byPK)
 	}
 
-	// 3. Partial-prefix queries on composite index (status, created_at): GetOrderByStatus & QueryOrderByStatus
+	// 3. Partial-prefix queries on composite index (status, created_at): GetOrderByStatus
 	var allPending []*store.Order
 	var statusFwd1, statusFwd2, statusRev1, statusRev2 *store.OrderPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		allPending, err = orderRepo.GetOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING)
+		res, err := orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{})
 		if err != nil {
 			return err
 		}
-		statusFwd1, err = orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+		allPending = res.Items
+		statusFwd1, err = orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
 			Limit: 2,
 		})
 		if err != nil {
 			return err
 		}
-		statusFwd2, err = orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+		statusFwd2, err = orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
 			Begin: statusFwd1.NextKey,
 			Limit: 3,
 		})
 		if err != nil {
 			return err
 		}
-		statusRev1, err = orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+		statusRev1, err = orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
 			Limit:   2,
 			Reverse: true,
 		})
 		if err != nil {
 			return err
 		}
-		statusRev2, err = orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+		statusRev2, err = orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
 			Begin:   statusRev1.NextKey,
 			Limit:   3,
 			Reverse: true,
@@ -1112,10 +1183,10 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 		t.Fatalf("expected 4 PENDING orders from GetOrderByStatus, got %d", len(allPending))
 	}
 	if len(statusFwd1.Items) != 2 || !statusFwd1.HasMore || len(statusFwd2.Items) != 2 || statusFwd2.HasMore {
-		t.Fatalf("unexpected QueryOrderByStatus forward pages: p1=%+v, p2=%+v", statusFwd1, statusFwd2)
+		t.Fatalf("unexpected GetOrderByStatus forward pages: p1=%+v, p2=%+v", statusFwd1, statusFwd2)
 	}
 	if len(statusRev1.Items) != 2 || !statusRev1.HasMore || len(statusRev2.Items) != 2 || statusRev2.HasMore {
-		t.Fatalf("unexpected QueryOrderByStatus reverse pages: p1=%+v, p2=%+v", statusRev1, statusRev2)
+		t.Fatalf("unexpected GetOrderByStatus reverse pages: p1=%+v, p2=%+v", statusRev1, statusRev2)
 	}
 }
 

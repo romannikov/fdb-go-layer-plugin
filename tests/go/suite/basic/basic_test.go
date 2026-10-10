@@ -457,12 +457,12 @@ func TestGetUserByEmail_NoResults(t *testing.T) {
 
 	repo := store.NewUserRepository(recordStore)
 	// GetRange returns empty → no results
-	results, err := repo.GetUserByEmail(ctx, tr, dir, "nobody@test.com")
+	results, err := repo.GetByEmail(ctx, tr, dir, "nobody@test.com", store.UserPaginationOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 0 {
-		t.Fatalf("expected empty results, got %d", len(results))
+	if len(results.Items) != 0 {
+		t.Fatalf("expected empty results, got %d", len(results.Items))
 	}
 }
 
@@ -471,12 +471,12 @@ func TestGetProductByCategory_NoResults(t *testing.T) {
 	recordStore, tr, dir, _ := tests.SyncAndSetup()
 
 	repo := store.NewProductRepository(recordStore)
-	results, err := repo.GetProductByCategory(ctx, tr, dir, "nonexistent")
+	results, err := repo.GetByCategory(ctx, tr, dir, "nonexistent", store.ProductPaginationOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 0 {
-		t.Fatalf("expected empty, got %d", len(results))
+	if len(results.Items) != 0 {
+		t.Fatalf("expected empty, got %d", len(results.Items))
 	}
 }
 
@@ -500,8 +500,8 @@ func TestBatchGetUser_AllFound(t *testing.T) {
 		_ = repo.Create(ctx, tr, dir, &store.User{Id: id, Name: "Name" + id, Email: id + "@test.com"})
 	}
 
-	ids := []tuple.Tuple{{"u1"}, {"u2"}, {"u3"}}
-	result, err := repo.BatchGetUser(ctx, tr, dir, ids)
+	ids := []string{"u1", "u2", "u3"}
+	result, err := repo.BatchGet(ctx, tr, dir, ids)
 	if err != nil {
 		t.Fatalf("BatchGetUser failed: %v", err)
 	}
@@ -517,8 +517,8 @@ func TestBatchGetUser_PartialFound(t *testing.T) {
 	_ = repo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "A", Email: "a@t.com"})
 	_ = repo.Create(ctx, tr, dir, &store.User{Id: "u2", Name: "B", Email: "b@t.com"})
 
-	ids := []tuple.Tuple{{"u1"}, {"u2"}, {"u3"}} // u3 doesn't exist
-	result, err := repo.BatchGetUser(ctx, tr, dir, ids)
+	ids := []string{"u1", "u2", "u3"} // u3 doesn't exist
+	result, err := repo.BatchGet(ctx, tr, dir, ids)
 	if err != nil {
 		t.Fatalf("BatchGetUser failed: %v", err)
 	}
@@ -532,8 +532,8 @@ func TestBatchGetUser_NoneFound(t *testing.T) {
 	recordStore, tr, dir, _ := tests.SyncAndSetup()
 
 	repo := store.NewUserRepository(recordStore)
-	ids := []tuple.Tuple{{"x1"}, {"x2"}}
-	result, err := repo.BatchGetUser(ctx, tr, dir, ids)
+	ids := []string{"x1", "x2"}
+	result, err := repo.BatchGet(ctx, tr, dir, ids)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -547,7 +547,7 @@ func TestBatchGetUser_EmptyInput(t *testing.T) {
 	recordStore, tr, dir, _ := tests.SyncAndSetup()
 
 	repo := store.NewUserRepository(recordStore)
-	result, err := repo.BatchGetUser(ctx, tr, dir, []tuple.Tuple{})
+	result, err := repo.BatchGet(ctx, tr, dir, []string{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -563,8 +563,8 @@ func TestBatchGetProduct_Success(t *testing.T) {
 	_ = repo.Create(ctx, tr, dir, &store.Product{Id: "p1", Name: "A", Category: "c", Price: 1})
 	_ = repo.Create(ctx, tr, dir, &store.Product{Id: "p2", Name: "B", Category: "c", Price: 2})
 
-	ids := []tuple.Tuple{{"p1"}, {"p2"}}
-	result, err := repo.BatchGetProduct(ctx, tr, dir, ids)
+	ids := []string{"p1", "p2"}
+	result, err := repo.BatchGet(ctx, tr, dir, ids)
 	if err != nil {
 		t.Fatalf("BatchGetProduct failed: %v", err)
 	}
@@ -751,7 +751,7 @@ func TestNormalizeTupleElement_Int32Uint32Enum(t *testing.T) {
 	}
 }
 
-func TestQueryProductByCategory_PaginatedAndReverse(t *testing.T) {
+func TestGetProductByCategory_PaginatedAndReverse(t *testing.T) {
 	ctx := context.Background()
 	recordStore, tr, dir, _ := tests.SyncAndSetup()
 	repo := store.NewProductRepository(recordStore)
@@ -768,11 +768,11 @@ func TestQueryProductByCategory_PaginatedAndReverse(t *testing.T) {
 	}
 
 	// Forward pagination (2 items per page)
-	p1, err := repo.QueryProductByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{Limit: 2})
+	p1, err := repo.GetByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{Limit: 2})
 	if err != nil || len(p1.Items) != 2 || !p1.HasMore || p1.Items[0].Id != "p1" || p1.Items[1].Id != "p2" {
 		t.Fatalf("unexpected forward page 1: %+v, err=%v", p1, err)
 	}
-	p2, err := repo.QueryProductByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+	p2, err := repo.GetByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
 		Begin: p1.NextKey,
 		Limit: 2,
 	})
@@ -781,14 +781,14 @@ func TestQueryProductByCategory_PaginatedAndReverse(t *testing.T) {
 	}
 
 	// Reverse pagination (2 items per page: p4, p3 -> p2, p1)
-	rev1, err := repo.QueryProductByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+	rev1, err := repo.GetByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
 		Limit:   2,
 		Reverse: true,
 	})
 	if err != nil || len(rev1.Items) != 2 || !rev1.HasMore || rev1.Items[0].Id != "p4" || rev1.Items[1].Id != "p3" {
 		t.Fatalf("unexpected reverse page 1: %+v, err=%v", rev1, err)
 	}
-	rev2, err := repo.QueryProductByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+	rev2, err := repo.GetByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
 		Begin:   rev1.NextKey,
 		Limit:   2,
 		Reverse: true,
@@ -797,21 +797,21 @@ func TestQueryProductByCategory_PaginatedAndReverse(t *testing.T) {
 		t.Fatalf("unexpected reverse page 2: %+v, err=%v", rev2, err)
 	}
 
-	// Strongly-typed BatchGetProductByPK
-	byPK, err := repo.BatchGetProductByPK(ctx, tr, dir, []string{"p1", "p4", "nonexistent"})
+	// Strongly-typed BatchGetProduct
+	byPK, err := repo.BatchGet(ctx, tr, dir, []string{"p1", "p4", "nonexistent"})
 	if err != nil || len(byPK) != 2 {
-		t.Fatalf("BatchGetProductByPK failed: got %+v, err=%v", byPK, err)
+		t.Fatalf("BatchGetProduct failed: got %+v, err=%v", byPK, err)
 	}
 
-	// Out-of-bounds cursors in QueryProductByCategory must be clamped without inverted range panic
-	oobForwardAfter, err := repo.QueryProductByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+	// Out-of-bounds cursors in GetProductByCategory must be clamped without inverted range panic
+	oobForwardAfter, err := repo.GetByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
 		Begin: tuple.Tuple{"zzzzz\xff"},
 		Limit: 2,
 	})
 	if err != nil || len(oobForwardAfter.Items) != 0 {
 		t.Fatalf("expected 0 items for forward Begin past end of index range, got %+v, err=%v", oobForwardAfter, err)
 	}
-	oobReverseBefore, err := repo.QueryProductByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+	oobReverseBefore, err := repo.GetByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
 		Begin:   tuple.Tuple{""},
 		Limit:   2,
 		Reverse: true,

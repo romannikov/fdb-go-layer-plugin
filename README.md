@@ -13,11 +13,11 @@ The compiler is structured around a **language-neutral Intermediate Representati
   - `compiler/ir`: Extracts `FileSpec`, `MessageSpec`, `FieldSpec`, `SecondaryIndexSpec`, and `IndexPrefixSpec` from `protogen.File`, validates all schema invariants, and computes deterministic 32-bit FNV-1a index IDs.
   - `compiler/backend`: Defines the language-agnostic `Generator` interface, `Registry`, `Options`, and `RunProtogen` helper.
   - `compiler/backend/golang`: Emits strongly-typed `*.fdb.go` repositories for Go.
-- **CRUD Operations**: Full support for `Create` (with `ErrAlreadyExists` protection), `Get` (with `ErrNotFound`), `Set` (with minimal-write index delta updates), `Delete`, `BatchGet`, `BatchGetByPK`, and cursor-paginated `List` (including compound primary key `opts.Prefix` filtering).
+- **CRUD Operations**: Full support for `Create` (with `ErrAlreadyExists` protection), `Get` (with `ErrNotFound`), `Set` (with minimal-write index delta updates), `Delete`, strongly-typed `BatchGet`, and cursor-paginated `List` (including compound primary key `opts.Prefix` filtering).
 - **Primary Keys**: Single-field and compound primary keys composed of scalar, `bytes`, or `enum` fields.
 - **Secondary & Fan-Out Indexes**:
   - Single-field and composite secondary indexes with automatic maintenance on `Create`, `Set`, and `Delete`.
-  - Automatic generation of **partial-prefix query methods** (`Get<Entity>By<Prefix>` and `Query<Entity>By<Prefix>`) for leading prefixes of composite secondary indexes.
+  - Automatic generation of **partial-prefix query methods** (`GetBy<Prefix>`) for leading prefixes of composite secondary indexes.
   - **Fan-out** indexes on `repeated` fields with deduplication and minimal-write delta updates on `Set`.
 - **Atomic Operations**: Support for FoundationDB atomic mutations (`MUTATION_ADD`, `MUTATION_MAX`, `MUTATION_MIN`) stored in an isolated `FieldNamespace` (`2`) so `Set` never overwrites concurrent atomic updates, plus `Set<Entity><Field>` for explicit resets.
 - **Versionstamps & FIFO Queues**: Built-in support for `[(annotations.is_versionstamp) = true]` primary keys and `option (annotations.is_queue) = true` FIFO queues (`Enqueue`, `Dequeue`, `DequeueBatch`) with automatic per-transaction user version monotonicity.

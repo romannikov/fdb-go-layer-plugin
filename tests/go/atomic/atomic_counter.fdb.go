@@ -34,9 +34,8 @@ type CounterPaginatedResult struct {
 type CounterRepository interface {
 	fdblayer.GenericRepository[*Counter, string]
 
-	BatchGetCounter(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Counter, error)
-	BatchGetCounterByPK(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Counter, error)
-	ListCounter(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts CounterPaginationOptions) (*CounterPaginatedResult, error)
+	BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Counter, error)
+	List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts CounterPaginationOptions) (*CounterPaginatedResult, error)
 	AddCounterValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
 	SetCounterValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
 	MaxCounterMaxValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
@@ -307,97 +306,8 @@ func (r *counterRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 	return nil
 }
 
-// BatchGetCounter retrieves multiple Counter entities by their primary keys.
-func (r *counterRepository) BatchGetCounter(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Counter, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	typeID, err := r.store.GetTypeID("Counter")
-	if err != nil {
-		return nil, err
-	}
-
-	result := make(map[string]*Counter)
-	futures := make([]fdb.FutureByteSlice, len(ids))
-	fieldFutures := make([]fdblayer.RangeFuture, len(ids))
-
-	for i, id := range ids {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		keyTpl := make(tuple.Tuple, 2+len(id))
-		keyTpl[0] = typeID
-		keyTpl[1] = fdblayer.DataNamespace
-		for j, el := range id {
-			keyTpl[2+j] = fdblayer.NormalizeTupleElement(el)
-		}
-		key := dir.Pack(keyTpl)
-		futures[i] = tr.Get(key)
-		fieldTpl := make(tuple.Tuple, 2+len(id))
-		fieldTpl[0] = typeID
-		fieldTpl[1] = fdblayer.FieldNamespace
-		copy(fieldTpl[2:], keyTpl[2:])
-		fieldRange, err := fdb.PrefixRange(dir.Pack(fieldTpl))
-		if err != nil {
-			return nil, err
-		}
-		fieldFutures[i] = fdblayer.GetRange(tr, fieldRange, fdb.RangeOptions{})
-	}
-
-	for i, future := range futures {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		value := future.MustGet()
-		if value == nil {
-			continue
-		}
-		entity := &Counter{}
-		err := proto.Unmarshal(value, entity)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
-		}
-		entity.Value = 0
-		entity.MaxValue = 0
-		entity.MinValue = 0
-		entity.U64Max = 0
-		entity.I32Min = 0
-		entity.U32Add = 0
-		for _, fkv := range fieldFutures[i].GetSliceOrPanic() {
-			if len(fkv.Value) < 8 {
-				continue
-			}
-			ftpl, err := dir.Unpack(fkv.Key)
-			if err != nil || len(ftpl) == 0 {
-				continue
-			}
-			fieldNum, ok := ftpl[len(ftpl)-1].(int64)
-			if !ok {
-				continue
-			}
-			switch fieldNum {
-			case 2:
-				entity.Value = int64(binary.LittleEndian.Uint64(fkv.Value))
-			case 3:
-				entity.MaxValue = int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63))
-			case 4:
-				entity.MinValue = int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63))
-			case 5:
-				entity.U64Max = uint64(binary.LittleEndian.Uint64(fkv.Value))
-			case 6:
-				entity.I32Min = int32(int64(binary.LittleEndian.Uint64(fkv.Value) ^ (1 << 63)))
-			case 7:
-				entity.U32Add = uint32(binary.LittleEndian.Uint64(fkv.Value))
-			}
-		}
-		result[ids[i].String()] = entity
-	}
-
-	return result, nil
-}
-
-// BatchGetCounterByPK retrieves multiple Counter entities by their strongly-typed primary keys.
-func (r *counterRepository) BatchGetCounterByPK(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Counter, error) {
+// BatchGet retrieves multiple Counter entities by their primary keys.
+func (r *counterRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Counter, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -435,7 +345,6 @@ func (r *counterRepository) BatchGetCounterByPK(ctx context.Context, tr fdb.Read
 		if err := proto.Unmarshal(value, entity); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
-		_ = i
 		entity.Value = 0
 		entity.MaxValue = 0
 		entity.MinValue = 0
@@ -474,8 +383,8 @@ func (r *counterRepository) BatchGetCounterByPK(ctx context.Context, tr fdb.Read
 	return entities, nil
 }
 
-// ListCounter retrieves a list of Counter entities starting from the given key.
-func (r *counterRepository) ListCounter(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts CounterPaginationOptions) (*CounterPaginatedResult, error) {
+// List retrieves a list of Counter entities starting from the given key.
+func (r *counterRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts CounterPaginationOptions) (*CounterPaginatedResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

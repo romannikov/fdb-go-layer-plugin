@@ -33,11 +33,9 @@ type PostPaginatedResult struct {
 type PostRepository interface {
 	fdblayer.GenericRepository[*Post, string]
 
-	BatchGetPost(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Post, error)
-	BatchGetPostByPK(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Post, error)
-	ListPost(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PostPaginationOptions) (*PostPaginatedResult, error)
-	GetPostByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string) ([]*Post, error)
-	QueryPostByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts PostPaginationOptions) (*PostPaginatedResult, error)
+	BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Post, error)
+	List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PostPaginationOptions) (*PostPaginatedResult, error)
+	GetByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts PostPaginationOptions) (*PostPaginatedResult, error)
 }
 
 type postRepository struct {
@@ -227,54 +225,8 @@ func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 	return nil
 }
 
-// BatchGetPost retrieves multiple Post entities by their primary keys.
-func (r *postRepository) BatchGetPost(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Post, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	typeID, err := r.store.GetTypeID("Post")
-	if err != nil {
-		return nil, err
-	}
-
-	result := make(map[string]*Post)
-	futures := make([]fdb.FutureByteSlice, len(ids))
-
-	for i, id := range ids {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		keyTpl := make(tuple.Tuple, 2+len(id))
-		keyTpl[0] = typeID
-		keyTpl[1] = fdblayer.DataNamespace
-		for j, el := range id {
-			keyTpl[2+j] = fdblayer.NormalizeTupleElement(el)
-		}
-		key := dir.Pack(keyTpl)
-		futures[i] = tr.Get(key)
-	}
-
-	for i, future := range futures {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		value := future.MustGet()
-		if value == nil {
-			continue
-		}
-		entity := &Post{}
-		err := proto.Unmarshal(value, entity)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
-		}
-		result[ids[i].String()] = entity
-	}
-
-	return result, nil
-}
-
-// BatchGetPostByPK retrieves multiple Post entities by their strongly-typed primary keys.
-func (r *postRepository) BatchGetPostByPK(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Post, error) {
+// BatchGet retrieves multiple Post entities by their primary keys.
+func (r *postRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Post, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -306,14 +258,13 @@ func (r *postRepository) BatchGetPostByPK(ctx context.Context, tr fdb.ReadTransa
 		if err := proto.Unmarshal(value, entity); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
-		_ = i
 		entities = append(entities, entity)
 	}
 	return entities, nil
 }
 
-// ListPost retrieves a list of Post entities starting from the given key.
-func (r *postRepository) ListPost(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PostPaginationOptions) (*PostPaginatedResult, error) {
+// List retrieves a list of Post entities starting from the given key.
+func (r *postRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PostPaginationOptions) (*PostPaginatedResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -404,67 +355,8 @@ func (r *postRepository) ListPost(ctx context.Context, tr fdb.ReadTransaction, d
 	return result, nil
 }
 
-// GetPostByTags retrieves Post entities by their Tags index.
-func (r *postRepository) GetPostByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string) ([]*Post, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	typeID, err := r.store.GetTypeID("Post")
-	if err != nil {
-		return nil, err
-	}
-
-	entities := []*Post{}
-	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816, Tags})
-	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
-	if err != nil {
-		return nil, err
-	}
-	kvs := fdblayer.GetRange(tr, indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
-	futures := make([]fdb.FutureByteSlice, len(kvs))
-	for i, kv := range kvs {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		tpl, err := dir.Unpack(kv.Key)
-		if err != nil {
-			return nil, err
-		}
-		pkIndexStart := 3 + 1
-		if len(tpl) <= pkIndexStart {
-			continue
-		}
-		pkTuple := tpl[pkIndexStart:]
-		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
-		keyTpl[0] = typeID
-		keyTpl[1] = fdblayer.DataNamespace
-		copy(keyTpl[2:], pkTuple)
-		key := dir.Pack(keyTpl)
-		futures[i] = tr.Get(key)
-	}
-	for _, future := range futures {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if future == nil {
-			continue
-		}
-		value := future.MustGet()
-		if value == nil {
-			continue
-		}
-		entity := &Post{}
-		err = proto.Unmarshal(value, entity)
-		if err != nil {
-			return nil, err
-		}
-		entities = append(entities, entity)
-	}
-	return entities, nil
-}
-
-// QueryPostByTags retrieves a paginated page of Post entities by their Tags index.
-func (r *postRepository) QueryPostByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts PostPaginationOptions) (*PostPaginatedResult, error) {
+// GetByTags retrieves a paginated page of Post entities by their Tags index.
+func (r *postRepository) GetByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts PostPaginationOptions) (*PostPaginatedResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

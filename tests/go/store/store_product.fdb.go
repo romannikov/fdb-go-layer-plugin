@@ -33,11 +33,9 @@ type ProductPaginatedResult struct {
 type ProductRepository interface {
 	fdblayer.GenericRepository[*Product, string]
 
-	BatchGetProduct(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Product, error)
-	BatchGetProductByPK(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Product, error)
-	ListProduct(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts ProductPaginationOptions) (*ProductPaginatedResult, error)
-	GetProductByCategory(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Category string) ([]*Product, error)
-	QueryProductByCategory(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Category string, opts ProductPaginationOptions) (*ProductPaginatedResult, error)
+	BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Product, error)
+	List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts ProductPaginationOptions) (*ProductPaginatedResult, error)
+	GetByCategory(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Category string, opts ProductPaginationOptions) (*ProductPaginatedResult, error)
 }
 
 type productRepository struct {
@@ -169,54 +167,8 @@ func (r *productRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 	return nil
 }
 
-// BatchGetProduct retrieves multiple Product entities by their primary keys.
-func (r *productRepository) BatchGetProduct(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*Product, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	typeID, err := r.store.GetTypeID("Product")
-	if err != nil {
-		return nil, err
-	}
-
-	result := make(map[string]*Product)
-	futures := make([]fdb.FutureByteSlice, len(ids))
-
-	for i, id := range ids {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		keyTpl := make(tuple.Tuple, 2+len(id))
-		keyTpl[0] = typeID
-		keyTpl[1] = fdblayer.DataNamespace
-		for j, el := range id {
-			keyTpl[2+j] = fdblayer.NormalizeTupleElement(el)
-		}
-		key := dir.Pack(keyTpl)
-		futures[i] = tr.Get(key)
-	}
-
-	for i, future := range futures {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		value := future.MustGet()
-		if value == nil {
-			continue
-		}
-		entity := &Product{}
-		err := proto.Unmarshal(value, entity)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
-		}
-		result[ids[i].String()] = entity
-	}
-
-	return result, nil
-}
-
-// BatchGetProductByPK retrieves multiple Product entities by their strongly-typed primary keys.
-func (r *productRepository) BatchGetProductByPK(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Product, error) {
+// BatchGet retrieves multiple Product entities by their primary keys.
+func (r *productRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Product, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -248,14 +200,13 @@ func (r *productRepository) BatchGetProductByPK(ctx context.Context, tr fdb.Read
 		if err := proto.Unmarshal(value, entity); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
-		_ = i
 		entities = append(entities, entity)
 	}
 	return entities, nil
 }
 
-// ListProduct retrieves a list of Product entities starting from the given key.
-func (r *productRepository) ListProduct(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts ProductPaginationOptions) (*ProductPaginatedResult, error) {
+// List retrieves a list of Product entities starting from the given key.
+func (r *productRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts ProductPaginationOptions) (*ProductPaginatedResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -346,67 +297,8 @@ func (r *productRepository) ListProduct(ctx context.Context, tr fdb.ReadTransact
 	return result, nil
 }
 
-// GetProductByCategory retrieves Product entities by their Category index.
-func (r *productRepository) GetProductByCategory(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Category string) ([]*Product, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	typeID, err := r.store.GetTypeID("Product")
-	if err != nil {
-		return nil, err
-	}
-
-	entities := []*Product{}
-	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 3475980913, Category})
-	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
-	if err != nil {
-		return nil, err
-	}
-	kvs := fdblayer.GetRange(tr, indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
-	futures := make([]fdb.FutureByteSlice, len(kvs))
-	for i, kv := range kvs {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		tpl, err := dir.Unpack(kv.Key)
-		if err != nil {
-			return nil, err
-		}
-		pkIndexStart := 3 + 1
-		if len(tpl) <= pkIndexStart {
-			continue
-		}
-		pkTuple := tpl[pkIndexStart:]
-		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
-		keyTpl[0] = typeID
-		keyTpl[1] = fdblayer.DataNamespace
-		copy(keyTpl[2:], pkTuple)
-		key := dir.Pack(keyTpl)
-		futures[i] = tr.Get(key)
-	}
-	for _, future := range futures {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if future == nil {
-			continue
-		}
-		value := future.MustGet()
-		if value == nil {
-			continue
-		}
-		entity := &Product{}
-		err = proto.Unmarshal(value, entity)
-		if err != nil {
-			return nil, err
-		}
-		entities = append(entities, entity)
-	}
-	return entities, nil
-}
-
-// QueryProductByCategory retrieves a paginated page of Product entities by their Category index.
-func (r *productRepository) QueryProductByCategory(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Category string, opts ProductPaginationOptions) (*ProductPaginatedResult, error) {
+// GetByCategory retrieves a paginated page of Product entities by their Category index.
+func (r *productRepository) GetByCategory(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Category string, opts ProductPaginationOptions) (*ProductPaginatedResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

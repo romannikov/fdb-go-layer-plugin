@@ -159,9 +159,12 @@ func TestIntegration_CreateUser_AlreadyExists(t *testing.T) {
 
 	var byBob []*store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		byBob, err = userRepo.GetUserByEmail(ctx, tr, dir, "bob@test.com")
-		return err
+		res, err := userRepo.GetByEmail(ctx, tr, dir, "bob@test.com", store.UserPaginationOptions{})
+		if err != nil {
+			return err
+		}
+		byBob = res.Items
+		return nil
 	})
 	if len(byBob) != 0 {
 		t.Fatalf("expected 0 users for bob@test.com after rejected Create, got %d", len(byBob))
@@ -301,34 +304,34 @@ func TestIntegration_GetUserByEmail(t *testing.T) {
 	})
 
 	// Should find two users with email "alice@test.com"
-	var users []*store.User
+	var users *store.UserPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.GetUserByEmail(ctx, tr, dir, "alice@test.com")
+		users, err = userRepo.GetByEmail(ctx, tr, dir, "alice@test.com", store.UserPaginationOptions{})
 		return err
 	})
-	if len(users) != 2 {
-		t.Fatalf("expected 2 users, got %d", len(users))
+	if len(users.Items) != 2 {
+		t.Fatalf("expected 2 users, got %d", len(users.Items))
 	}
 
 	// Should find one user with email "bob@test.com"
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.GetUserByEmail(ctx, tr, dir, "bob@test.com")
+		users, err = userRepo.GetByEmail(ctx, tr, dir, "bob@test.com", store.UserPaginationOptions{})
 		return err
 	})
-	if len(users) != 1 || users[0].Name != "Bob" {
-		t.Fatalf("unexpected result: %+v", users)
+	if len(users.Items) != 1 || users.Items[0].Name != "Bob" {
+		t.Fatalf("unexpected result: %+v", users.Items)
 	}
 
 	// Should find zero for nonexistent email
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.GetUserByEmail(ctx, tr, dir, "nobody@test.com")
+		users, err = userRepo.GetByEmail(ctx, tr, dir, "nobody@test.com", store.UserPaginationOptions{})
 		return err
 	})
-	if len(users) != 0 {
-		t.Fatalf("expected 0, got %d", len(users))
+	if len(users.Items) != 0 {
+		t.Fatalf("expected 0, got %d", len(users.Items))
 	}
 }
 
@@ -354,23 +357,23 @@ func TestIntegration_GetProductByCategory(t *testing.T) {
 		return productRepo.Create(ctx, tr, dir, &store.Product{Id: "p3", Name: "Laptop", Category: "electronics", Price: 999})
 	})
 
-	var products []*store.Product
+	var products *store.ProductPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		products, err = productRepo.GetProductByCategory(ctx, tr, dir, "tools")
+		products, err = productRepo.GetByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{})
 		return err
 	})
-	if len(products) != 2 {
-		t.Fatalf("expected 2 tools, got %d", len(products))
+	if len(products.Items) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(products.Items))
 	}
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		products, err = productRepo.GetProductByCategory(ctx, tr, dir, "electronics")
+		products, err = productRepo.GetByCategory(ctx, tr, dir, "electronics", store.ProductPaginationOptions{})
 		return err
 	})
-	if len(products) != 1 || products[0].Name != "Laptop" {
-		t.Fatalf("unexpected: %+v", products)
+	if len(products.Items) != 1 || products.Items[0].Name != "Laptop" {
+		t.Fatalf("unexpected: %+v", products.Items)
 	}
 }
 
@@ -396,24 +399,24 @@ func TestIntegration_SetUser_IndexUpdated(t *testing.T) {
 	})
 
 	// Old email should return empty
-	var users []*store.User
+	var users *store.UserPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.GetUserByEmail(ctx, tr, dir, "old@test.com")
+		users, err = userRepo.GetByEmail(ctx, tr, dir, "old@test.com", store.UserPaginationOptions{})
 		return err
 	})
-	if len(users) != 0 {
+	if len(users.Items) != 0 {
 		t.Fatal("stale index: old email still returns results")
 	}
 
 	// New email should return the user
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.GetUserByEmail(ctx, tr, dir, "new@test.com")
+		users, err = userRepo.GetByEmail(ctx, tr, dir, "new@test.com", store.UserPaginationOptions{})
 		return err
 	})
-	if len(users) != 1 || users[0].Name != "Alice" {
-		t.Fatalf("expected Alice at new email, got %+v", users)
+	if len(users.Items) != 1 || users.Items[0].Name != "Alice" {
+		t.Fatalf("expected Alice at new email, got %+v", users.Items)
 	}
 }
 
@@ -437,13 +440,13 @@ func TestIntegration_DeleteUser_ClearsIndex(t *testing.T) {
 		return userRepo.Delete(ctx, tr, dir, "u1")
 	})
 
-	var users []*store.User
+	var users *store.UserPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.GetUserByEmail(ctx, tr, dir, "alice@test.com")
+		users, err = userRepo.GetByEmail(ctx, tr, dir, "alice@test.com", store.UserPaginationOptions{})
 		return err
 	})
-	if len(users) != 0 {
+	if len(users.Items) != 0 {
 		t.Fatal("index not cleared after delete")
 	}
 }
@@ -476,7 +479,7 @@ func TestIntegration_ListUser_Basic(t *testing.T) {
 	var result *store.UserPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = userRepo.ListUser(ctx, tr, dir, store.UserPaginationOptions{Limit: 10})
+		result, err = userRepo.List(ctx, tr, dir, store.UserPaginationOptions{Limit: 10})
 		return err
 	})
 	if len(result.Items) != 5 {
@@ -515,7 +518,7 @@ func TestIntegration_ListUser_Pagination(t *testing.T) {
 	var page1 *store.UserPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = userRepo.ListUser(ctx, tr, dir, store.UserPaginationOptions{Limit: 2})
+		page1, err = userRepo.List(ctx, tr, dir, store.UserPaginationOptions{Limit: 2})
 		return err
 	})
 	if len(page1.Items) != 2 {
@@ -532,7 +535,7 @@ func TestIntegration_ListUser_Pagination(t *testing.T) {
 	var page2 *store.UserPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page2, err = userRepo.ListUser(ctx, tr, dir, store.UserPaginationOptions{Begin: page1.NextKey, Limit: 2})
+		page2, err = userRepo.List(ctx, tr, dir, store.UserPaginationOptions{Begin: page1.NextKey, Limit: 2})
 		return err
 	})
 	if len(page2.Items) != 2 {
@@ -546,7 +549,7 @@ func TestIntegration_ListUser_Pagination(t *testing.T) {
 	var page3 *store.UserPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page3, err = userRepo.ListUser(ctx, tr, dir, store.UserPaginationOptions{Begin: page2.NextKey, Limit: 2})
+		page3, err = userRepo.List(ctx, tr, dir, store.UserPaginationOptions{Begin: page2.NextKey, Limit: 2})
 		return err
 	})
 	if len(page3.Items) != 1 {
@@ -585,7 +588,7 @@ func TestIntegration_ListProduct_Pagination(t *testing.T) {
 	var page1 *store.ProductPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = productRepo.ListProduct(ctx, tr, dir, store.ProductPaginationOptions{Limit: 3})
+		page1, err = productRepo.List(ctx, tr, dir, store.ProductPaginationOptions{Limit: 3})
 		return err
 	})
 	if len(page1.Items) != 3 {
@@ -598,7 +601,7 @@ func TestIntegration_ListProduct_Pagination(t *testing.T) {
 	var page2 *store.ProductPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page2, err = productRepo.ListProduct(ctx, tr, dir, store.ProductPaginationOptions{Begin: page1.NextKey, Limit: 3})
+		page2, err = productRepo.List(ctx, tr, dir, store.ProductPaginationOptions{Begin: page1.NextKey, Limit: 3})
 		return err
 	})
 	if len(page2.Items) != 3 {
@@ -608,7 +611,7 @@ func TestIntegration_ListProduct_Pagination(t *testing.T) {
 	var page3 *store.ProductPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page3, err = productRepo.ListProduct(ctx, tr, dir, store.ProductPaginationOptions{Begin: page2.NextKey, Limit: 3})
+		page3, err = productRepo.List(ctx, tr, dir, store.ProductPaginationOptions{Begin: page2.NextKey, Limit: 3})
 		return err
 	})
 	if len(page3.Items) != 1 {
@@ -635,7 +638,7 @@ func TestIntegration_ListUser_Empty(t *testing.T) {
 	var result *store.UserPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = userRepo.ListUser(ctx, tr, dir, store.UserPaginationOptions{Limit: 10})
+		result, err = userRepo.List(ctx, tr, dir, store.UserPaginationOptions{Limit: 10})
 		return err
 	})
 	if len(result.Items) != 0 {
@@ -665,10 +668,10 @@ func TestIntegration_BatchGetUser(t *testing.T) {
 		return nil
 	})
 
-	var result map[string]*store.User
+	var result []*store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = userRepo.BatchGetUser(ctx, tr, dir, []tuple.Tuple{{"u1"}, {"u2"}, {"u3"}})
+		result, err = userRepo.BatchGet(ctx, tr, dir, []string{"u1", "u2", "u3"})
 		return err
 	})
 	if len(result) != 3 {
@@ -780,14 +783,14 @@ func TestIntegration_SyncMetadata_AndPaginatedIndexQuery(t *testing.T) {
 	var revPage1, revPage2 *store.ProductPaginatedResult
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		revPage1, err = productRepo.QueryProductByCategory(ctx, tr, dir, "hardware", store.ProductPaginationOptions{
+		revPage1, err = productRepo.GetByCategory(ctx, tr, dir, "hardware", store.ProductPaginationOptions{
 			Limit:   2,
 			Reverse: true,
 		})
 		if err != nil {
 			return err
 		}
-		revPage2, err = productRepo.QueryProductByCategory(ctx, tr, dir, "hardware", store.ProductPaginationOptions{
+		revPage2, err = productRepo.GetByCategory(ctx, tr, dir, "hardware", store.ProductPaginationOptions{
 			Begin:   revPage1.NextKey,
 			Limit:   2,
 			Reverse: true,

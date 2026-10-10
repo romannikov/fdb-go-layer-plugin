@@ -34,13 +34,10 @@ type AuditLogPaginatedResult struct {
 type AuditLogRepository interface {
 	fdblayer.GenericRepository[*AuditLog, []byte]
 
-	BatchGetAuditLog(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*AuditLog, error)
-	BatchGetAuditLogByPK(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks [][]byte) ([]*AuditLog, error)
-	ListAuditLog(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error)
-	GetAuditLogByActor(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Actor string) ([]*AuditLog, error)
-	QueryAuditLogByActor(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Actor string, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error)
-	GetAuditLogByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string) ([]*AuditLog, error)
-	QueryAuditLogByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error)
+	BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks [][]byte) ([]*AuditLog, error)
+	List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error)
+	GetByActor(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Actor string, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error)
+	GetByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error)
 	AddAuditLogViews(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, LogId []byte, val int64) error
 	SetAuditLogViews(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, LogId []byte, val int64) error
 }
@@ -336,95 +333,8 @@ func (r *auditlogRepository) Delete(ctx context.Context, tr fdblayer.Transaction
 	return nil
 }
 
-// BatchGetAuditLog retrieves multiple AuditLog entities by their primary keys.
-func (r *auditlogRepository) BatchGetAuditLog(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ids []tuple.Tuple) (map[string]*AuditLog, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	typeID, err := r.store.GetTypeID("AuditLog")
-	if err != nil {
-		return nil, err
-	}
-
-	result := make(map[string]*AuditLog)
-	futures := make([]fdb.FutureByteSlice, len(ids))
-	fieldFutures := make([]fdblayer.RangeFuture, len(ids))
-
-	for i, id := range ids {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		keyTpl := make(tuple.Tuple, 2+len(id))
-		keyTpl[0] = typeID
-		keyTpl[1] = fdblayer.DataNamespace
-		for j, el := range id {
-			keyTpl[2+j] = fdblayer.NormalizeTupleElement(el)
-		}
-		if len(id) > 0 {
-			if rawVS, ok := id[0].([]byte); ok {
-				keyTpl[2+0] = fdblayer.BytesToVersionstamp(rawVS)
-			}
-		}
-		key := dir.Pack(keyTpl)
-		futures[i] = tr.Get(key)
-		fieldTpl := make(tuple.Tuple, 2+len(id))
-		fieldTpl[0] = typeID
-		fieldTpl[1] = fdblayer.FieldNamespace
-		copy(fieldTpl[2:], keyTpl[2:])
-		fieldRange, err := fdb.PrefixRange(dir.Pack(fieldTpl))
-		if err != nil {
-			return nil, err
-		}
-		fieldFutures[i] = fdblayer.GetRange(tr, fieldRange, fdb.RangeOptions{})
-	}
-
-	for i, future := range futures {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		value := future.MustGet()
-		if value == nil {
-			continue
-		}
-		entity := &AuditLog{}
-		err := proto.Unmarshal(value, entity)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
-		}
-		if len(ids[i]) > 0 {
-			switch v := ids[i][0].(type) {
-			case tuple.Versionstamp:
-				entity.LogId = v.Bytes()
-			case []byte:
-				entity.LogId = append([]byte(nil), v...)
-			}
-		}
-		entity.Views = 0
-		for _, fkv := range fieldFutures[i].GetSliceOrPanic() {
-			if len(fkv.Value) < 8 {
-				continue
-			}
-			ftpl, err := dir.Unpack(fkv.Key)
-			if err != nil || len(ftpl) == 0 {
-				continue
-			}
-			fieldNum, ok := ftpl[len(ftpl)-1].(int64)
-			if !ok {
-				continue
-			}
-			switch fieldNum {
-			case 4:
-				entity.Views = int64(binary.LittleEndian.Uint64(fkv.Value))
-			}
-		}
-		result[ids[i].String()] = entity
-	}
-
-	return result, nil
-}
-
-// BatchGetAuditLogByPK retrieves multiple AuditLog entities by their strongly-typed primary keys.
-func (r *auditlogRepository) BatchGetAuditLogByPK(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks [][]byte) ([]*AuditLog, error) {
+// BatchGet retrieves multiple AuditLog entities by their primary keys.
+func (r *auditlogRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks [][]byte) ([]*AuditLog, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -486,8 +396,8 @@ func (r *auditlogRepository) BatchGetAuditLogByPK(ctx context.Context, tr fdb.Re
 	return entities, nil
 }
 
-// ListAuditLog retrieves a list of AuditLog entities starting from the given key.
-func (r *auditlogRepository) ListAuditLog(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error) {
+// List retrieves a list of AuditLog entities starting from the given key.
+func (r *auditlogRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -640,102 +550,8 @@ func (r *auditlogRepository) ListAuditLog(ctx context.Context, tr fdb.ReadTransa
 	return result, nil
 }
 
-// GetAuditLogByActor retrieves AuditLog entities by their Actor index.
-func (r *auditlogRepository) GetAuditLogByActor(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Actor string) ([]*AuditLog, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	typeID, err := r.store.GetTypeID("AuditLog")
-	if err != nil {
-		return nil, err
-	}
-
-	entities := []*AuditLog{}
-	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 244111290, Actor})
-	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
-	if err != nil {
-		return nil, err
-	}
-	kvs := fdblayer.GetRange(tr, indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
-	futures := make([]fdb.FutureByteSlice, len(kvs))
-	pkTuples := make([]tuple.Tuple, len(kvs))
-	fieldFutures := make([]fdblayer.RangeFuture, len(kvs))
-	for i, kv := range kvs {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		tpl, err := dir.Unpack(kv.Key)
-		if err != nil {
-			return nil, err
-		}
-		pkIndexStart := 3 + 1
-		if len(tpl) <= pkIndexStart {
-			continue
-		}
-		pkTuple := tpl[pkIndexStart:]
-		pkTuples[i] = pkTuple
-		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
-		keyTpl[0] = typeID
-		keyTpl[1] = fdblayer.DataNamespace
-		copy(keyTpl[2:], pkTuple)
-		key := dir.Pack(keyTpl)
-		futures[i] = tr.Get(key)
-		fieldTpl := make(tuple.Tuple, 2+len(pkTuple))
-		fieldTpl[0] = typeID
-		fieldTpl[1] = fdblayer.FieldNamespace
-		copy(fieldTpl[2:], pkTuple)
-		fieldRange, err := fdb.PrefixRange(dir.Pack(fieldTpl))
-		if err != nil {
-			return nil, err
-		}
-		fieldFutures[i] = fdblayer.GetRange(tr, fieldRange, fdb.RangeOptions{})
-	}
-	for i, future := range futures {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if future == nil {
-			continue
-		}
-		value := future.MustGet()
-		if value == nil {
-			continue
-		}
-		entity := &AuditLog{}
-		err = proto.Unmarshal(value, entity)
-		if err != nil {
-			return nil, err
-		}
-		if len(pkTuples[i]) > 0 {
-			if vs, ok := pkTuples[i][0].(tuple.Versionstamp); ok {
-				entity.LogId = vs.Bytes()
-			}
-		}
-		entity.Views = 0
-		for _, fkv := range fieldFutures[i].GetSliceOrPanic() {
-			if len(fkv.Value) < 8 {
-				continue
-			}
-			ftpl, err := dir.Unpack(fkv.Key)
-			if err != nil || len(ftpl) == 0 {
-				continue
-			}
-			fieldNum, ok := ftpl[len(ftpl)-1].(int64)
-			if !ok {
-				continue
-			}
-			switch fieldNum {
-			case 4:
-				entity.Views = int64(binary.LittleEndian.Uint64(fkv.Value))
-			}
-		}
-		entities = append(entities, entity)
-	}
-	return entities, nil
-}
-
-// QueryAuditLogByActor retrieves a paginated page of AuditLog entities by their Actor index.
-func (r *auditlogRepository) QueryAuditLogByActor(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Actor string, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error) {
+// GetByActor retrieves a paginated page of AuditLog entities by their Actor index.
+func (r *auditlogRepository) GetByActor(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Actor string, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -874,102 +690,8 @@ func (r *auditlogRepository) QueryAuditLogByActor(ctx context.Context, tr fdb.Re
 	return result, nil
 }
 
-// GetAuditLogByTags retrieves AuditLog entities by their Tags index.
-func (r *auditlogRepository) GetAuditLogByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string) ([]*AuditLog, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	typeID, err := r.store.GetTypeID("AuditLog")
-	if err != nil {
-		return nil, err
-	}
-
-	entities := []*AuditLog{}
-	indexKeyPrefix := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816, Tags})
-	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
-	if err != nil {
-		return nil, err
-	}
-	kvs := fdblayer.GetRange(tr, indexRange, fdb.RangeOptions{}).GetSliceOrPanic()
-	futures := make([]fdb.FutureByteSlice, len(kvs))
-	pkTuples := make([]tuple.Tuple, len(kvs))
-	fieldFutures := make([]fdblayer.RangeFuture, len(kvs))
-	for i, kv := range kvs {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		tpl, err := dir.Unpack(kv.Key)
-		if err != nil {
-			return nil, err
-		}
-		pkIndexStart := 3 + 1
-		if len(tpl) <= pkIndexStart {
-			continue
-		}
-		pkTuple := tpl[pkIndexStart:]
-		pkTuples[i] = pkTuple
-		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
-		keyTpl[0] = typeID
-		keyTpl[1] = fdblayer.DataNamespace
-		copy(keyTpl[2:], pkTuple)
-		key := dir.Pack(keyTpl)
-		futures[i] = tr.Get(key)
-		fieldTpl := make(tuple.Tuple, 2+len(pkTuple))
-		fieldTpl[0] = typeID
-		fieldTpl[1] = fdblayer.FieldNamespace
-		copy(fieldTpl[2:], pkTuple)
-		fieldRange, err := fdb.PrefixRange(dir.Pack(fieldTpl))
-		if err != nil {
-			return nil, err
-		}
-		fieldFutures[i] = fdblayer.GetRange(tr, fieldRange, fdb.RangeOptions{})
-	}
-	for i, future := range futures {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if future == nil {
-			continue
-		}
-		value := future.MustGet()
-		if value == nil {
-			continue
-		}
-		entity := &AuditLog{}
-		err = proto.Unmarshal(value, entity)
-		if err != nil {
-			return nil, err
-		}
-		if len(pkTuples[i]) > 0 {
-			if vs, ok := pkTuples[i][0].(tuple.Versionstamp); ok {
-				entity.LogId = vs.Bytes()
-			}
-		}
-		entity.Views = 0
-		for _, fkv := range fieldFutures[i].GetSliceOrPanic() {
-			if len(fkv.Value) < 8 {
-				continue
-			}
-			ftpl, err := dir.Unpack(fkv.Key)
-			if err != nil || len(ftpl) == 0 {
-				continue
-			}
-			fieldNum, ok := ftpl[len(ftpl)-1].(int64)
-			if !ok {
-				continue
-			}
-			switch fieldNum {
-			case 4:
-				entity.Views = int64(binary.LittleEndian.Uint64(fkv.Value))
-			}
-		}
-		entities = append(entities, entity)
-	}
-	return entities, nil
-}
-
-// QueryAuditLogByTags retrieves a paginated page of AuditLog entities by their Tags index.
-func (r *auditlogRepository) QueryAuditLogByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error) {
+// GetByTags retrieves a paginated page of AuditLog entities by their Tags index.
+func (r *auditlogRepository) GetByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

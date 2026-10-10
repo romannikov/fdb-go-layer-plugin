@@ -221,20 +221,20 @@ func TestOrder_CompoundPK_CompoundIndex_BytesIndexes_NestedTypes(t *testing.T) {
 	}
 
 	// 2. Query by compound secondary index (status, created_at)
-	byStatus, err := orderRepo.GetOrderByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000)
-	if err != nil || len(byStatus) != 1 || byStatus[0].OrderSeq != 101 {
+	byStatus, err := orderRepo.GetByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000, store.OrderPaginationOptions{})
+	if err != nil || len(byStatus.Items) != 1 || byStatus.Items[0].OrderSeq != 101 {
 		t.Fatalf("GetOrderByStatusAndCreatedAt failed: got %+v, err=%v", byStatus, err)
 	}
 
 	// 3. Query by scalar bytes secondary index (receipt_hash)
-	byReceipt, err := orderRepo.GetOrderByReceiptHash(ctx, tr, dir, []byte{0xAA, 0xBB, 0x01})
-	if err != nil || len(byReceipt) != 1 || byReceipt[0].OrderSeq != 101 {
+	byReceipt, err := orderRepo.GetByReceiptHash(ctx, tr, dir, []byte{0xAA, 0xBB, 0x01}, store.OrderPaginationOptions{})
+	if err != nil || len(byReceipt.Items) != 1 || byReceipt.Items[0].OrderSeq != 101 {
 		t.Fatalf("GetOrderByReceiptHash failed: got %+v, err=%v", byReceipt, err)
 	}
 
 	// 4. Query by fan-out repeated bytes secondary index (attachment_hashes)
-	byAttach, err := orderRepo.GetOrderByAttachmentHashes(ctx, tr, dir, []byte{0x10, 0x20})
-	if err != nil || len(byAttach) != 1 || byAttach[0].OrderSeq != 101 {
+	byAttach, err := orderRepo.GetByAttachmentHashes(ctx, tr, dir, []byte{0x10, 0x20}, store.OrderPaginationOptions{})
+	if err != nil || len(byAttach.Items) != 1 || byAttach.Items[0].OrderSeq != 101 {
 		t.Fatalf("GetOrderByAttachmentHashes failed: got %+v, err=%v", byAttach, err)
 	}
 
@@ -253,29 +253,29 @@ func TestOrder_CompoundPK_CompoundIndex_BytesIndexes_NestedTypes(t *testing.T) {
 	}
 
 	// Old compound index, old receipt hash, and removed attachment hash must return 0 results
-	if res, _ := orderRepo.GetOrderByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000); len(res) != 0 {
+	if res, _ := orderRepo.GetByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000, store.OrderPaginationOptions{}); len(res.Items) != 0 {
 		t.Fatalf("stale compound index after Set: %+v", res)
 	}
-	if res, _ := orderRepo.GetOrderByReceiptHash(ctx, tr, dir, []byte{0xAA, 0xBB, 0x01}); len(res) != 0 {
+	if res, _ := orderRepo.GetByReceiptHash(ctx, tr, dir, []byte{0xAA, 0xBB, 0x01}, store.OrderPaginationOptions{}); len(res.Items) != 0 {
 		t.Fatalf("stale receipt_hash index after Set: %+v", res)
 	}
-	if res, _ := orderRepo.GetOrderByAttachmentHashes(ctx, tr, dir, []byte{0x10, 0x20}); len(res) != 0 {
+	if res, _ := orderRepo.GetByAttachmentHashes(ctx, tr, dir, []byte{0x10, 0x20}, store.OrderPaginationOptions{}); len(res.Items) != 0 {
 		t.Fatalf("stale attachment_hashes index after Set: %+v", res)
 	}
 
 	// New index entries must resolve
-	if res, _ := orderRepo.GetOrderByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000); len(res) != 1 {
+	if res, _ := orderRepo.GetByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000, store.OrderPaginationOptions{}); len(res.Items) != 1 {
 		t.Fatalf("missing updated compound index after Set: %+v", res)
 	}
-	if res, _ := orderRepo.GetOrderByReceiptHash(ctx, tr, dir, []byte{0xCC, 0xDD, 0x02}); len(res) != 1 {
+	if res, _ := orderRepo.GetByReceiptHash(ctx, tr, dir, []byte{0xCC, 0xDD, 0x02}, store.OrderPaginationOptions{}); len(res.Items) != 1 {
 		t.Fatalf("missing updated receipt_hash index after Set: %+v", res)
 	}
-	if res, _ := orderRepo.GetOrderByAttachmentHashes(ctx, tr, dir, []byte{0x50, 0x60}); len(res) != 1 {
+	if res, _ := orderRepo.GetByAttachmentHashes(ctx, tr, dir, []byte{0x50, 0x60}, store.OrderPaginationOptions{}); len(res.Items) != 1 {
 		t.Fatalf("missing new attachment_hashes index after Set: %+v", res)
 	}
 
 	// 6. BatchGetOrder and Delete with compound primary key
-	batchRes, err := orderRepo.BatchGetOrder(ctx, tr, dir, []tuple.Tuple{{"acme", int64(101)}})
+	batchRes, err := orderRepo.BatchGet(ctx, tr, dir, []store.OrderPrimaryKey{pk})
 	if err != nil || len(batchRes) != 1 {
 		t.Fatalf("BatchGetOrder failed: got %+v, err=%v", batchRes, err)
 	}
@@ -283,10 +283,10 @@ func TestOrder_CompoundPK_CompoundIndex_BytesIndexes_NestedTypes(t *testing.T) {
 	if err := orderRepo.Delete(ctx, tr, dir, pk); err != nil {
 		t.Fatalf("Delete order1 failed: %v", err)
 	}
-	if res, _ := orderRepo.GetOrderByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000); len(res) != 0 {
+	if res, _ := orderRepo.GetByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000, store.OrderPaginationOptions{}); len(res.Items) != 0 {
 		t.Fatalf("compound index not cleared after Delete: %+v", res)
 	}
-	if res, _ := orderRepo.GetOrderByAttachmentHashes(ctx, tr, dir, []byte{0x30, 0x40}); len(res) != 0 {
+	if res, _ := orderRepo.GetByAttachmentHashes(ctx, tr, dir, []byte{0x30, 0x40}, store.OrderPaginationOptions{}); len(res.Items) != 0 {
 		t.Fatalf("fan-out bytes index not cleared after Delete: %+v", res)
 	}
 }
@@ -319,7 +319,7 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 
 	// 2. ListAuditLog must unpack the 12-byte versionstamp from the primary key into LogId
 	// and populate the atomic Views field.
-	listed, err := auditRepo.ListAuditLog(ctx, tr, dir, store.AuditLogPaginationOptions{Limit: 10})
+	listed, err := auditRepo.List(ctx, tr, dir, store.AuditLogPaginationOptions{Limit: 10})
 	if err != nil || len(listed.Items) != 2 {
 		t.Fatalf("ListAuditLog expected 2 items, got %+v, err=%v", listed, err)
 	}
@@ -342,28 +342,25 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 	}
 
 	// 4. Query by standard secondary index (GetAuditLogByActor)
-	byActor, err := auditRepo.GetAuditLogByActor(ctx, tr, dir, "alice")
-	if err != nil || len(byActor) != 1 {
+	byActor, err := auditRepo.GetByActor(ctx, tr, dir, "alice", store.AuditLogPaginationOptions{})
+	if err != nil || len(byActor.Items) != 1 {
 		t.Fatalf("GetAuditLogByActor('alice') expected 1 item, got %+v, err=%v", byActor, err)
 	}
-	if !bytes.Equal(byActor[0].LogId, firstLogID) || byActor[0].Views != 10 {
-		t.Fatalf("GetAuditLogByActor('alice') did not populate LogId/Views: %+v", byActor[0])
+	if !bytes.Equal(byActor.Items[0].LogId, firstLogID) || byActor.Items[0].Views != 10 {
+		t.Fatalf("GetAuditLogByActor('alice') did not populate LogId/Views: %+v", byActor.Items[0])
 	}
 
 	// 5. Query by fan-out secondary index (GetAuditLogByTags)
-	byTagAuth, err := auditRepo.GetAuditLogByTags(ctx, tr, dir, "auth")
-	if err != nil || len(byTagAuth) != 2 {
+	byTagAuth, err := auditRepo.GetByTags(ctx, tr, dir, "auth", store.AuditLogPaginationOptions{})
+	if err != nil || len(byTagAuth.Items) != 2 {
 		t.Fatalf("GetAuditLogByTags('auth') expected 2 items, got %+v, err=%v", byTagAuth, err)
 	}
-	if !bytes.Equal(byTagAuth[0].LogId, firstLogID) || !bytes.Equal(byTagAuth[1].LogId, secondLogID) {
-		t.Fatalf("GetAuditLogByTags('auth') did not populate LogIds: %+v, %+v", byTagAuth[0], byTagAuth[1])
+	if !bytes.Equal(byTagAuth.Items[0].LogId, firstLogID) || !bytes.Equal(byTagAuth.Items[1].LogId, secondLogID) {
+		t.Fatalf("GetAuditLogByTags('auth') did not populate LogIds: %+v, %+v", byTagAuth.Items[0], byTagAuth.Items[1])
 	}
 
-	// 6. BatchGetAuditLog with both tuple.Versionstamp and raw []byte elements
-	batchRes, err := auditRepo.BatchGetAuditLog(ctx, tr, dir, []tuple.Tuple{
-		{fdblayer.BytesToVersionstamp(firstLogID)},
-		{secondLogID},
-	})
+	// 6. BatchGetAuditLog with 12-byte versionstamp primary keys
+	batchRes, err := auditRepo.BatchGet(ctx, tr, dir, [][]byte{firstLogID, secondLogID})
 	if err != nil || len(batchRes) != 2 {
 		t.Fatalf("BatchGetAuditLog expected 2 items, got %+v, err=%v", batchRes, err)
 	}
@@ -397,16 +394,16 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 	if err != nil || gotAfterSet.Actor != "alice_admin" || gotAfterSet.Views != 17 {
 		t.Fatalf("expected updated Actor='alice_admin' and preserved Views=17 after Set, got %+v, err=%v", gotAfterSet, err)
 	}
-	if oldIdx, _ := auditRepo.GetAuditLogByActor(ctx, tr, dir, "alice"); len(oldIdx) != 0 {
+	if oldIdx, _ := auditRepo.GetByActor(ctx, tr, dir, "alice", store.AuditLogPaginationOptions{}); len(oldIdx.Items) != 0 {
 		t.Fatalf("expected old Actor index 'alice' cleared after Set, got %+v", oldIdx)
 	}
-	if newIdx, _ := auditRepo.GetAuditLogByActor(ctx, tr, dir, "alice_admin"); len(newIdx) != 1 || !bytes.Equal(newIdx[0].LogId, firstLogID) {
+	if newIdx, _ := auditRepo.GetByActor(ctx, tr, dir, "alice_admin", store.AuditLogPaginationOptions{}); len(newIdx.Items) != 1 || !bytes.Equal(newIdx.Items[0].LogId, firstLogID) {
 		t.Fatalf("expected new Actor index 'alice_admin' after Set, got %+v", newIdx)
 	}
-	if oldTag, _ := auditRepo.GetAuditLogByTags(ctx, tr, dir, "login"); len(oldTag) != 0 {
+	if oldTag, _ := auditRepo.GetByTags(ctx, tr, dir, "login", store.AuditLogPaginationOptions{}); len(oldTag.Items) != 0 {
 		t.Fatalf("expected removed tag 'login' cleared after Set, got %+v", oldTag)
 	}
-	if newTag, _ := auditRepo.GetAuditLogByTags(ctx, tr, dir, "elevated"); len(newTag) != 1 || !bytes.Equal(newTag[0].LogId, firstLogID) {
+	if newTag, _ := auditRepo.GetByTags(ctx, tr, dir, "elevated", store.AuditLogPaginationOptions{}); len(newTag.Items) != 1 || !bytes.Equal(newTag.Items[0].LogId, firstLogID) {
 		t.Fatalf("expected added tag 'elevated' indexed after Set, got %+v", newTag)
 	}
 
@@ -424,17 +421,17 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Set new AuditLog (empty LogId) failed: %v", err)
 	}
-	byCharlie, err := auditRepo.GetAuditLogByActor(ctx, tr, dir, "charlie")
-	if err != nil || len(byCharlie) != 1 || len(byCharlie[0].LogId) != 12 || byCharlie[0].Views != 3 {
+	byCharlie, err := auditRepo.GetByActor(ctx, tr, dir, "charlie", store.AuditLogPaginationOptions{})
+	if err != nil || len(byCharlie.Items) != 1 || len(byCharlie.Items[0].LogId) != 12 || byCharlie.Items[0].Views != 3 {
 		t.Fatalf("expected Set with empty LogId to create indexed AuditLog, got %+v, err=%v", byCharlie, err)
 	}
 
 	// 9b. ListAuditLog pagination with Limit=1 and raw []byte Begin cursor
-	page1, err := auditRepo.ListAuditLog(ctx, tr, dir, store.AuditLogPaginationOptions{Limit: 1})
+	page1, err := auditRepo.List(ctx, tr, dir, store.AuditLogPaginationOptions{Limit: 1})
 	if err != nil || len(page1.Items) != 1 || !page1.HasMore {
 		t.Fatalf("expected page1 with 1 item and HasMore=true, got %+v, err=%v", page1, err)
 	}
-	page2, err := auditRepo.ListAuditLog(ctx, tr, dir, store.AuditLogPaginationOptions{
+	page2, err := auditRepo.List(ctx, tr, dir, store.AuditLogPaginationOptions{
 		Begin: tuple.Tuple{secondLogID},
 		Limit: 1,
 	})
@@ -449,13 +446,13 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 	if _, err := auditRepo.Get(ctx, tr, dir, firstLogID); err == nil {
 		t.Fatalf("expected Get after Delete to fail")
 	}
-	if idxAfterDel, _ := auditRepo.GetAuditLogByActor(ctx, tr, dir, "alice_admin"); len(idxAfterDel) != 0 {
+	if idxAfterDel, _ := auditRepo.GetByActor(ctx, tr, dir, "alice_admin", store.AuditLogPaginationOptions{}); len(idxAfterDel.Items) != 0 {
 		t.Fatalf("expected Actor index cleared after Delete, got %+v", idxAfterDel)
 	}
-	if tagAfterDel, _ := auditRepo.GetAuditLogByTags(ctx, tr, dir, "elevated"); len(tagAfterDel) != 0 {
+	if tagAfterDel, _ := auditRepo.GetByTags(ctx, tr, dir, "elevated", store.AuditLogPaginationOptions{}); len(tagAfterDel.Items) != 0 {
 		t.Fatalf("expected fan-out tag 'elevated' cleared after Delete, got %+v", tagAfterDel)
 	}
-	if sharedTagAfterDel, _ := auditRepo.GetAuditLogByTags(ctx, tr, dir, "auth"); len(sharedTagAfterDel) != 1 || sharedTagAfterDel[0].Actor != "bob" {
+	if sharedTagAfterDel, _ := auditRepo.GetByTags(ctx, tr, dir, "auth", store.AuditLogPaginationOptions{}); len(sharedTagAfterDel.Items) != 1 || sharedTagAfterDel.Items[0].Actor != "bob" {
 		t.Fatalf("expected only bob on 'auth' tag after Delete, got %+v", sharedTagAfterDel)
 	}
 	typeID := recordStore.Metadata()["AuditLog"]
@@ -558,7 +555,7 @@ func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 	})
 
 	// 1. ListOrder with Prefix={"acme"} and Reverse=true (PERF-1, PERF-3)
-	acmeRev, err := orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+	acmeRev, err := orderRepo.List(ctx, tr, dir, store.OrderPaginationOptions{
 		Prefix:  tuple.Tuple{"acme"},
 		Limit:   2,
 		Reverse: true,
@@ -570,7 +567,7 @@ func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 		t.Fatalf("expected OrderSeq [3, 2], got [%d, %d]", acmeRev.Items[0].OrderSeq, acmeRev.Items[1].OrderSeq)
 	}
 
-	acmeRev2, err := orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+	acmeRev2, err := orderRepo.List(ctx, tr, dir, store.OrderPaginationOptions{
 		Prefix:  tuple.Tuple{"acme"},
 		Begin:   acmeRev.NextKey,
 		Limit:   2,
@@ -580,22 +577,18 @@ func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 		t.Fatalf("unexpected ListOrder(Prefix:acme, Reverse:true) page 2: %+v, err=%v", acmeRev2, err)
 	}
 
-	// 2. BatchGetOrder with int32 tuple element (normalized instead of panicking) and BatchGetOrderByPK (BUG-5)
-	batchNorm, err := orderRepo.BatchGetOrder(ctx, tr, dir, []tuple.Tuple{{"acme", int32(2)}})
-	if err != nil || len(batchNorm) != 1 {
-		t.Fatalf("BatchGetOrder with int32 element failed: %+v, err=%v", batchNorm, err)
-	}
-	batchByPK, err := orderRepo.BatchGetOrderByPK(ctx, tr, dir, []store.OrderPrimaryKey{
+	// 2. BatchGetOrder with strongly-typed compound primary key (BUG-5)
+	batchByPK, err := orderRepo.BatchGet(ctx, tr, dir, []store.OrderPrimaryKey{
 		{TenantId: "acme", OrderSeq: 1},
 		{TenantId: "acme", OrderSeq: 3},
 	})
 	if err != nil || len(batchByPK) != 2 {
-		t.Fatalf("BatchGetOrderByPK failed: %+v, err=%v", batchByPK, err)
+		t.Fatalf("BatchGetOrder failed: %+v, err=%v", batchByPK, err)
 	}
 
 	// 3. Out-of-bounds Begin cursor with Prefix={"acme"} must be clamped to prefix range
 	// without leaking records from "other" or causing an inverted range.
-	clampedForwardBefore, err := orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+	clampedForwardBefore, err := orderRepo.List(ctx, tr, dir, store.OrderPaginationOptions{
 		Prefix: tuple.Tuple{"acme"},
 		Begin:  tuple.Tuple{"aaa", int64(1)},
 		Limit:  10,
@@ -603,7 +596,7 @@ func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 	if err != nil || len(clampedForwardBefore.Items) != 3 {
 		t.Fatalf("expected Begin<'acme' to be clamped to 'acme' start (3 items), got %+v, err=%v", clampedForwardBefore, err)
 	}
-	clampedForwardAfter, err := orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+	clampedForwardAfter, err := orderRepo.List(ctx, tr, dir, store.OrderPaginationOptions{
 		Prefix: tuple.Tuple{"acme"},
 		Begin:  tuple.Tuple{"zzz", int64(1)},
 		Limit:  10,
@@ -611,7 +604,7 @@ func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 	if err != nil || len(clampedForwardAfter.Items) != 0 {
 		t.Fatalf("expected Begin>'acme' to return 0 items without inverted range, got %+v, err=%v", clampedForwardAfter, err)
 	}
-	clampedReverseBefore, err := orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+	clampedReverseBefore, err := orderRepo.List(ctx, tr, dir, store.OrderPaginationOptions{
 		Prefix:  tuple.Tuple{"acme"},
 		Begin:   tuple.Tuple{"aaa", int64(1)},
 		Limit:   10,
@@ -620,7 +613,7 @@ func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 	if err != nil || len(clampedReverseBefore.Items) != 0 {
 		t.Fatalf("expected Reverse=true with Begin<'acme' to return 0 items, got %+v, err=%v", clampedReverseBefore, err)
 	}
-	clampedReverseAfter, err := orderRepo.ListOrder(ctx, tr, dir, store.OrderPaginationOptions{
+	clampedReverseAfter, err := orderRepo.List(ctx, tr, dir, store.OrderPaginationOptions{
 		Prefix:  tuple.Tuple{"acme"},
 		Begin:   tuple.Tuple{"zzz", int64(1)},
 		Limit:   10,
@@ -658,52 +651,53 @@ func TestOrder_CompositeIndexPrefixQueries(t *testing.T) {
 	}
 
 	// 1. GetOrderByStatus (partial prefix of (status, created_at)) returns all 3 PENDING orders ordered by CreatedAt
-	pending, err := orderRepo.GetOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING)
-	if err != nil || len(pending) != 3 {
-		t.Fatalf("GetOrderByStatus(PENDING) expected 3 orders, got %+v, err=%v", pending, err)
+	pendingRes, err := orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{})
+	if err != nil || len(pendingRes.Items) != 3 {
+		t.Fatalf("GetOrderByStatus(PENDING) expected 3 orders, got %+v, err=%v", pendingRes, err)
 	}
+	pending := pendingRes.Items
 	if pending[0].CreatedAt != 1000 || pending[1].CreatedAt != 2000 || pending[2].CreatedAt != 3000 {
 		t.Fatalf("unexpected CreatedAt order from GetOrderByStatus: [%d, %d, %d]", pending[0].CreatedAt, pending[1].CreatedAt, pending[2].CreatedAt)
 	}
 
-	// 2. QueryOrderByStatus forward pagination (Limit=2) across different CreatedAt values
-	fwd1, err := orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+	// 2. GetOrderByStatus forward pagination (Limit=2) across different CreatedAt values
+	fwd1, err := orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
 		Limit: 2,
 	})
 	if err != nil || len(fwd1.Items) != 2 || !fwd1.HasMore {
-		t.Fatalf("QueryOrderByStatus forward page 1 failed: %+v, err=%v", fwd1, err)
+		t.Fatalf("GetOrderByStatus forward page 1 failed: %+v, err=%v", fwd1, err)
 	}
 	if fwd1.Items[0].OrderSeq != 1 || fwd1.Items[1].OrderSeq != 2 {
 		t.Fatalf("expected OrderSeq [1, 2], got [%d, %d]", fwd1.Items[0].OrderSeq, fwd1.Items[1].OrderSeq)
 	}
 
-	fwd2, err := orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+	fwd2, err := orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
 		Begin: fwd1.NextKey,
 		Limit: 2,
 	})
 	if err != nil || len(fwd2.Items) != 1 || fwd2.HasMore || fwd2.Items[0].OrderSeq != 3 {
-		t.Fatalf("QueryOrderByStatus forward page 2 failed: %+v, err=%v", fwd2, err)
+		t.Fatalf("GetOrderByStatus forward page 2 failed: %+v, err=%v", fwd2, err)
 	}
 
-	// 3. QueryOrderByStatus reverse pagination (Limit=2, Reverse=true)
-	rev1, err := orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+	// 3. GetOrderByStatus reverse pagination (Limit=2, Reverse=true)
+	rev1, err := orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
 		Limit:   2,
 		Reverse: true,
 	})
 	if err != nil || len(rev1.Items) != 2 || !rev1.HasMore {
-		t.Fatalf("QueryOrderByStatus reverse page 1 failed: %+v, err=%v", rev1, err)
+		t.Fatalf("GetOrderByStatus reverse page 1 failed: %+v, err=%v", rev1, err)
 	}
 	if rev1.Items[0].OrderSeq != 3 || rev1.Items[1].OrderSeq != 2 {
 		t.Fatalf("expected reverse OrderSeq [3, 2], got [%d, %d]", rev1.Items[0].OrderSeq, rev1.Items[1].OrderSeq)
 	}
 
-	rev2, err := orderRepo.QueryOrderByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
+	rev2, err := orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, store.OrderPaginationOptions{
 		Begin:   rev1.NextKey,
 		Limit:   2,
 		Reverse: true,
 	})
 	if err != nil || len(rev2.Items) != 1 || rev2.HasMore || rev2.Items[0].OrderSeq != 1 {
-		t.Fatalf("QueryOrderByStatus reverse page 2 failed: %+v, err=%v", rev2, err)
+		t.Fatalf("GetOrderByStatus reverse page 2 failed: %+v, err=%v", rev2, err)
 	}
 }
 
@@ -809,10 +803,10 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 	if got := countOrderIndexKeys(); got != 6 {
 		t.Fatalf("expected 6 index keys after Create, got %d", got)
 	}
-	if res, err := orderRepo.GetOrderByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashA); err != nil || len(res) != 1 {
+	if res, err := orderRepo.GetByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashA, store.OrderPaginationOptions{}); err != nil || len(res.Items) != 1 {
 		t.Fatalf("expected 1 order for (PENDING, hashA), got %+v, err=%v", res, err)
 	}
-	if res, err := orderRepo.GetOrderByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashB); err != nil || len(res) != 1 {
+	if res, err := orderRepo.GetByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashB, store.OrderPaginationOptions{}); err != nil || len(res.Items) != 1 {
 		t.Fatalf("expected 1 order for (PENDING, hashB), got %+v, err=%v", res, err)
 	}
 
@@ -831,10 +825,10 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 	if got := countOrderIndexKeys(); got != 6 {
 		t.Fatalf("expected 6 index keys after Set (same status), got %d", got)
 	}
-	if res, _ := orderRepo.GetOrderByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashA); len(res) != 0 {
+	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashA, store.OrderPaginationOptions{}); len(res.Items) != 0 {
 		t.Fatalf("expected (PENDING, hashA) cleared after Set, got %+v", res)
 	}
-	if res, _ := orderRepo.GetOrderByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashC); len(res) != 1 {
+	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashC, store.OrderPaginationOptions{}); len(res.Items) != 1 {
 		t.Fatalf("expected (PENDING, hashC) added after Set, got %+v", res)
 	}
 
@@ -854,13 +848,13 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 	if got := countOrderIndexKeys(); got != 6 {
 		t.Fatalf("expected 6 index keys after Set (changed status), got %d", got)
 	}
-	if res, _ := orderRepo.GetOrderByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashC); len(res) != 0 {
+	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashC, store.OrderPaginationOptions{}); len(res.Items) != 0 {
 		t.Fatalf("stale composite fan-out key (PENDING, hashC) was not cleared when status changed: %+v", res)
 	}
-	if res, _ := orderRepo.GetOrderByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, hashC); len(res) != 1 {
+	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, hashC, store.OrderPaginationOptions{}); len(res.Items) != 1 {
 		t.Fatalf("missing composite fan-out key (SHIPPED, hashC) after status change: %+v", res)
 	}
-	if res, _ := orderRepo.GetOrderByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, hashD); len(res) != 1 {
+	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, hashD, store.OrderPaginationOptions{}); len(res.Items) != 1 {
 		t.Fatalf("missing composite fan-out key (SHIPPED, hashD) after status change: %+v", res)
 	}
 

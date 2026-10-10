@@ -110,14 +110,14 @@ func TestAtomicMutations(t *testing.T) {
 	}
 
 	// 5. Verify BatchGetCounter populates atomic fields
-	batchRes, err := counterRepo.BatchGetCounter(ctx, tr, dir, []tuple.Tuple{{"c1"}})
+	batchRes, err := counterRepo.BatchGet(ctx, tr, dir, []string{"c1"})
 	if err != nil {
 		t.Fatalf("BatchGetCounter failed: %v", err)
 	}
-	batchItem, ok := batchRes[`("c1")`]
-	if !ok || batchItem == nil {
+	if len(batchRes) != 1 || batchRes[0] == nil {
 		t.Fatalf("expected c1 in BatchGetCounter result, got: %+v", batchRes)
 	}
+	batchItem := batchRes[0]
 	if batchItem.Value != 15 || batchItem.MaxValue != 150 || batchItem.MinValue != 2 {
 		t.Fatalf("BatchGetCounter did not populate atomic fields: got %+v", batchItem)
 	}
@@ -288,16 +288,16 @@ func TestReadZerosAtomicFieldsBeforeFieldNamespace(t *testing.T) {
 	}
 
 	// BatchGetCounter must also return 0 for all atomic fields.
-	batchGot, err := counterRepo.BatchGetCounter(ctx, tr, dir, []tuple.Tuple{{"legacy"}})
+	batchGot, err := counterRepo.BatchGet(ctx, tr, dir, []string{"legacy"})
 	if err != nil {
 		t.Fatalf("BatchGetCounter failed: %v", err)
 	}
-	if b := batchGot[`("legacy")`]; b == nil || b.Value != 0 || b.MaxValue != 0 || b.MinValue != 0 {
-		t.Fatalf("BatchGetCounter did not zero atomic fields from DataNamespace blob: got %+v", b)
+	if len(batchGot) != 1 || batchGot[0] == nil || batchGot[0].Value != 0 || batchGot[0].MaxValue != 0 || batchGot[0].MinValue != 0 {
+		t.Fatalf("BatchGetCounter did not zero atomic fields from DataNamespace blob: got %+v", batchGot)
 	}
 
 	// ListCounter must also return 0 for all atomic fields.
-	listGot, err := counterRepo.ListCounter(ctx, tr, dir, atomic.CounterPaginationOptions{})
+	listGot, err := counterRepo.List(ctx, tr, dir, atomic.CounterPaginationOptions{})
 	if err != nil {
 		t.Fatalf("ListCounter failed: %v", err)
 	}
@@ -503,14 +503,14 @@ func TestZeroInitializedMaxAndSetAtomicFields(t *testing.T) {
 		t.Fatalf("unexpected state after SetCounter* reset: %+v", gotReset)
 	}
 
-	// 5. BatchGetCounterByPK strongly-typed batch lookup and ListCounter with Reverse: true (BUG-5, PERF-3).
+	// 5. BatchGetCounter strongly-typed batch lookup and ListCounter with Reverse: true (BUG-5, PERF-3).
 	_ = counterRepo.SetCounterValue(ctx, tr, dir, "c_max_zero", 11)
-	byPK, err := counterRepo.BatchGetCounterByPK(ctx, tr, dir, []string{"c_max_zero", "c_set_upsert"})
+	byPK, err := counterRepo.BatchGet(ctx, tr, dir, []string{"c_max_zero", "c_set_upsert"})
 	if err != nil || len(byPK) != 2 {
-		t.Fatalf("BatchGetCounterByPK failed: got %+v, err=%v", byPK, err)
+		t.Fatalf("BatchGetCounter failed: got %+v, err=%v", byPK, err)
 	}
 
-	revList, err := counterRepo.ListCounter(ctx, tr, dir, atomic.CounterPaginationOptions{
+	revList, err := counterRepo.List(ctx, tr, dir, atomic.CounterPaginationOptions{
 		Limit:   10,
 		Reverse: true,
 	})
