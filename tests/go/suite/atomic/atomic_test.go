@@ -48,7 +48,7 @@ func TestAtomicMutations(t *testing.T) {
 	}
 
 	// 2. Test Add
-	err = counterRepo.AddCounterValue(ctx, tr, dir, "c1", 5)
+	err = counterRepo.AddValue(ctx, tr, dir, "c1", 5)
 	if err != nil {
 		t.Fatalf("failed to add value: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestAtomicMutations(t *testing.T) {
 	}
 
 	// 3. Test Max
-	err = counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c1", 50) // should not change
+	err = counterRepo.MaxMaxValue(ctx, tr, dir, "c1", 50) // should not change
 	if err != nil {
 		t.Fatalf("failed to max value: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestAtomicMutations(t *testing.T) {
 		t.Fatalf("expected max_value 100, got %d", retrieved.MaxValue)
 	}
 
-	err = counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c1", 150) // should change
+	err = counterRepo.MaxMaxValue(ctx, tr, dir, "c1", 150) // should change
 	if err != nil {
 		t.Fatalf("failed to max value: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestAtomicMutations(t *testing.T) {
 	}
 
 	// 4. Test Min
-	err = counterRepo.MinCounterMinValue(ctx, tr, dir, "c1", 10) // should not change
+	err = counterRepo.MinMinValue(ctx, tr, dir, "c1", 10) // should not change
 	if err != nil {
 		t.Fatalf("failed to min value: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestAtomicMutations(t *testing.T) {
 		t.Fatalf("expected min_value 5, got %d", retrieved.MinValue)
 	}
 
-	err = counterRepo.MinCounterMinValue(ctx, tr, dir, "c1", 2) // should change
+	err = counterRepo.MinMinValue(ctx, tr, dir, "c1", 2) // should change
 	if err != nil {
 		t.Fatalf("failed to min value: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestAtomicMutations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create zero-initialized counter: %v", err)
 	}
-	err = counterRepo.MinCounterMinValue(ctx, tr, dir, "c_zero", 42)
+	err = counterRepo.MinMinValue(ctx, tr, dir, "c_zero", 42)
 	if err != nil {
 		t.Fatalf("failed to apply Min on zero-initialized counter: %v", err)
 	}
@@ -171,37 +171,37 @@ func TestAtomicMutations(t *testing.T) {
 	}
 
 	// Max: -200 < -100 (should stay -100), -50 > -100 (should become -50)
-	_ = counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_neg", -200)
+	_ = counterRepo.MaxMaxValue(ctx, tr, dir, "c_neg", -200)
 	retrievedNeg, _ = counterRepo.Get(ctx, tr, dir, "c_neg")
 	if retrievedNeg.MaxValue != -100 {
 		t.Fatalf("expected max_value -100 after -200, got %d", retrievedNeg.MaxValue)
 	}
-	_ = counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_neg", -50)
+	_ = counterRepo.MaxMaxValue(ctx, tr, dir, "c_neg", -50)
 	retrievedNeg, _ = counterRepo.Get(ctx, tr, dir, "c_neg")
 	if retrievedNeg.MaxValue != -50 {
 		t.Fatalf("expected max_value -50 after -50, got %d", retrievedNeg.MaxValue)
 	}
 
 	// Min: -2 > -5 (should stay -5), -20 < -5 (should become -20)
-	_ = counterRepo.MinCounterMinValue(ctx, tr, dir, "c_neg", -2)
+	_ = counterRepo.MinMinValue(ctx, tr, dir, "c_neg", -2)
 	retrievedNeg, _ = counterRepo.Get(ctx, tr, dir, "c_neg")
 	if retrievedNeg.MinValue != -5 {
 		t.Fatalf("expected min_value -5 after -2, got %d", retrievedNeg.MinValue)
 	}
-	_ = counterRepo.MinCounterMinValue(ctx, tr, dir, "c_neg", -20)
+	_ = counterRepo.MinMinValue(ctx, tr, dir, "c_neg", -20)
 	retrievedNeg, _ = counterRepo.Get(ctx, tr, dir, "c_neg")
 	if retrievedNeg.MinValue != -20 {
 		t.Fatalf("expected min_value -20 after -20, got %d", retrievedNeg.MinValue)
 	}
 
 	// Negative Max on positive counter c1 (currently MaxValue=150) must NOT overwrite 150
-	_ = counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c1", -1)
+	_ = counterRepo.MaxMaxValue(ctx, tr, dir, "c1", -1)
 	retrievedC1, _ := counterRepo.Get(ctx, tr, dir, "c1")
 	if retrievedC1.MaxValue != 150 {
 		t.Fatalf("expected c1 max_value to stay 150 after Max(-1), got %d", retrievedC1.MaxValue)
 	}
 	// Negative Min on positive counter c1 (currently MinValue=2) MUST update to -10
-	_ = counterRepo.MinCounterMinValue(ctx, tr, dir, "c1", -10)
+	_ = counterRepo.MinMinValue(ctx, tr, dir, "c1", -10)
 	retrievedC1, _ = counterRepo.Get(ctx, tr, dir, "c1")
 	if retrievedC1.MinValue != -10 {
 		t.Fatalf("expected c1 min_value to become -10 after Min(-10), got %d", retrievedC1.MinValue)
@@ -297,7 +297,7 @@ func TestReadZerosAtomicFieldsBeforeFieldNamespace(t *testing.T) {
 	}
 
 	// ListCounter must also return 0 for all atomic fields.
-	listGot, err := counterRepo.List(ctx, tr, dir, atomic.CounterPaginationOptions{})
+	listGot, err := counterRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{})
 	if err != nil {
 		t.Fatalf("ListCounter failed: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestDeleteCounter_ClearsFieldNamespace(t *testing.T) {
 	if err := counterRepo.Create(ctx, tr, dir, c); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	if err := counterRepo.AddCounterValue(ctx, tr, dir, "c_del", 50); err != nil {
+	if err := counterRepo.AddValue(ctx, tr, dir, "c_del", 50); err != nil {
 		t.Fatalf("AddCounterValue failed: %v", err)
 	}
 
@@ -373,14 +373,14 @@ func TestAtomicMutations_UnsignedAnd32Bit(t *testing.T) {
 
 	// 1. uint64 Max including values > math.MaxInt64 (high bit set)
 	const highU64 uint64 = 1<<63 + 12345
-	if err := counterRepo.MaxCounterU64Max(ctx, tr, dir, "c_types", 500); err != nil {
+	if err := counterRepo.MaxU64Max(ctx, tr, dir, "c_types", 500); err != nil {
 		t.Fatalf("MaxCounterU64Max(500) failed: %v", err)
 	}
 	got, _ := counterRepo.Get(ctx, tr, dir, "c_types")
 	if got.U64Max != 1000 {
 		t.Fatalf("expected U64Max 1000, got %d", got.U64Max)
 	}
-	if err := counterRepo.MaxCounterU64Max(ctx, tr, dir, "c_types", highU64); err != nil {
+	if err := counterRepo.MaxU64Max(ctx, tr, dir, "c_types", highU64); err != nil {
 		t.Fatalf("MaxCounterU64Max(highU64) failed: %v", err)
 	}
 	got, _ = counterRepo.Get(ctx, tr, dir, "c_types")
@@ -389,14 +389,14 @@ func TestAtomicMutations_UnsignedAnd32Bit(t *testing.T) {
 	}
 
 	// 2. int32 Min with negative values
-	if err := counterRepo.MinCounterI32Min(ctx, tr, dir, "c_types", -10); err != nil {
+	if err := counterRepo.MinI32Min(ctx, tr, dir, "c_types", -10); err != nil {
 		t.Fatalf("MinCounterI32Min(-10) failed: %v", err)
 	}
 	got, _ = counterRepo.Get(ctx, tr, dir, "c_types")
 	if got.I32Min != -50 {
 		t.Fatalf("expected I32Min -50, got %d", got.I32Min)
 	}
-	if err := counterRepo.MinCounterI32Min(ctx, tr, dir, "c_types", -200); err != nil {
+	if err := counterRepo.MinI32Min(ctx, tr, dir, "c_types", -200); err != nil {
 		t.Fatalf("MinCounterI32Min(-200) failed: %v", err)
 	}
 	got, _ = counterRepo.Get(ctx, tr, dir, "c_types")
@@ -405,7 +405,7 @@ func TestAtomicMutations_UnsignedAnd32Bit(t *testing.T) {
 	}
 
 	// 3. uint32 Add
-	if err := counterRepo.AddCounterU32Add(ctx, tr, dir, "c_types", 25); err != nil {
+	if err := counterRepo.AddU32Add(ctx, tr, dir, "c_types", 25); err != nil {
 		t.Fatalf("AddCounterU32Add(25) failed: %v", err)
 	}
 	got, _ = counterRepo.Get(ctx, tr, dir, "c_types")
@@ -429,7 +429,7 @@ func TestZeroInitializedMaxAndSetAtomicFields(t *testing.T) {
 	if err := counterRepo.Create(ctx, tr, dir, &atomic.Counter{Id: "c_max_zero"}); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	if err := counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_max_zero", -100); err != nil {
+	if err := counterRepo.MaxMaxValue(ctx, tr, dir, "c_max_zero", -100); err != nil {
 		t.Fatalf("MaxCounterMaxValue(-100) failed: %v", err)
 	}
 	gotZero, err := counterRepo.Get(ctx, tr, dir, "c_max_zero")
@@ -450,7 +450,7 @@ func TestZeroInitializedMaxAndSetAtomicFields(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Set failed: %v", err)
 	}
-	if err := counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_set_upsert", -100); err != nil {
+	if err := counterRepo.MaxMaxValue(ctx, tr, dir, "c_set_upsert", -100); err != nil {
 		t.Fatalf("MaxCounterMaxValue(-100) after Set upsert failed: %v", err)
 	}
 	gotUpsert, err := counterRepo.Get(ctx, tr, dir, "c_set_upsert")
@@ -467,7 +467,7 @@ func TestZeroInitializedMaxAndSetAtomicFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
-	if err := counterRepo.AddCounterValue(ctx, tr, dir, "c_set_upsert", 58); err != nil {
+	if err := counterRepo.AddValue(ctx, tr, dir, "c_set_upsert", 58); err != nil {
 		t.Fatalf("AddCounterValue failed: %v", err)
 	}
 	// staleCopy.Value is still 42 (non-zero!), while FieldNamespace is now 100.
@@ -483,18 +483,18 @@ func TestZeroInitializedMaxAndSetAtomicFields(t *testing.T) {
 	}
 
 	// 4. Explicit SetCounter* methods can set and reset atomic fields to 0 (BUG-1).
-	if err := counterRepo.SetCounterValue(ctx, tr, dir, "c_set_upsert", 0); err != nil {
+	if err := counterRepo.SetValue(ctx, tr, dir, "c_set_upsert", 0); err != nil {
 		t.Fatalf("SetCounterValue(0) failed: %v", err)
 	}
-	if err := counterRepo.SetCounterMaxValue(ctx, tr, dir, "c_set_upsert", 0); err != nil {
+	if err := counterRepo.SetMaxValue(ctx, tr, dir, "c_set_upsert", 0); err != nil {
 		t.Fatalf("SetCounterMaxValue(0) failed: %v", err)
 	}
-	if err := counterRepo.SetCounterMinValue(ctx, tr, dir, "c_set_upsert", 0); err != nil {
+	if err := counterRepo.SetMinValue(ctx, tr, dir, "c_set_upsert", 0); err != nil {
 		t.Fatalf("SetCounterMinValue(0) failed: %v", err)
 	}
 	// After resetting MaxValue=0 and MinValue=0, Max(-50) must stay 0 and Min(25) must become 25.
-	_ = counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_set_upsert", -50)
-	_ = counterRepo.MinCounterMinValue(ctx, tr, dir, "c_set_upsert", 25)
+	_ = counterRepo.MaxMaxValue(ctx, tr, dir, "c_set_upsert", -50)
+	_ = counterRepo.MinMinValue(ctx, tr, dir, "c_set_upsert", 25)
 	gotReset, err := counterRepo.Get(ctx, tr, dir, "c_set_upsert")
 	if err != nil {
 		t.Fatalf("Get after SetCounter* reset failed: %v", err)
@@ -504,13 +504,13 @@ func TestZeroInitializedMaxAndSetAtomicFields(t *testing.T) {
 	}
 
 	// 5. BatchGetCounter strongly-typed batch lookup and ListCounter with Reverse: true (BUG-5, PERF-3).
-	_ = counterRepo.SetCounterValue(ctx, tr, dir, "c_max_zero", 11)
+	_ = counterRepo.SetValue(ctx, tr, dir, "c_max_zero", 11)
 	byPK, err := counterRepo.BatchGet(ctx, tr, dir, []string{"c_max_zero", "c_set_upsert"})
 	if err != nil || len(byPK) != 2 {
 		t.Fatalf("BatchGetCounter failed: got %+v, err=%v", byPK, err)
 	}
 
-	revList, err := counterRepo.List(ctx, tr, dir, atomic.CounterPaginationOptions{
+	revList, err := counterRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{
 		Limit:   10,
 		Reverse: true,
 	})

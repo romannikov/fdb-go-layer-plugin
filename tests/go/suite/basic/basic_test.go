@@ -457,7 +457,7 @@ func TestGetUserByEmail_NoResults(t *testing.T) {
 
 	repo := store.NewUserRepository(recordStore)
 	// GetRange returns empty → no results
-	results, err := repo.GetByEmail(ctx, tr, dir, "nobody@test.com", store.UserPaginationOptions{})
+	results, err := repo.GetByEmail(ctx, tr, dir, "nobody@test.com", fdblayer.PaginationOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestGetProductByCategory_NoResults(t *testing.T) {
 	recordStore, tr, dir, _ := tests.SyncAndSetup()
 
 	repo := store.NewProductRepository(recordStore)
-	results, err := repo.GetByCategory(ctx, tr, dir, "nonexistent", store.ProductPaginationOptions{})
+	results, err := repo.GetByCategory(ctx, tr, dir, "nonexistent", fdblayer.PaginationOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -768,11 +768,11 @@ func TestGetProductByCategory_PaginatedAndReverse(t *testing.T) {
 	}
 
 	// Forward pagination (2 items per page)
-	p1, err := repo.GetByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{Limit: 2})
+	p1, err := repo.GetByCategory(ctx, tr, dir, "tools", fdblayer.PaginationOptions{Limit: 2})
 	if err != nil || len(p1.Items) != 2 || !p1.HasMore || p1.Items[0].Id != "p1" || p1.Items[1].Id != "p2" {
 		t.Fatalf("unexpected forward page 1: %+v, err=%v", p1, err)
 	}
-	p2, err := repo.GetByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+	p2, err := repo.GetByCategory(ctx, tr, dir, "tools", fdblayer.PaginationOptions{
 		Begin: p1.NextKey,
 		Limit: 2,
 	})
@@ -781,14 +781,14 @@ func TestGetProductByCategory_PaginatedAndReverse(t *testing.T) {
 	}
 
 	// Reverse pagination (2 items per page: p4, p3 -> p2, p1)
-	rev1, err := repo.GetByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+	rev1, err := repo.GetByCategory(ctx, tr, dir, "tools", fdblayer.PaginationOptions{
 		Limit:   2,
 		Reverse: true,
 	})
 	if err != nil || len(rev1.Items) != 2 || !rev1.HasMore || rev1.Items[0].Id != "p4" || rev1.Items[1].Id != "p3" {
 		t.Fatalf("unexpected reverse page 1: %+v, err=%v", rev1, err)
 	}
-	rev2, err := repo.GetByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+	rev2, err := repo.GetByCategory(ctx, tr, dir, "tools", fdblayer.PaginationOptions{
 		Begin:   rev1.NextKey,
 		Limit:   2,
 		Reverse: true,
@@ -804,14 +804,14 @@ func TestGetProductByCategory_PaginatedAndReverse(t *testing.T) {
 	}
 
 	// Out-of-bounds cursors in GetProductByCategory must be clamped without inverted range panic
-	oobForwardAfter, err := repo.GetByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+	oobForwardAfter, err := repo.GetByCategory(ctx, tr, dir, "tools", fdblayer.PaginationOptions{
 		Begin: tuple.Tuple{"zzzzz\xff"},
 		Limit: 2,
 	})
 	if err != nil || len(oobForwardAfter.Items) != 0 {
 		t.Fatalf("expected 0 items for forward Begin past end of index range, got %+v, err=%v", oobForwardAfter, err)
 	}
-	oobReverseBefore, err := repo.GetByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{
+	oobReverseBefore, err := repo.GetByCategory(ctx, tr, dir, "tools", fdblayer.PaginationOptions{
 		Begin:   tuple.Tuple{""},
 		Limit:   2,
 		Reverse: true,

@@ -15,21 +15,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// OrderPaginationOptions represents options for paginated queries
-type OrderPaginationOptions struct {
-	Begin   tuple.Tuple
-	Prefix  tuple.Tuple
-	Limit   int
-	Reverse bool
-}
-
-// OrderPaginatedResult represents a paginated result set
-type OrderPaginatedResult struct {
-	Items   []*Order
-	NextKey tuple.Tuple
-	HasMore bool
-}
-
 // OrderPrimaryKey represents the compound primary key for Order.
 type OrderPrimaryKey struct {
 	TenantId string
@@ -40,13 +25,11 @@ type OrderPrimaryKey struct {
 type OrderRepository interface {
 	fdblayer.GenericRepository[*Order, OrderPrimaryKey]
 
-	BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []OrderPrimaryKey) ([]*Order, error)
-	List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts OrderPaginationOptions) (*OrderPaginatedResult, error)
-	GetByStatusAndCreatedAt(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, CreatedAt int64, opts OrderPaginationOptions) (*OrderPaginatedResult, error)
-	GetByStatus(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, opts OrderPaginationOptions) (*OrderPaginatedResult, error)
-	GetByReceiptHash(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ReceiptHash []byte, opts OrderPaginationOptions) (*OrderPaginatedResult, error)
-	GetByAttachmentHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, AttachmentHashes []byte, opts OrderPaginationOptions) (*OrderPaginatedResult, error)
-	GetByStatusAndAttachmentHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, AttachmentHashes []byte, opts OrderPaginationOptions) (*OrderPaginatedResult, error)
+	GetByStatusAndCreatedAt(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, CreatedAt int64, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)
+	GetByStatus(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)
+	GetByReceiptHash(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ReceiptHash []byte, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)
+	GetByAttachmentHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, AttachmentHashes []byte, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)
+	GetByStatusAndAttachmentHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, AttachmentHashes []byte, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)
 }
 
 type orderRepository struct {
@@ -404,7 +387,7 @@ func (r *orderRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction, 
 }
 
 // List retrieves a list of Order entities starting from the given key.
-func (r *orderRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts OrderPaginationOptions) (*OrderPaginatedResult, error) {
+func (r *orderRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -413,7 +396,7 @@ func (r *orderRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir 
 		return nil, err
 	}
 
-	result := &OrderPaginatedResult{
+	result := &fdblayer.PaginatedResult[*Order]{
 		Items: make([]*Order, 0),
 	}
 
@@ -496,7 +479,7 @@ func (r *orderRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir 
 }
 
 // GetByStatusAndCreatedAt retrieves a paginated page of Order entities by their StatusAndCreatedAt index.
-func (r *orderRepository) GetByStatusAndCreatedAt(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, CreatedAt int64, opts OrderPaginationOptions) (*OrderPaginatedResult, error) {
+func (r *orderRepository) GetByStatusAndCreatedAt(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, CreatedAt int64, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -505,7 +488,7 @@ func (r *orderRepository) GetByStatusAndCreatedAt(ctx context.Context, tr fdb.Re
 		return nil, err
 	}
 
-	result := &OrderPaginatedResult{
+	result := &fdblayer.PaginatedResult[*Order]{
 		Items: make([]*Order, 0),
 	}
 	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, 1001, int64(Status), int64(CreatedAt)}
@@ -596,7 +579,7 @@ func (r *orderRepository) GetByStatusAndCreatedAt(ctx context.Context, tr fdb.Re
 }
 
 // GetByStatus retrieves a paginated page of Order entities by their Status index.
-func (r *orderRepository) GetByStatus(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, opts OrderPaginationOptions) (*OrderPaginatedResult, error) {
+func (r *orderRepository) GetByStatus(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -605,7 +588,7 @@ func (r *orderRepository) GetByStatus(ctx context.Context, tr fdb.ReadTransactio
 		return nil, err
 	}
 
-	result := &OrderPaginatedResult{
+	result := &fdblayer.PaginatedResult[*Order]{
 		Items: make([]*Order, 0),
 	}
 	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, 1001, int64(Status)}
@@ -697,7 +680,7 @@ func (r *orderRepository) GetByStatus(ctx context.Context, tr fdb.ReadTransactio
 }
 
 // GetByReceiptHash retrieves a paginated page of Order entities by their ReceiptHash index.
-func (r *orderRepository) GetByReceiptHash(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ReceiptHash []byte, opts OrderPaginationOptions) (*OrderPaginatedResult, error) {
+func (r *orderRepository) GetByReceiptHash(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ReceiptHash []byte, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -706,7 +689,7 @@ func (r *orderRepository) GetByReceiptHash(ctx context.Context, tr fdb.ReadTrans
 		return nil, err
 	}
 
-	result := &OrderPaginatedResult{
+	result := &fdblayer.PaginatedResult[*Order]{
 		Items: make([]*Order, 0),
 	}
 	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, 4117767939, ReceiptHash}
@@ -797,7 +780,7 @@ func (r *orderRepository) GetByReceiptHash(ctx context.Context, tr fdb.ReadTrans
 }
 
 // GetByAttachmentHashes retrieves a paginated page of Order entities by their AttachmentHashes index.
-func (r *orderRepository) GetByAttachmentHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, AttachmentHashes []byte, opts OrderPaginationOptions) (*OrderPaginatedResult, error) {
+func (r *orderRepository) GetByAttachmentHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, AttachmentHashes []byte, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -806,7 +789,7 @@ func (r *orderRepository) GetByAttachmentHashes(ctx context.Context, tr fdb.Read
 		return nil, err
 	}
 
-	result := &OrderPaginatedResult{
+	result := &fdblayer.PaginatedResult[*Order]{
 		Items: make([]*Order, 0),
 	}
 	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, 1605301564, AttachmentHashes}
@@ -897,7 +880,7 @@ func (r *orderRepository) GetByAttachmentHashes(ctx context.Context, tr fdb.Read
 }
 
 // GetByStatusAndAttachmentHashes retrieves a paginated page of Order entities by their StatusAndAttachmentHashes index.
-func (r *orderRepository) GetByStatusAndAttachmentHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, AttachmentHashes []byte, opts OrderPaginationOptions) (*OrderPaginatedResult, error) {
+func (r *orderRepository) GetByStatusAndAttachmentHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, AttachmentHashes []byte, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -906,7 +889,7 @@ func (r *orderRepository) GetByStatusAndAttachmentHashes(ctx context.Context, tr
 		return nil, err
 	}
 
-	result := &OrderPaginatedResult{
+	result := &fdblayer.PaginatedResult[*Order]{
 		Items: make([]*Order, 0),
 	}
 	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, 2040727576, int64(Status), AttachmentHashes}

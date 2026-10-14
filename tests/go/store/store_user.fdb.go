@@ -14,28 +14,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// UserPaginationOptions represents options for paginated queries
-type UserPaginationOptions struct {
-	Begin   tuple.Tuple
-	Prefix  tuple.Tuple
-	Limit   int
-	Reverse bool
-}
-
-// UserPaginatedResult represents a paginated result set
-type UserPaginatedResult struct {
-	Items   []*User
-	NextKey tuple.Tuple
-	HasMore bool
-}
-
 // UserRepository defines the repository interface for User.
 type UserRepository interface {
 	fdblayer.GenericRepository[*User, string]
 
-	BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*User, error)
-	List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error)
-	GetByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string, opts UserPaginationOptions) (*UserPaginatedResult, error)
+	GetByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*User], error)
 }
 
 type userRepository struct {
@@ -206,7 +189,7 @@ func (r *userRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction, d
 }
 
 // List retrieves a list of User entities starting from the given key.
-func (r *userRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts UserPaginationOptions) (*UserPaginatedResult, error) {
+func (r *userRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*User], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -215,7 +198,7 @@ func (r *userRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir d
 		return nil, err
 	}
 
-	result := &UserPaginatedResult{
+	result := &fdblayer.PaginatedResult[*User]{
 		Items: make([]*User, 0),
 	}
 
@@ -298,7 +281,7 @@ func (r *userRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir d
 }
 
 // GetByEmail retrieves a paginated page of User entities by their Email index.
-func (r *userRepository) GetByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string, opts UserPaginationOptions) (*UserPaginatedResult, error) {
+func (r *userRepository) GetByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*User], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -307,7 +290,7 @@ func (r *userRepository) GetByEmail(ctx context.Context, tr fdb.ReadTransaction,
 		return nil, err
 	}
 
-	result := &UserPaginatedResult{
+	result := &fdblayer.PaginatedResult[*User]{
 		Items: make([]*User, 0),
 	}
 	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, Email}

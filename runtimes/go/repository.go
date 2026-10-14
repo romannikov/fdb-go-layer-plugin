@@ -40,12 +40,29 @@ type Transaction interface {
 	SetVersionstampedKey(key fdb.KeyConvertible, value []byte)
 }
 
+// PaginationOptions represents options for paginated queries.
+type PaginationOptions struct {
+	Begin   tuple.Tuple
+	Prefix  tuple.Tuple
+	Limit   int
+	Reverse bool
+}
+
+// PaginatedResult represents a paginated result set for entity T.
+type PaginatedResult[T any] struct {
+	Items   []T
+	NextKey tuple.Tuple
+	HasMore bool
+}
+
 // GenericRepository is a generic data access interface for entity T with primary key PK.
 type GenericRepository[T any, PK any] interface {
 	Create(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity T) error
 	Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk PK) (T, error)
 	Set(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity T) error
 	Delete(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, pk PK) error
+	BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []PK) ([]T, error)
+	List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PaginationOptions) (*PaginatedResult[T], error)
 }
 
 type rangeSliceReader interface {

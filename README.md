@@ -19,7 +19,7 @@ The compiler is structured around a **language-neutral Intermediate Representati
   - Single-field and composite secondary indexes with automatic maintenance on `Create`, `Set`, and `Delete`.
   - Automatic generation of **partial-prefix query methods** (`GetBy<Prefix>`) for leading prefixes of composite secondary indexes.
   - **Fan-out** indexes on `repeated` fields with deduplication and minimal-write delta updates on `Set`.
-- **Atomic Operations**: Support for FoundationDB atomic mutations (`MUTATION_ADD`, `MUTATION_MAX`, `MUTATION_MIN`) stored in an isolated `FieldNamespace` (`2`) so `Set` never overwrites concurrent atomic updates, plus `Set<Entity><Field>` for explicit resets.
+- **Atomic Operations**: Support for FoundationDB atomic mutations (`MUTATION_ADD`, `MUTATION_MAX`, `MUTATION_MIN`) stored in an isolated `FieldNamespace` (`2`) so `Set` never overwrites concurrent atomic updates, plus `Set<Field>` for explicit resets.
 - **Versionstamps & FIFO Queues**: Built-in support for `[(annotations.is_versionstamp) = true]` primary keys and `option (annotations.is_queue) = true` FIFO queues (`Enqueue`, `Dequeue`, `DequeueBatch`) with automatic per-transaction user version monotonicity.
 
 ---

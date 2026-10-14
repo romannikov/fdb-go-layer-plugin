@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
 	tests "github.com/romannikov/fdb-layer/tests/go"
 	"github.com/romannikov/fdb-layer/tests/go/store"
 )
@@ -47,7 +48,7 @@ func TestContextCancellation(t *testing.T) {
 	}
 
 	// Test List
-	_, err = userRepo.List(ctx, tr, dir, store.UserPaginationOptions{Limit: 10})
+	_, err = userRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 10})
 	if err == nil {
 		t.Fatal("expected error on ListUser with cancelled context")
 	}

@@ -14,28 +14,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// ProductPaginationOptions represents options for paginated queries
-type ProductPaginationOptions struct {
-	Begin   tuple.Tuple
-	Prefix  tuple.Tuple
-	Limit   int
-	Reverse bool
-}
-
-// ProductPaginatedResult represents a paginated result set
-type ProductPaginatedResult struct {
-	Items   []*Product
-	NextKey tuple.Tuple
-	HasMore bool
-}
-
 // ProductRepository defines the repository interface for Product.
 type ProductRepository interface {
 	fdblayer.GenericRepository[*Product, string]
 
-	BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Product, error)
-	List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts ProductPaginationOptions) (*ProductPaginatedResult, error)
-	GetByCategory(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Category string, opts ProductPaginationOptions) (*ProductPaginatedResult, error)
+	GetByCategory(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Category string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Product], error)
 }
 
 type productRepository struct {
@@ -206,7 +189,7 @@ func (r *productRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction
 }
 
 // List retrieves a list of Product entities starting from the given key.
-func (r *productRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts ProductPaginationOptions) (*ProductPaginatedResult, error) {
+func (r *productRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Product], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -215,7 +198,7 @@ func (r *productRepository) List(ctx context.Context, tr fdb.ReadTransaction, di
 		return nil, err
 	}
 
-	result := &ProductPaginatedResult{
+	result := &fdblayer.PaginatedResult[*Product]{
 		Items: make([]*Product, 0),
 	}
 
@@ -298,7 +281,7 @@ func (r *productRepository) List(ctx context.Context, tr fdb.ReadTransaction, di
 }
 
 // GetByCategory retrieves a paginated page of Product entities by their Category index.
-func (r *productRepository) GetByCategory(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Category string, opts ProductPaginationOptions) (*ProductPaginatedResult, error) {
+func (r *productRepository) GetByCategory(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Category string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Product], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -307,7 +290,7 @@ func (r *productRepository) GetByCategory(ctx context.Context, tr fdb.ReadTransa
 		return nil, err
 	}
 
-	result := &ProductPaginatedResult{
+	result := &fdblayer.PaginatedResult[*Product]{
 		Items: make([]*Product, 0),
 	}
 	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, 3475980913, Category}

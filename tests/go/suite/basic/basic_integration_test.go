@@ -159,7 +159,7 @@ func TestIntegration_CreateUser_AlreadyExists(t *testing.T) {
 
 	var byBob []*store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := userRepo.GetByEmail(ctx, tr, dir, "bob@test.com", store.UserPaginationOptions{})
+		res, err := userRepo.GetByEmail(ctx, tr, dir, "bob@test.com", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -304,10 +304,10 @@ func TestIntegration_GetUserByEmail(t *testing.T) {
 	})
 
 	// Should find two users with email "alice@test.com"
-	var users *store.UserPaginatedResult
+	var users *fdblayer.PaginatedResult[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.GetByEmail(ctx, tr, dir, "alice@test.com", store.UserPaginationOptions{})
+		users, err = userRepo.GetByEmail(ctx, tr, dir, "alice@test.com", fdblayer.PaginationOptions{})
 		return err
 	})
 	if len(users.Items) != 2 {
@@ -317,7 +317,7 @@ func TestIntegration_GetUserByEmail(t *testing.T) {
 	// Should find one user with email "bob@test.com"
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.GetByEmail(ctx, tr, dir, "bob@test.com", store.UserPaginationOptions{})
+		users, err = userRepo.GetByEmail(ctx, tr, dir, "bob@test.com", fdblayer.PaginationOptions{})
 		return err
 	})
 	if len(users.Items) != 1 || users.Items[0].Name != "Bob" {
@@ -327,7 +327,7 @@ func TestIntegration_GetUserByEmail(t *testing.T) {
 	// Should find zero for nonexistent email
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.GetByEmail(ctx, tr, dir, "nobody@test.com", store.UserPaginationOptions{})
+		users, err = userRepo.GetByEmail(ctx, tr, dir, "nobody@test.com", fdblayer.PaginationOptions{})
 		return err
 	})
 	if len(users.Items) != 0 {
@@ -357,10 +357,10 @@ func TestIntegration_GetProductByCategory(t *testing.T) {
 		return productRepo.Create(ctx, tr, dir, &store.Product{Id: "p3", Name: "Laptop", Category: "electronics", Price: 999})
 	})
 
-	var products *store.ProductPaginatedResult
+	var products *fdblayer.PaginatedResult[*store.Product]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		products, err = productRepo.GetByCategory(ctx, tr, dir, "tools", store.ProductPaginationOptions{})
+		products, err = productRepo.GetByCategory(ctx, tr, dir, "tools", fdblayer.PaginationOptions{})
 		return err
 	})
 	if len(products.Items) != 2 {
@@ -369,7 +369,7 @@ func TestIntegration_GetProductByCategory(t *testing.T) {
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		products, err = productRepo.GetByCategory(ctx, tr, dir, "electronics", store.ProductPaginationOptions{})
+		products, err = productRepo.GetByCategory(ctx, tr, dir, "electronics", fdblayer.PaginationOptions{})
 		return err
 	})
 	if len(products.Items) != 1 || products.Items[0].Name != "Laptop" {
@@ -399,10 +399,10 @@ func TestIntegration_SetUser_IndexUpdated(t *testing.T) {
 	})
 
 	// Old email should return empty
-	var users *store.UserPaginatedResult
+	var users *fdblayer.PaginatedResult[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.GetByEmail(ctx, tr, dir, "old@test.com", store.UserPaginationOptions{})
+		users, err = userRepo.GetByEmail(ctx, tr, dir, "old@test.com", fdblayer.PaginationOptions{})
 		return err
 	})
 	if len(users.Items) != 0 {
@@ -412,7 +412,7 @@ func TestIntegration_SetUser_IndexUpdated(t *testing.T) {
 	// New email should return the user
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.GetByEmail(ctx, tr, dir, "new@test.com", store.UserPaginationOptions{})
+		users, err = userRepo.GetByEmail(ctx, tr, dir, "new@test.com", fdblayer.PaginationOptions{})
 		return err
 	})
 	if len(users.Items) != 1 || users.Items[0].Name != "Alice" {
@@ -440,10 +440,10 @@ func TestIntegration_DeleteUser_ClearsIndex(t *testing.T) {
 		return userRepo.Delete(ctx, tr, dir, "u1")
 	})
 
-	var users *store.UserPaginatedResult
+	var users *fdblayer.PaginatedResult[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.GetByEmail(ctx, tr, dir, "alice@test.com", store.UserPaginationOptions{})
+		users, err = userRepo.GetByEmail(ctx, tr, dir, "alice@test.com", fdblayer.PaginationOptions{})
 		return err
 	})
 	if len(users.Items) != 0 {
@@ -476,10 +476,10 @@ func TestIntegration_ListUser_Basic(t *testing.T) {
 		return nil
 	})
 
-	var result *store.UserPaginatedResult
+	var result *fdblayer.PaginatedResult[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = userRepo.List(ctx, tr, dir, store.UserPaginationOptions{Limit: 10})
+		result, err = userRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 10})
 		return err
 	})
 	if len(result.Items) != 5 {
@@ -515,10 +515,10 @@ func TestIntegration_ListUser_Pagination(t *testing.T) {
 	})
 
 	// First page: limit 2
-	var page1 *store.UserPaginatedResult
+	var page1 *fdblayer.PaginatedResult[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = userRepo.List(ctx, tr, dir, store.UserPaginationOptions{Limit: 2})
+		page1, err = userRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 2})
 		return err
 	})
 	if len(page1.Items) != 2 {
@@ -532,10 +532,10 @@ func TestIntegration_ListUser_Pagination(t *testing.T) {
 	}
 
 	// Second page: use NextKey
-	var page2 *store.UserPaginatedResult
+	var page2 *fdblayer.PaginatedResult[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page2, err = userRepo.List(ctx, tr, dir, store.UserPaginationOptions{Begin: page1.NextKey, Limit: 2})
+		page2, err = userRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Begin: page1.NextKey, Limit: 2})
 		return err
 	})
 	if len(page2.Items) != 2 {
@@ -546,10 +546,10 @@ func TestIntegration_ListUser_Pagination(t *testing.T) {
 	}
 
 	// Third page: should have 1 remaining
-	var page3 *store.UserPaginatedResult
+	var page3 *fdblayer.PaginatedResult[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page3, err = userRepo.List(ctx, tr, dir, store.UserPaginationOptions{Begin: page2.NextKey, Limit: 2})
+		page3, err = userRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Begin: page2.NextKey, Limit: 2})
 		return err
 	})
 	if len(page3.Items) != 1 {
@@ -585,10 +585,10 @@ func TestIntegration_ListProduct_Pagination(t *testing.T) {
 	})
 
 	// Page through with limit 3
-	var page1 *store.ProductPaginatedResult
+	var page1 *fdblayer.PaginatedResult[*store.Product]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = productRepo.List(ctx, tr, dir, store.ProductPaginationOptions{Limit: 3})
+		page1, err = productRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 3})
 		return err
 	})
 	if len(page1.Items) != 3 {
@@ -598,20 +598,20 @@ func TestIntegration_ListProduct_Pagination(t *testing.T) {
 		t.Fatal("expected more pages")
 	}
 
-	var page2 *store.ProductPaginatedResult
+	var page2 *fdblayer.PaginatedResult[*store.Product]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page2, err = productRepo.List(ctx, tr, dir, store.ProductPaginationOptions{Begin: page1.NextKey, Limit: 3})
+		page2, err = productRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Begin: page1.NextKey, Limit: 3})
 		return err
 	})
 	if len(page2.Items) != 3 {
 		t.Fatalf("expected 3, got %d", len(page2.Items))
 	}
 
-	var page3 *store.ProductPaginatedResult
+	var page3 *fdblayer.PaginatedResult[*store.Product]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page3, err = productRepo.List(ctx, tr, dir, store.ProductPaginationOptions{Begin: page2.NextKey, Limit: 3})
+		page3, err = productRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Begin: page2.NextKey, Limit: 3})
 		return err
 	})
 	if len(page3.Items) != 1 {
@@ -635,10 +635,10 @@ func TestIntegration_ListUser_Empty(t *testing.T) {
 		return recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"})
 	})
 
-	var result *store.UserPaginatedResult
+	var result *fdblayer.PaginatedResult[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = userRepo.List(ctx, tr, dir, store.UserPaginationOptions{Limit: 10})
+		result, err = userRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 10})
 		return err
 	})
 	if len(result.Items) != 0 {
@@ -780,17 +780,17 @@ func TestIntegration_SyncMetadata_AndPaginatedIndexQuery(t *testing.T) {
 	})
 
 	// Reverse pagination on secondary index
-	var revPage1, revPage2 *store.ProductPaginatedResult
+	var revPage1, revPage2 *fdblayer.PaginatedResult[*store.Product]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		revPage1, err = productRepo.GetByCategory(ctx, tr, dir, "hardware", store.ProductPaginationOptions{
+		revPage1, err = productRepo.GetByCategory(ctx, tr, dir, "hardware", fdblayer.PaginationOptions{
 			Limit:   2,
 			Reverse: true,
 		})
 		if err != nil {
 			return err
 		}
-		revPage2, err = productRepo.GetByCategory(ctx, tr, dir, "hardware", store.ProductPaginationOptions{
+		revPage2, err = productRepo.GetByCategory(ctx, tr, dir, "hardware", fdblayer.PaginationOptions{
 			Begin:   revPage1.NextKey,
 			Limit:   2,
 			Reverse: true,

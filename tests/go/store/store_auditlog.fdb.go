@@ -15,31 +15,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// AuditLogPaginationOptions represents options for paginated queries
-type AuditLogPaginationOptions struct {
-	Begin   tuple.Tuple
-	Prefix  tuple.Tuple
-	Limit   int
-	Reverse bool
-}
-
-// AuditLogPaginatedResult represents a paginated result set
-type AuditLogPaginatedResult struct {
-	Items   []*AuditLog
-	NextKey tuple.Tuple
-	HasMore bool
-}
-
 // AuditLogRepository defines the repository interface for AuditLog.
 type AuditLogRepository interface {
 	fdblayer.GenericRepository[*AuditLog, []byte]
 
-	BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks [][]byte) ([]*AuditLog, error)
-	List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error)
-	GetByActor(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Actor string, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error)
-	GetByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error)
-	AddAuditLogViews(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, LogId []byte, val int64) error
-	SetAuditLogViews(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, LogId []byte, val int64) error
+	GetByActor(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Actor string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*AuditLog], error)
+	GetByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*AuditLog], error)
+	AddViews(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk []byte, val int64) error
+	SetViews(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk []byte, val int64) error
 }
 
 type auditlogRepository struct {
@@ -397,7 +380,7 @@ func (r *auditlogRepository) BatchGet(ctx context.Context, tr fdb.ReadTransactio
 }
 
 // List retrieves a list of AuditLog entities starting from the given key.
-func (r *auditlogRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error) {
+func (r *auditlogRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*AuditLog], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -406,7 +389,7 @@ func (r *auditlogRepository) List(ctx context.Context, tr fdb.ReadTransaction, d
 		return nil, err
 	}
 
-	result := &AuditLogPaginatedResult{
+	result := &fdblayer.PaginatedResult[*AuditLog]{
 		Items: make([]*AuditLog, 0),
 	}
 
@@ -551,7 +534,7 @@ func (r *auditlogRepository) List(ctx context.Context, tr fdb.ReadTransaction, d
 }
 
 // GetByActor retrieves a paginated page of AuditLog entities by their Actor index.
-func (r *auditlogRepository) GetByActor(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Actor string, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error) {
+func (r *auditlogRepository) GetByActor(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Actor string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*AuditLog], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -560,7 +543,7 @@ func (r *auditlogRepository) GetByActor(ctx context.Context, tr fdb.ReadTransact
 		return nil, err
 	}
 
-	result := &AuditLogPaginatedResult{
+	result := &fdblayer.PaginatedResult[*AuditLog]{
 		Items: make([]*AuditLog, 0),
 	}
 	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, 244111290, Actor}
@@ -691,7 +674,7 @@ func (r *auditlogRepository) GetByActor(ctx context.Context, tr fdb.ReadTransact
 }
 
 // GetByTags retrieves a paginated page of AuditLog entities by their Tags index.
-func (r *auditlogRepository) GetByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts AuditLogPaginationOptions) (*AuditLogPaginatedResult, error) {
+func (r *auditlogRepository) GetByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*AuditLog], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -700,7 +683,7 @@ func (r *auditlogRepository) GetByTags(ctx context.Context, tr fdb.ReadTransacti
 		return nil, err
 	}
 
-	result := &AuditLogPaginatedResult{
+	result := &fdblayer.PaginatedResult[*AuditLog]{
 		Items: make([]*AuditLog, 0),
 	}
 	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816, Tags}
@@ -830,8 +813,8 @@ func (r *auditlogRepository) GetByTags(ctx context.Context, tr fdb.ReadTransacti
 	return result, nil
 }
 
-// AddAuditLogViews applies an atomic mutation to the Views field of AuditLog.
-func (r *auditlogRepository) AddAuditLogViews(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, LogId []byte, val int64) error {
+// AddViews applies an atomic mutation to the Views field of AuditLog.
+func (r *auditlogRepository) AddViews(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk []byte, val int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -839,7 +822,7 @@ func (r *auditlogRepository) AddAuditLogViews(ctx context.Context, tr fdblayer.T
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, fdblayer.BytesToVersionstamp(LogId), 4})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, fdblayer.BytesToVersionstamp(pk), 4})
 
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val))
@@ -848,8 +831,8 @@ func (r *auditlogRepository) AddAuditLogViews(ctx context.Context, tr fdblayer.T
 	return nil
 }
 
-// SetAuditLogViews explicitly sets or resets the atomic Views field of AuditLog in FieldNamespace.
-func (r *auditlogRepository) SetAuditLogViews(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, LogId []byte, val int64) error {
+// SetViews explicitly sets or resets the atomic Views field of AuditLog in FieldNamespace.
+func (r *auditlogRepository) SetViews(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk []byte, val int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -857,7 +840,7 @@ func (r *auditlogRepository) SetAuditLogViews(ctx context.Context, tr fdblayer.T
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, fdblayer.BytesToVersionstamp(LogId), 4})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, fdblayer.BytesToVersionstamp(pk), 4})
 	if val == 0 {
 		tr.Clear(key)
 	} else {

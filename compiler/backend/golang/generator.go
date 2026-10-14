@@ -303,22 +303,6 @@ func generateTypesAndInterface(g Printer, msg ir.MessageSpec) {
 	lowerName := strings.ToLower(msg.Name)
 	pkType := pkTypeExpr(msg)
 
-	g.P("// ", msg.Name, "PaginationOptions represents options for paginated queries")
-	g.P("type ", msg.Name, "PaginationOptions struct {")
-	g.P("	Begin   tuple.Tuple")
-	g.P("	Prefix  tuple.Tuple")
-	g.P("	Limit   int")
-	g.P("	Reverse bool")
-	g.P("}")
-	g.P()
-	g.P("// ", msg.Name, "PaginatedResult represents a paginated result set")
-	g.P("type ", msg.Name, "PaginatedResult struct {")
-	g.P("	Items   []*", msg.Name)
-	g.P("	NextKey tuple.Tuple")
-	g.P("	HasMore bool")
-	g.P("}")
-	g.P()
-
 	if len(msg.PrimaryKeyFields) > 1 {
 		g.P("// ", msg.Name, "PrimaryKey represents the compound primary key for ", msg.Name, ".")
 		g.P("type ", msg.Name, "PrimaryKey struct {")
@@ -332,21 +316,21 @@ func generateTypesAndInterface(g Printer, msg ir.MessageSpec) {
 	g.P("// ", msg.Name, "Repository defines the repository interface for ", msg.Name, ".")
 	g.P("type ", msg.Name, "Repository interface {")
 	g.P("	fdblayer.GenericRepository[*", msg.Name, ", ", pkType, "]")
-	g.P()
-	g.P("	BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []", pkType, ") ([]*", msg.Name, ", error)")
-	g.P("	List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts ", msg.Name, "PaginationOptions) (*", msg.Name, "PaginatedResult, error)")
+	if len(msg.SecondaryIndexes) > 0 || ir.HasMutationFields(msg) {
+		g.P()
+	}
 	for i, idx := range msg.SecondaryIndexes {
 		joined := JoinFieldNames(idx.Fields)
-		g.P("	GetBy", joined, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ", fieldParamDecls(idx.Fields), ", opts ", msg.Name, "PaginationOptions) (*", msg.Name, "PaginatedResult, error)")
+		g.P("	GetBy", joined, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ", fieldParamDecls(idx.Fields), ", opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*", msg.Name, "], error)")
 		for _, prefix := range ir.EffectiveIndexPrefixes(msg.SecondaryIndexes, i) {
 			prefixJoined := JoinFieldNames(prefix.Fields)
-			g.P("	GetBy", prefixJoined, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ", fieldParamDecls(prefix.Fields), ", opts ", msg.Name, "PaginationOptions) (*", msg.Name, "PaginatedResult, error)")
+			g.P("	GetBy", prefixJoined, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ", fieldParamDecls(prefix.Fields), ", opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*", msg.Name, "], error)")
 		}
 	}
 	for _, f := range msg.Fields {
 		if f.Mutation != ir.MutationNone {
-			g.P("	", MutationVerb(f.Mutation), msg.Name, f.GoName, "(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, ", fieldParamDecls(msg.PrimaryKeyFields), ", val ", FieldGoType(f), ") error")
-			g.P("	Set", msg.Name, f.GoName, "(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, ", fieldParamDecls(msg.PrimaryKeyFields), ", val ", FieldGoType(f), ") error")
+			g.P("	", MutationVerb(f.Mutation), f.GoName, "(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk ", pkType, ", val ", FieldGoType(f), ") error")
+			g.P("	Set", f.GoName, "(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk ", pkType, ", val ", FieldGoType(f), ") error")
 		}
 	}
 	g.P("}")
@@ -861,7 +845,7 @@ func generateList(g Printer, msg ir.MessageSpec) {
 	hasMut := ir.HasMutationFields(msg)
 
 	g.P("// List retrieves a list of ", msg.Name, " entities starting from the given key.")
-	g.P("func (r *", lowerName, "Repository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts ", msg.Name, "PaginationOptions) (*", msg.Name, "PaginatedResult, error) {")
+	g.P("func (r *", lowerName, "Repository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*", msg.Name, "], error) {")
 	g.P("	if err := ctx.Err(); err != nil {")
 	g.P("		return nil, err")
 	g.P("	}")
@@ -870,7 +854,7 @@ func generateList(g Printer, msg ir.MessageSpec) {
 	g.P("		return nil, err")
 	g.P("	}")
 	g.P()
-	g.P("	result := &", msg.Name, "PaginatedResult{")
+	g.P("	result := &fdblayer.PaginatedResult[*", msg.Name, "]{")
 	g.P("		Items: make([]*", msg.Name, ", 0),")
 	g.P("	}")
 	g.P()
@@ -1084,7 +1068,7 @@ func generateGetByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec
 	}
 
 	g.P("// GetBy", joinedNames, " retrieves a paginated page of ", msg.Name, " entities by their ", joinedNames, " index.")
-	g.P("func (r *", lowerName, "Repository) GetBy", joinedNames, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ", fieldParamDecls(queryFields), ", opts ", msg.Name, "PaginationOptions) (*", msg.Name, "PaginatedResult, error) {")
+	g.P("func (r *", lowerName, "Repository) GetBy", joinedNames, "(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, ", fieldParamDecls(queryFields), ", opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*", msg.Name, "], error) {")
 	g.P("	if err := ctx.Err(); err != nil {")
 	g.P("		return nil, err")
 	g.P("	}")
@@ -1093,7 +1077,7 @@ func generateGetByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec
 	g.P("		return nil, err")
 	g.P("	}")
 	g.P()
-	g.P("	result := &", msg.Name, "PaginatedResult{")
+	g.P("	result := &fdblayer.PaginatedResult[*", msg.Name, "]{")
 	g.P("		Items: make([]*", msg.Name, ", 0),")
 	g.P("	}")
 	g.P("	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, ", idx.IndexID, ", ", strings.Join(idxPackArgs, ", "), "}")
@@ -1243,19 +1227,16 @@ func generateGetByIndex(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec
 
 func generateAtomicMutators(g Printer, msg ir.MessageSpec) {
 	lowerName := strings.ToLower(msg.Name)
-	var pkPackArgs []string
-	for _, f := range msg.PrimaryKeyFields {
-		pkPackArgs = append(pkPackArgs, PackField(f.GoName, f))
-	}
-	pkArgsStr := strings.Join(pkPackArgs, ", ")
+	pkType := pkTypeExpr(msg)
+	pkArgsStr := pkTupleArgsFromParam(msg)
 
 	for _, f := range msg.Fields {
 		if f.Mutation == ir.MutationNone {
 			continue
 		}
 		verb := MutationVerb(f.Mutation)
-		g.P("// ", verb, msg.Name, f.GoName, " applies an atomic mutation to the ", f.GoName, " field of ", msg.Name, ".")
-		g.P("func (r *", lowerName, "Repository) ", verb, msg.Name, f.GoName, "(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, ", fieldParamDecls(msg.PrimaryKeyFields), ", val ", FieldGoType(f), ") error {")
+		g.P("// ", verb, f.GoName, " applies an atomic mutation to the ", f.GoName, " field of ", msg.Name, ".")
+		g.P("func (r *", lowerName, "Repository) ", verb, f.GoName, "(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk ", pkType, ", val ", FieldGoType(f), ") error {")
 		g.P("	if err := ctx.Err(); err != nil {")
 		g.P("		return err")
 		g.P("	}")
@@ -1273,8 +1254,8 @@ func generateAtomicMutators(g Printer, msg ir.MessageSpec) {
 		g.P("}")
 		g.P()
 
-		g.P("// Set", msg.Name, f.GoName, " explicitly sets or resets the atomic ", f.GoName, " field of ", msg.Name, " in FieldNamespace.")
-		g.P("func (r *", lowerName, "Repository) Set", msg.Name, f.GoName, "(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, ", fieldParamDecls(msg.PrimaryKeyFields), ", val ", FieldGoType(f), ") error {")
+		g.P("// Set", f.GoName, " explicitly sets or resets the atomic ", f.GoName, " field of ", msg.Name, " in FieldNamespace.")
+		g.P("func (r *", lowerName, "Repository) Set", f.GoName, "(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk ", pkType, ", val ", FieldGoType(f), ") error {")
 		g.P("	if err := ctx.Err(); err != nil {")
 		g.P("		return err")
 		g.P("	}")

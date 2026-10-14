@@ -54,7 +54,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 2. Test Add
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.AddCounterValue(ctx, tr, dir, "c1", 5)
+		return counterRepo.AddValue(ctx, tr, dir, "c1", 5)
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
@@ -68,7 +68,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 3. Test Max
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c1", 50) // should not change
+		return counterRepo.MaxMaxValue(ctx, tr, dir, "c1", 50) // should not change
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
@@ -80,7 +80,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	}
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c1", 150) // should change
+		return counterRepo.MaxMaxValue(ctx, tr, dir, "c1", 150) // should change
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
@@ -93,7 +93,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 4. Test Min
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.MinCounterMinValue(ctx, tr, dir, "c1", 10) // should not change
+		return counterRepo.MinMinValue(ctx, tr, dir, "c1", 10) // should not change
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
@@ -105,7 +105,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	}
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.MinCounterMinValue(ctx, tr, dir, "c1", 2) // should change
+		return counterRepo.MinMinValue(ctx, tr, dir, "c1", 2) // should change
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
@@ -128,10 +128,10 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	}
 
 	// 6. Verify ListCounter populates atomic fields
-	var listRes *atomic.CounterPaginatedResult
+	var listRes *fdblayer.PaginatedResult[*atomic.Counter]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		listRes, err = counterRepo.List(ctx, tr, dir, atomic.CounterPaginationOptions{Limit: 10})
+		listRes, err = counterRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 10})
 		return err
 	})
 	if len(listRes.Items) != 1 {
@@ -160,7 +160,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 		return counterRepo.Create(ctx, tr, dir, &atomic.Counter{Id: "c_zero"})
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.MinCounterMinValue(ctx, tr, dir, "c_zero", 42)
+		return counterRepo.MinMinValue(ctx, tr, dir, "c_zero", 42)
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
@@ -190,22 +190,22 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	}
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_neg", -200); err != nil {
+		if err := counterRepo.MaxMaxValue(ctx, tr, dir, "c_neg", -200); err != nil {
 			return err
 		}
-		if err := counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_neg", -50); err != nil {
+		if err := counterRepo.MaxMaxValue(ctx, tr, dir, "c_neg", -50); err != nil {
 			return err
 		}
-		if err := counterRepo.MinCounterMinValue(ctx, tr, dir, "c_neg", -2); err != nil {
+		if err := counterRepo.MinMinValue(ctx, tr, dir, "c_neg", -2); err != nil {
 			return err
 		}
-		if err := counterRepo.MinCounterMinValue(ctx, tr, dir, "c_neg", -20); err != nil {
+		if err := counterRepo.MinMinValue(ctx, tr, dir, "c_neg", -20); err != nil {
 			return err
 		}
-		if err := counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c1", -1); err != nil {
+		if err := counterRepo.MaxMaxValue(ctx, tr, dir, "c1", -1); err != nil {
 			return err
 		}
-		return counterRepo.MinCounterMinValue(ctx, tr, dir, "c1", -10)
+		return counterRepo.MinMinValue(ctx, tr, dir, "c1", -10)
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
@@ -254,13 +254,13 @@ func TestIntegration_DeleteAndUnsigned32BitAtomic(t *testing.T) {
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := counterRepo.MaxCounterU64Max(ctx, tr, dir, "c_live", highU64); err != nil {
+		if err := counterRepo.MaxU64Max(ctx, tr, dir, "c_live", highU64); err != nil {
 			return err
 		}
-		if err := counterRepo.MinCounterI32Min(ctx, tr, dir, "c_live", -300); err != nil {
+		if err := counterRepo.MinI32Min(ctx, tr, dir, "c_live", -300); err != nil {
 			return err
 		}
-		return counterRepo.AddCounterU32Add(ctx, tr, dir, "c_live", 13)
+		return counterRepo.AddU32Add(ctx, tr, dir, "c_live", 13)
 	})
 
 	var got *atomic.Counter
@@ -308,10 +308,10 @@ func TestIntegration_DeleteAndUnsigned32BitAtomic(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if err := counterRepo.AddCounterValue(ctx, tr, dir, "c_rmw", 30); err != nil {
+		if err := counterRepo.AddValue(ctx, tr, dir, "c_rmw", 30); err != nil {
 			return err
 		}
-		if err := counterRepo.MaxCounterMaxValue(ctx, tr, dir, "c_rmw", -100); err != nil {
+		if err := counterRepo.MaxMaxValue(ctx, tr, dir, "c_rmw", -100); err != nil {
 			return err
 		}
 		// got.Value is still 20, while FieldNamespace has 50
@@ -328,16 +328,16 @@ func TestIntegration_DeleteAndUnsigned32BitAtomic(t *testing.T) {
 
 	// Reset Value to 0 via SetCounterValue and set c_live Value to 77
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := counterRepo.SetCounterValue(ctx, tr, dir, "c_rmw", 0); err != nil {
+		if err := counterRepo.SetValue(ctx, tr, dir, "c_rmw", 0); err != nil {
 			return err
 		}
-		return counterRepo.SetCounterValue(ctx, tr, dir, "c_live", 77)
+		return counterRepo.SetValue(ctx, tr, dir, "c_live", 77)
 	})
 
-	var revList *atomic.CounterPaginatedResult
+	var revList *fdblayer.PaginatedResult[*atomic.Counter]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		revList, err = counterRepo.List(ctx, tr, dir, atomic.CounterPaginationOptions{
+		revList, err = counterRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{
 			Limit:   10,
 			Reverse: true,
 		})

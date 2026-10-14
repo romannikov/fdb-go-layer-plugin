@@ -14,28 +14,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// PostPaginationOptions represents options for paginated queries
-type PostPaginationOptions struct {
-	Begin   tuple.Tuple
-	Prefix  tuple.Tuple
-	Limit   int
-	Reverse bool
-}
-
-// PostPaginatedResult represents a paginated result set
-type PostPaginatedResult struct {
-	Items   []*Post
-	NextKey tuple.Tuple
-	HasMore bool
-}
-
 // PostRepository defines the repository interface for Post.
 type PostRepository interface {
 	fdblayer.GenericRepository[*Post, string]
 
-	BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Post, error)
-	List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PostPaginationOptions) (*PostPaginatedResult, error)
-	GetByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts PostPaginationOptions) (*PostPaginatedResult, error)
+	GetByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Post], error)
 }
 
 type postRepository struct {
@@ -264,7 +247,7 @@ func (r *postRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction, d
 }
 
 // List retrieves a list of Post entities starting from the given key.
-func (r *postRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PostPaginationOptions) (*PostPaginatedResult, error) {
+func (r *postRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Post], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -273,7 +256,7 @@ func (r *postRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir d
 		return nil, err
 	}
 
-	result := &PostPaginatedResult{
+	result := &fdblayer.PaginatedResult[*Post]{
 		Items: make([]*Post, 0),
 	}
 
@@ -356,7 +339,7 @@ func (r *postRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir d
 }
 
 // GetByTags retrieves a paginated page of Post entities by their Tags index.
-func (r *postRepository) GetByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts PostPaginationOptions) (*PostPaginatedResult, error) {
+func (r *postRepository) GetByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Post], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -365,7 +348,7 @@ func (r *postRepository) GetByTags(ctx context.Context, tr fdb.ReadTransaction, 
 		return nil, err
 	}
 
-	result := &PostPaginatedResult{
+	result := &fdblayer.PaginatedResult[*Post]{
 		Items: make([]*Post, 0),
 	}
 	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816, Tags}

@@ -15,39 +15,22 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// CounterPaginationOptions represents options for paginated queries
-type CounterPaginationOptions struct {
-	Begin   tuple.Tuple
-	Prefix  tuple.Tuple
-	Limit   int
-	Reverse bool
-}
-
-// CounterPaginatedResult represents a paginated result set
-type CounterPaginatedResult struct {
-	Items   []*Counter
-	NextKey tuple.Tuple
-	HasMore bool
-}
-
 // CounterRepository defines the repository interface for Counter.
 type CounterRepository interface {
 	fdblayer.GenericRepository[*Counter, string]
 
-	BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Counter, error)
-	List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts CounterPaginationOptions) (*CounterPaginatedResult, error)
-	AddCounterValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
-	SetCounterValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
-	MaxCounterMaxValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
-	SetCounterMaxValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
-	MinCounterMinValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
-	SetCounterMinValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error
-	MaxCounterU64Max(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val uint64) error
-	SetCounterU64Max(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val uint64) error
-	MinCounterI32Min(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int32) error
-	SetCounterI32Min(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int32) error
-	AddCounterU32Add(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val uint32) error
-	SetCounterU32Add(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val uint32) error
+	AddValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int64) error
+	SetValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int64) error
+	MaxMaxValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int64) error
+	SetMaxValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int64) error
+	MinMinValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int64) error
+	SetMinValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int64) error
+	MaxU64Max(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val uint64) error
+	SetU64Max(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val uint64) error
+	MinI32Min(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int32) error
+	SetI32Min(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int32) error
+	AddU32Add(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val uint32) error
+	SetU32Add(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val uint32) error
 }
 
 type counterRepository struct {
@@ -384,7 +367,7 @@ func (r *counterRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction
 }
 
 // List retrieves a list of Counter entities starting from the given key.
-func (r *counterRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts CounterPaginationOptions) (*CounterPaginatedResult, error) {
+func (r *counterRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Counter], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -393,7 +376,7 @@ func (r *counterRepository) List(ctx context.Context, tr fdb.ReadTransaction, di
 		return nil, err
 	}
 
-	result := &CounterPaginatedResult{
+	result := &fdblayer.PaginatedResult[*Counter]{
 		Items: make([]*Counter, 0),
 	}
 
@@ -533,8 +516,8 @@ func (r *counterRepository) List(ctx context.Context, tr fdb.ReadTransaction, di
 	return result, nil
 }
 
-// AddCounterValue applies an atomic mutation to the Value field of Counter.
-func (r *counterRepository) AddCounterValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+// AddValue applies an atomic mutation to the Value field of Counter.
+func (r *counterRepository) AddValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -542,7 +525,7 @@ func (r *counterRepository) AddCounterValue(ctx context.Context, tr fdblayer.Tra
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 2})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 2})
 
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val))
@@ -551,8 +534,8 @@ func (r *counterRepository) AddCounterValue(ctx context.Context, tr fdblayer.Tra
 	return nil
 }
 
-// SetCounterValue explicitly sets or resets the atomic Value field of Counter in FieldNamespace.
-func (r *counterRepository) SetCounterValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+// SetValue explicitly sets or resets the atomic Value field of Counter in FieldNamespace.
+func (r *counterRepository) SetValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -560,7 +543,7 @@ func (r *counterRepository) SetCounterValue(ctx context.Context, tr fdblayer.Tra
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 2})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 2})
 	if val == 0 {
 		tr.Clear(key)
 	} else {
@@ -571,8 +554,8 @@ func (r *counterRepository) SetCounterValue(ctx context.Context, tr fdblayer.Tra
 	return nil
 }
 
-// MaxCounterMaxValue applies an atomic mutation to the MaxValue field of Counter.
-func (r *counterRepository) MaxCounterMaxValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+// MaxMaxValue applies an atomic mutation to the MaxValue field of Counter.
+func (r *counterRepository) MaxMaxValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -580,7 +563,7 @@ func (r *counterRepository) MaxCounterMaxValue(ctx context.Context, tr fdblayer.
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 3})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 3})
 
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val)^(1<<63))
@@ -589,8 +572,8 @@ func (r *counterRepository) MaxCounterMaxValue(ctx context.Context, tr fdblayer.
 	return nil
 }
 
-// SetCounterMaxValue explicitly sets or resets the atomic MaxValue field of Counter in FieldNamespace.
-func (r *counterRepository) SetCounterMaxValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+// SetMaxValue explicitly sets or resets the atomic MaxValue field of Counter in FieldNamespace.
+func (r *counterRepository) SetMaxValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -598,15 +581,15 @@ func (r *counterRepository) SetCounterMaxValue(ctx context.Context, tr fdblayer.
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 3})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 3})
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val)^(1<<63))
 	tr.Set(key, buf)
 	return nil
 }
 
-// MinCounterMinValue applies an atomic mutation to the MinValue field of Counter.
-func (r *counterRepository) MinCounterMinValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+// MinMinValue applies an atomic mutation to the MinValue field of Counter.
+func (r *counterRepository) MinMinValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -614,7 +597,7 @@ func (r *counterRepository) MinCounterMinValue(ctx context.Context, tr fdblayer.
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 4})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 4})
 
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val)^(1<<63))
@@ -623,8 +606,8 @@ func (r *counterRepository) MinCounterMinValue(ctx context.Context, tr fdblayer.
 	return nil
 }
 
-// SetCounterMinValue explicitly sets or resets the atomic MinValue field of Counter in FieldNamespace.
-func (r *counterRepository) SetCounterMinValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int64) error {
+// SetMinValue explicitly sets or resets the atomic MinValue field of Counter in FieldNamespace.
+func (r *counterRepository) SetMinValue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -632,7 +615,7 @@ func (r *counterRepository) SetCounterMinValue(ctx context.Context, tr fdblayer.
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 4})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 4})
 	if val == 0 {
 		tr.Clear(key)
 	} else {
@@ -643,8 +626,8 @@ func (r *counterRepository) SetCounterMinValue(ctx context.Context, tr fdblayer.
 	return nil
 }
 
-// MaxCounterU64Max applies an atomic mutation to the U64Max field of Counter.
-func (r *counterRepository) MaxCounterU64Max(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val uint64) error {
+// MaxU64Max applies an atomic mutation to the U64Max field of Counter.
+func (r *counterRepository) MaxU64Max(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val uint64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -652,7 +635,7 @@ func (r *counterRepository) MaxCounterU64Max(ctx context.Context, tr fdblayer.Tr
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 5})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 5})
 
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val))
@@ -661,8 +644,8 @@ func (r *counterRepository) MaxCounterU64Max(ctx context.Context, tr fdblayer.Tr
 	return nil
 }
 
-// SetCounterU64Max explicitly sets or resets the atomic U64Max field of Counter in FieldNamespace.
-func (r *counterRepository) SetCounterU64Max(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val uint64) error {
+// SetU64Max explicitly sets or resets the atomic U64Max field of Counter in FieldNamespace.
+func (r *counterRepository) SetU64Max(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val uint64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -670,7 +653,7 @@ func (r *counterRepository) SetCounterU64Max(ctx context.Context, tr fdblayer.Tr
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 5})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 5})
 	if val == 0 {
 		tr.Clear(key)
 	} else {
@@ -681,8 +664,8 @@ func (r *counterRepository) SetCounterU64Max(ctx context.Context, tr fdblayer.Tr
 	return nil
 }
 
-// MinCounterI32Min applies an atomic mutation to the I32Min field of Counter.
-func (r *counterRepository) MinCounterI32Min(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int32) error {
+// MinI32Min applies an atomic mutation to the I32Min field of Counter.
+func (r *counterRepository) MinI32Min(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int32) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -690,7 +673,7 @@ func (r *counterRepository) MinCounterI32Min(ctx context.Context, tr fdblayer.Tr
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 6})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 6})
 
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(int64(val))^(1<<63))
@@ -699,8 +682,8 @@ func (r *counterRepository) MinCounterI32Min(ctx context.Context, tr fdblayer.Tr
 	return nil
 }
 
-// SetCounterI32Min explicitly sets or resets the atomic I32Min field of Counter in FieldNamespace.
-func (r *counterRepository) SetCounterI32Min(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val int32) error {
+// SetI32Min explicitly sets or resets the atomic I32Min field of Counter in FieldNamespace.
+func (r *counterRepository) SetI32Min(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val int32) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -708,7 +691,7 @@ func (r *counterRepository) SetCounterI32Min(ctx context.Context, tr fdblayer.Tr
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 6})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 6})
 	if val == 0 {
 		tr.Clear(key)
 	} else {
@@ -719,8 +702,8 @@ func (r *counterRepository) SetCounterI32Min(ctx context.Context, tr fdblayer.Tr
 	return nil
 }
 
-// AddCounterU32Add applies an atomic mutation to the U32Add field of Counter.
-func (r *counterRepository) AddCounterU32Add(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val uint32) error {
+// AddU32Add applies an atomic mutation to the U32Add field of Counter.
+func (r *counterRepository) AddU32Add(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val uint32) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -728,7 +711,7 @@ func (r *counterRepository) AddCounterU32Add(ctx context.Context, tr fdblayer.Tr
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 7})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 7})
 
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(val))
@@ -737,8 +720,8 @@ func (r *counterRepository) AddCounterU32Add(ctx context.Context, tr fdblayer.Tr
 	return nil
 }
 
-// SetCounterU32Add explicitly sets or resets the atomic U32Add field of Counter in FieldNamespace.
-func (r *counterRepository) SetCounterU32Add(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, Id string, val uint32) error {
+// SetU32Add explicitly sets or resets the atomic U32Add field of Counter in FieldNamespace.
+func (r *counterRepository) SetU32Add(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string, val uint32) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -746,7 +729,7 @@ func (r *counterRepository) SetCounterU32Add(ctx context.Context, tr fdblayer.Tr
 	if err != nil {
 		return err
 	}
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, Id, 7})
+	key := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, pk, 7})
 	if val == 0 {
 		tr.Clear(key)
 	} else {
