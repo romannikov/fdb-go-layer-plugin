@@ -1,0 +1,89 @@
+syntax = "proto3";
+
+package annotations;
+
+option go_package = "github.com/romannikov/fdb-layer/proto/fdb-layer;fdblayer";
+
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.MessageOptions {
+  // Mandatory explicit type ID (> 0) for any message with primary_key or is_queue.
+  // Compilation fails if type_id is 0 or collides with another message.
+  uint32 type_id = 50000;
+
+  // Primary key definition (list of field names in tuple sort order).
+  PrimaryKey primary_key = 50001;
+
+  // List of secondary, unique, covering, fan-out, or aggregate indexes.
+  repeated SecondaryIndex secondary_index = 50002;
+
+  // Marks this message as a versionstamp-ordered FIFO queue.
+  bool is_queue = 50005;
+
+  // Hierarchical co-location: interleaves this message's records physically
+  // under the parent message's primary key prefix.
+  // The leading primary_key fields of this message MUST match the parent's primary_key.
+  InterleaveSpec interleave = 50006;
+
+  // [RESERVED / NOT IMPLEMENTED YET]
+  // Planned for future release: splits serialized payloads exceeding chunk threshold across sequential keys.
+  bool split_large_records = 50007;
+
+  // [RESERVED / NOT IMPLEMENTED YET]
+  // Planned for future release: field name of an int64 Unix timestamp for automatic row expiration.
+  string ttl_field = 50008;
+}
+
+message PrimaryKey {
+  // Field names that constitute the primary key in tuple sort order.
+  repeated string fields = 1;
+}
+
+message InterleaveSpec {
+  string parent = 1;           // Parent message name in the same package (e.g., "User")
+  bool on_delete_cascade = 2;  // Clear interleaved child key range when parent is deleted
+}
+
+enum IndexAggregateType {
+  AGGREGATE_NONE = 0;   // Standard / Unique / Covering secondary index
+  AGGREGATE_COUNT = 1;  // Maintains atomic int64 count grouped by `fields`
+  AGGREGATE_SUM = 2;    // Maintains atomic int64 sum of `aggregate_field` grouped by `fields`
+  AGGREGATE_MIN = 3;    // Maintains atomic min of `aggregate_field` grouped by `fields`
+  AGGREGATE_MAX = 4;    // Maintains atomic max of `aggregate_field` grouped by `fields`
+}
+
+message SecondaryIndex {
+  // Indexed field names in tuple sort order.
+  repeated string fields = 1;
+
+  // Mandatory explicit index ID (> 0). Compilation fails if id is 0 or duplicated within a message.
+  uint32 id = 2;
+
+  // Enforces uniqueness on `fields` within the transaction.
+  bool unique = 3;
+
+  // Covering index projection: additional non-key field names stored in the index value
+  // to enable 1-RTT index-only reads without fetching the primary record.
+  repeated string storing = 4;
+
+  // Omit index entry when any indexed field has its zero/empty value.
+  bool sparse = 5;
+
+  // Atomic aggregate index type (COUNT, SUM, MIN, MAX grouped by `fields`).
+  IndexAggregateType aggregate = 6;
+
+  // Target integer field name for AGGREGATE_SUM, AGGREGATE_MIN, or AGGREGATE_MAX.
+  string aggregate_field = 7;
+}
+
+enum MutationType {
+  MUTATION_NONE = 0;
+  MUTATION_ADD = 1;
+  MUTATION_MAX = 2;
+  MUTATION_MIN = 3;
+}
+
+extend google.protobuf.FieldOptions {
+  MutationType mutation = 50003;
+  bool is_versionstamp = 50004;
+}
