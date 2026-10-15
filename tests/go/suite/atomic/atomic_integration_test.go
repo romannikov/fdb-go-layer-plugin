@@ -23,29 +23,25 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	counterRepo := atomic.NewCounterRepository(recordStore)
-
-	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"})
-	})
+	counterRepo := atomic.NewCounterRepository()
 
 	// 1. Create a counter
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		tx := fdblayer.NewTx(tr, dir)
 		c := &atomic.Counter{
 			Id:       "c1",
 			Value:    10,
 			MaxValue: 100,
 			MinValue: 5,
 		}
-		return counterRepo.Create(ctx, tr, dir, c)
+		return counterRepo.Create(ctx, tx, c)
 	})
 
 	// Verify initial state
 	var retrieved *atomic.Counter
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
+		retrieved, err = counterRepo.Get(ctx, fdblayer.NewTx(tr, dir), "c1")
 		return err
 	})
 	if retrieved.Value != 10 || retrieved.MaxValue != 100 || retrieved.MinValue != 5 {
@@ -54,12 +50,12 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 2. Test Add
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.AddValue(ctx, tr, dir, "c1", 5)
+		return counterRepo.AddValue(ctx, fdblayer.NewTx(tr, dir), "c1", 5)
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
+		retrieved, err = counterRepo.Get(ctx, fdblayer.NewTx(tr, dir), "c1")
 		return err
 	})
 	if retrieved.Value != 15 {
@@ -68,11 +64,11 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 3. Test Max
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.MaxMaxValue(ctx, tr, dir, "c1", 50) // should not change
+		return counterRepo.MaxMaxValue(ctx, fdblayer.NewTx(tr, dir), "c1", 50) // should not change
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
+		retrieved, err = counterRepo.Get(ctx, fdblayer.NewTx(tr, dir), "c1")
 		return err
 	})
 	if retrieved.MaxValue != 100 {
@@ -80,11 +76,11 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	}
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.MaxMaxValue(ctx, tr, dir, "c1", 150) // should change
+		return counterRepo.MaxMaxValue(ctx, fdblayer.NewTx(tr, dir), "c1", 150) // should change
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
+		retrieved, err = counterRepo.Get(ctx, fdblayer.NewTx(tr, dir), "c1")
 		return err
 	})
 	if retrieved.MaxValue != 150 {
@@ -93,11 +89,11 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 4. Test Min
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.MinMinValue(ctx, tr, dir, "c1", 10) // should not change
+		return counterRepo.MinMinValue(ctx, fdblayer.NewTx(tr, dir), "c1", 10) // should not change
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
+		retrieved, err = counterRepo.Get(ctx, fdblayer.NewTx(tr, dir), "c1")
 		return err
 	})
 	if retrieved.MinValue != 5 {
@@ -105,11 +101,11 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	}
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.MinMinValue(ctx, tr, dir, "c1", 2) // should change
+		return counterRepo.MinMinValue(ctx, fdblayer.NewTx(tr, dir), "c1", 2) // should change
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
+		retrieved, err = counterRepo.Get(ctx, fdblayer.NewTx(tr, dir), "c1")
 		return err
 	})
 	if retrieved.MinValue != 2 {
@@ -120,7 +116,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	var batchRes []*atomic.Counter
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		batchRes, err = counterRepo.BatchGet(ctx, tr, dir, []string{"c1"})
+		batchRes, err = counterRepo.BatchGet(ctx, fdblayer.NewTx(tr, dir), []string{"c1"})
 		return err
 	})
 	if len(batchRes) != 1 || batchRes[0] == nil || batchRes[0].Value != 15 || batchRes[0].MaxValue != 150 || batchRes[0].MinValue != 2 {
@@ -131,7 +127,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	var listRes *fdblayer.PaginatedResult[*atomic.Counter]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		listRes, err = counterRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 10})
+		listRes, err = counterRepo.List(ctx, fdblayer.NewTx(tr, dir), fdblayer.PaginationOptions{Limit: 10})
 		return err
 	})
 	if len(listRes.Items) != 1 {
@@ -144,11 +140,11 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 7. Verify Set does not overwrite atomic fields in FieldNamespace (C-2)
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.Set(ctx, tr, dir, &atomic.Counter{Id: "c1"})
+		return counterRepo.Set(ctx, fdblayer.NewTx(tr, dir), &atomic.Counter{Id: "c1"})
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
+		retrieved, err = counterRepo.Get(ctx, fdblayer.NewTx(tr, dir), "c1")
 		return err
 	})
 	if retrieved.Value != 15 || retrieved.MaxValue != 150 || retrieved.MinValue != 2 {
@@ -157,14 +153,14 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 8. Verify Create with default zero MinValue allows positive Min mutations (C-3)
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.Create(ctx, tr, dir, &atomic.Counter{Id: "c_zero"})
+		return counterRepo.Create(ctx, fdblayer.NewTx(tr, dir), &atomic.Counter{Id: "c_zero"})
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.MinMinValue(ctx, tr, dir, "c_zero", 42)
+		return counterRepo.MinMinValue(ctx, fdblayer.NewTx(tr, dir), "c_zero", 42)
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = counterRepo.Get(ctx, tr, dir, "c_zero")
+		retrieved, err = counterRepo.Get(ctx, fdblayer.NewTx(tr, dir), "c_zero")
 		return err
 	})
 	if retrieved.MinValue != 42 {
@@ -173,7 +169,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	// 9. Verify negative int64 values on Create and Max/Min mutations against live FDB
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.Create(ctx, tr, dir, &atomic.Counter{
+		return counterRepo.Create(ctx, fdblayer.NewTx(tr, dir), &atomic.Counter{
 			Id:       "c_neg",
 			Value:    -10,
 			MaxValue: -100,
@@ -182,7 +178,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = counterRepo.Get(ctx, tr, dir, "c_neg")
+		retrieved, err = counterRepo.Get(ctx, fdblayer.NewTx(tr, dir), "c_neg")
 		return err
 	})
 	if retrieved.Value != -10 || retrieved.MaxValue != -100 || retrieved.MinValue != -5 {
@@ -190,27 +186,28 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 	}
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := counterRepo.MaxMaxValue(ctx, tr, dir, "c_neg", -200); err != nil {
+		tx := fdblayer.NewTx(tr, dir)
+		if err := counterRepo.MaxMaxValue(ctx, tx, "c_neg", -200); err != nil {
 			return err
 		}
-		if err := counterRepo.MaxMaxValue(ctx, tr, dir, "c_neg", -50); err != nil {
+		if err := counterRepo.MaxMaxValue(ctx, tx, "c_neg", -50); err != nil {
 			return err
 		}
-		if err := counterRepo.MinMinValue(ctx, tr, dir, "c_neg", -2); err != nil {
+		if err := counterRepo.MinMinValue(ctx, tx, "c_neg", -2); err != nil {
 			return err
 		}
-		if err := counterRepo.MinMinValue(ctx, tr, dir, "c_neg", -20); err != nil {
+		if err := counterRepo.MinMinValue(ctx, tx, "c_neg", -20); err != nil {
 			return err
 		}
-		if err := counterRepo.MaxMaxValue(ctx, tr, dir, "c1", -1); err != nil {
+		if err := counterRepo.MaxMaxValue(ctx, tx, "c1", -1); err != nil {
 			return err
 		}
-		return counterRepo.MinMinValue(ctx, tr, dir, "c1", -10)
+		return counterRepo.MinMinValue(ctx, tx, "c1", -10)
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = counterRepo.Get(ctx, tr, dir, "c_neg")
+		retrieved, err = counterRepo.Get(ctx, fdblayer.NewTx(tr, dir), "c_neg")
 		return err
 	})
 	if retrieved.MaxValue != -50 || retrieved.MinValue != -20 {
@@ -219,7 +216,7 @@ func TestIntegration_AtomicMutations(t *testing.T) {
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		retrieved, err = counterRepo.Get(ctx, tr, dir, "c1")
+		retrieved, err = counterRepo.Get(ctx, fdblayer.NewTx(tr, dir), "c1")
 		return err
 	})
 	if retrieved.MaxValue != 150 || retrieved.MinValue != -10 {
@@ -233,16 +230,11 @@ func TestIntegration_DeleteAndUnsigned32BitAtomic(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	counterRepo := atomic.NewCounterRepository(recordStore)
-
-	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"})
-	})
+	counterRepo := atomic.NewCounterRepository()
 
 	const highU64 uint64 = 1<<63 + 999
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.Create(ctx, tr, dir, &atomic.Counter{
+		return counterRepo.Create(ctx, fdblayer.NewTx(tr, dir), &atomic.Counter{
 			Id:       "c_live",
 			Value:    42,
 			MaxValue: 100,
@@ -254,19 +246,20 @@ func TestIntegration_DeleteAndUnsigned32BitAtomic(t *testing.T) {
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := counterRepo.MaxU64Max(ctx, tr, dir, "c_live", highU64); err != nil {
+		tx := fdblayer.NewTx(tr, dir)
+		if err := counterRepo.MaxU64Max(ctx, tx, "c_live", highU64); err != nil {
 			return err
 		}
-		if err := counterRepo.MinI32Min(ctx, tr, dir, "c_live", -300); err != nil {
+		if err := counterRepo.MinI32Min(ctx, tx, "c_live", -300); err != nil {
 			return err
 		}
-		return counterRepo.AddU32Add(ctx, tr, dir, "c_live", 13)
+		return counterRepo.AddU32Add(ctx, tx, "c_live", 13)
 	})
 
 	var got *atomic.Counter
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		got, err = counterRepo.Get(ctx, tr, dir, "c_live")
+		got, err = counterRepo.Get(ctx, fdblayer.NewTx(tr, dir), "c_live")
 		return err
 	})
 	if got.U64Max != highU64 || got.I32Min != -300 || got.U32Add != 20 {
@@ -275,14 +268,14 @@ func TestIntegration_DeleteAndUnsigned32BitAtomic(t *testing.T) {
 
 	// Delete and re-create with zero values to verify FieldNamespace was cleared
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.Delete(ctx, tr, dir, "c_live")
+		return counterRepo.Delete(ctx, fdblayer.NewTx(tr, dir), "c_live")
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.Create(ctx, tr, dir, &atomic.Counter{Id: "c_live"})
+		return counterRepo.Create(ctx, fdblayer.NewTx(tr, dir), &atomic.Counter{Id: "c_live"})
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		got, err = counterRepo.Get(ctx, tr, dir, "c_live")
+		got, err = counterRepo.Get(ctx, fdblayer.NewTx(tr, dir), "c_live")
 		return err
 	})
 	if got.Value != 0 || got.MaxValue != 0 || got.MinValue != 0 || got.U64Max != 0 || got.I32Min != 0 || got.U32Add != 0 {
@@ -295,7 +288,7 @@ func TestIntegration_DeleteAndUnsigned32BitAtomic(t *testing.T) {
 	// 3. Explicit SetCounter* resets atomic fields to 0
 	// 4. ListCounter with Reverse: true populates FieldNamespace when firstPK > lastPK
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return counterRepo.Set(ctx, tr, dir, &atomic.Counter{
+		return counterRepo.Set(ctx, fdblayer.NewTx(tr, dir), &atomic.Counter{
 			Id:       "c_rmw",
 			Value:    20,
 			MaxValue: 0,
@@ -303,23 +296,24 @@ func TestIntegration_DeleteAndUnsigned32BitAtomic(t *testing.T) {
 		})
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		tx := fdblayer.NewTx(tr, dir)
 		var err error
-		got, err = counterRepo.Get(ctx, tr, dir, "c_rmw")
+		got, err = counterRepo.Get(ctx, tx, "c_rmw")
 		if err != nil {
 			return err
 		}
-		if err := counterRepo.AddValue(ctx, tr, dir, "c_rmw", 30); err != nil {
+		if err := counterRepo.AddValue(ctx, tx, "c_rmw", 30); err != nil {
 			return err
 		}
-		if err := counterRepo.MaxMaxValue(ctx, tr, dir, "c_rmw", -100); err != nil {
+		if err := counterRepo.MaxMaxValue(ctx, tx, "c_rmw", -100); err != nil {
 			return err
 		}
 		// got.Value is still 20, while FieldNamespace has 50
-		return counterRepo.Set(ctx, tr, dir, got)
+		return counterRepo.Set(ctx, tx, got)
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		got, err = counterRepo.Get(ctx, tr, dir, "c_rmw")
+		got, err = counterRepo.Get(ctx, fdblayer.NewTx(tr, dir), "c_rmw")
 		return err
 	})
 	if got.Value != 50 || got.MaxValue != 0 || got.MinValue != 10 {
@@ -328,16 +322,17 @@ func TestIntegration_DeleteAndUnsigned32BitAtomic(t *testing.T) {
 
 	// Reset Value to 0 via SetCounterValue and set c_live Value to 77
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := counterRepo.SetValue(ctx, tr, dir, "c_rmw", 0); err != nil {
+		tx := fdblayer.NewTx(tr, dir)
+		if err := counterRepo.SetValue(ctx, tx, "c_rmw", 0); err != nil {
 			return err
 		}
-		return counterRepo.SetValue(ctx, tr, dir, "c_live", 77)
+		return counterRepo.SetValue(ctx, tx, "c_live", 77)
 	})
 
 	var revList *fdblayer.PaginatedResult[*atomic.Counter]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		revList, err = counterRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{
+		revList, err = counterRepo.List(ctx, fdblayer.NewTx(tr, dir), fdblayer.PaginationOptions{
 			Limit:   10,
 			Reverse: true,
 		})

@@ -8,39 +8,37 @@ import (
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
-	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
 	"google.golang.org/protobuf/proto"
 )
 
+// UserTypeID is the compile-time type prefix for User records in FoundationDB.
+const UserTypeID int64 = 3768991250
+
 // UserRepository defines the repository interface for User.
 type UserRepository interface {
 	fdblayer.GenericRepository[*User, string]
 
-	GetByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*User], error)
+	GetByEmail(ctx context.Context, tx *fdblayer.Tx, Email string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*User], error)
 }
 
-type userRepository struct {
-	store *fdblayer.RecordStore
-}
+type userRepository struct{}
 
 // NewUserRepository creates a new UserRepository instance.
-func NewUserRepository(store *fdblayer.RecordStore) UserRepository {
-	return &userRepository{store: store}
+func NewUserRepository() UserRepository {
+	return &userRepository{}
 }
 
 // Create creates a new User entity in the database.
-func (r *userRepository) Create(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *User) error {
+func (r *userRepository) Create(ctx context.Context, tx *fdblayer.Tx, entity *User) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	typeID, err := r.store.GetTypeID("User")
-	if err != nil {
-		return err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
+	key := dir.Pack(tuple.Tuple{UserTypeID, fdblayer.DataNamespace, entity.Id})
 	if existing := tr.Get(key).MustGet(); existing != nil {
 		return fmt.Errorf("user %w", fdblayer.ErrAlreadyExists)
 	}
@@ -53,30 +51,27 @@ func (r *userRepository) Create(ctx context.Context, tr fdblayer.Transaction, di
 	tr.Set(key, value)
 
 	// Standard index
-	tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, entity.Email, entity.Id}), []byte{})
+	tr.Set(dir.Pack(tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, 2324124615, entity.Email, entity.Id}), []byte{})
 
 	return nil
 }
 
 // Get retrieves a User entity by its primary key.
-func (r *userRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk string) (*User, error) {
+func (r *userRepository) Get(ctx context.Context, tx *fdblayer.Tx, pk string) (*User, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	typeID, err := r.store.GetTypeID("User")
-	if err != nil {
-		return nil, err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
+	key := dir.Pack(tuple.Tuple{UserTypeID, fdblayer.DataNamespace, pk})
 	valueFuture := tr.Get(key)
 	value := valueFuture.MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("user %w", fdblayer.ErrNotFound)
 	}
 	entity := &User{}
-	err = proto.Unmarshal(value, entity)
-	if err != nil {
+	if err := proto.Unmarshal(value, entity); err != nil {
 		return nil, err
 	}
 
@@ -84,18 +79,16 @@ func (r *userRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir di
 }
 
 // Set updates an existing User entity in the database (or inserts it if not present).
-func (r *userRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *User) error {
+func (r *userRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *User) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	typeID, err := r.store.GetTypeID("User")
-	if err != nil {
-		return err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
 	var old *User
 
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
+	key := dir.Pack(tuple.Tuple{UserTypeID, fdblayer.DataNamespace, entity.Id})
 
 	if oldValue := tr.Get(key).MustGet(); oldValue != nil {
 		var unmarshaled User
@@ -116,25 +109,23 @@ func (r *userRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 	// Standard index
 	if old == nil || old.Email != entity.Email {
 		if old != nil {
-			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, old.Email, old.Id}))
+			tr.Clear(dir.Pack(tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, 2324124615, old.Email, old.Id}))
 		}
-		tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, entity.Email, entity.Id}), []byte{})
+		tr.Set(dir.Pack(tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, 2324124615, entity.Email, entity.Id}), []byte{})
 	}
 
 	return nil
 }
 
 // Delete removes a User entity from the database.
-func (r *userRepository) Delete(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string) error {
+func (r *userRepository) Delete(ctx context.Context, tx *fdblayer.Tx, pk string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	typeID, err := r.store.GetTypeID("User")
-	if err != nil {
-		return err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
+	key := dir.Pack(tuple.Tuple{UserTypeID, fdblayer.DataNamespace, pk})
 	value := tr.Get(key).MustGet()
 	if value != nil {
 		entity := &User{}
@@ -143,7 +134,7 @@ func (r *userRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 		}
 		entity.Id = pk
 		// Standard index
-		tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, entity.Email, entity.Id}))
+		tr.Clear(dir.Pack(tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, 2324124615, entity.Email, entity.Id}))
 	}
 	tr.Clear(key)
 
@@ -151,23 +142,21 @@ func (r *userRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 }
 
 // BatchGet retrieves multiple User entities by their primary keys.
-func (r *userRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*User, error) {
+func (r *userRepository) BatchGet(ctx context.Context, tx *fdblayer.Tx, pks []string) ([]*User, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if len(pks) == 0 {
 		return nil, nil
 	}
-	typeID, err := r.store.GetTypeID("User")
-	if err != nil {
-		return nil, err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 	futures := make([]fdb.FutureByteSlice, len(pks))
 	for i, pk := range pks {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
+		key := dir.Pack(tuple.Tuple{UserTypeID, fdblayer.DataNamespace, pk})
 		futures[i] = tr.Get(key)
 	}
 	entities := make([]*User, 0, len(pks))
@@ -189,14 +178,12 @@ func (r *userRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction, d
 }
 
 // List retrieves a list of User entities starting from the given key.
-func (r *userRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*User], error) {
+func (r *userRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*User], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	typeID, err := r.store.GetTypeID("User")
-	if err != nil {
-		return nil, err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
 	result := &fdblayer.PaginatedResult[*User]{
 		Items: make([]*User, 0),
@@ -204,7 +191,7 @@ func (r *userRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir d
 
 	// Compute data prefix range (scoped to opts.Prefix when provided).
 	prefixTpl := make(tuple.Tuple, 2+len(opts.Prefix))
-	prefixTpl[0] = typeID
+	prefixTpl[0] = UserTypeID
 	prefixTpl[1] = fdblayer.DataNamespace
 	for j, el := range opts.Prefix {
 		prefixTpl[2+j] = fdblayer.NormalizeTupleElement(el)
@@ -216,7 +203,7 @@ func (r *userRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir d
 	}
 
 	beginTpl := make(tuple.Tuple, 2+len(opts.Begin))
-	beginTpl[0] = typeID
+	beginTpl[0] = UserTypeID
 	beginTpl[1] = fdblayer.DataNamespace
 	for j, el := range opts.Begin {
 		beginTpl[2+j] = fdblayer.NormalizeTupleElement(el)
@@ -281,19 +268,17 @@ func (r *userRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir d
 }
 
 // GetByEmail retrieves a paginated page of User entities by their Email index.
-func (r *userRepository) GetByEmail(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Email string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*User], error) {
+func (r *userRepository) GetByEmail(ctx context.Context, tx *fdblayer.Tx, Email string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*User], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	typeID, err := r.store.GetTypeID("User")
-	if err != nil {
-		return nil, err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
 	result := &fdblayer.PaginatedResult[*User]{
 		Items: make([]*User, 0),
 	}
-	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, 2324124615, Email}
+	baseTpl := tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, 2324124615, Email}
 	indexKeyPrefix := dir.Pack(baseTpl)
 	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
 	if err != nil {
@@ -355,7 +340,7 @@ func (r *userRepository) GetByEmail(ctx context.Context, tr fdb.ReadTransaction,
 		}
 		pkTuple := tpl[pkIndexStart:]
 		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
-		keyTpl[0] = typeID
+		keyTpl[0] = UserTypeID
 		keyTpl[1] = fdblayer.DataNamespace
 		copy(keyTpl[2:], pkTuple)
 		futures[i] = tr.Get(dir.Pack(keyTpl))

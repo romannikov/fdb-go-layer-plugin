@@ -27,20 +27,16 @@ func TestIntegration_CreateAndGetPost(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	postRepo := store.NewPostRepository(recordStore)
+	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
-			return err
-		}
-		return postRepo.Create(ctx, tr, dir, &store.Post{Id: "p1", Tags: []string{"go", "fdb", "testing"}})
+		return postRepo.Create(ctx, fdblayer.NewTx(tr, dir), &store.Post{Id: "p1", Tags: []string{"go", "fdb", "testing"}})
 	})
 
 	var post *store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		post, err = postRepo.Get(ctx, tr, dir, "p1")
+		post, err = postRepo.Get(ctx, fdblayer.NewTx(tr, dir), "p1")
 		return err
 	})
 	if post.Id != "p1" {
@@ -57,26 +53,23 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	postRepo := store.NewPostRepository(recordStore)
+	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
+		tx := fdblayer.NewTx(tr, dir)
+		if err := postRepo.Create(ctx, tx, &store.Post{Id: "p1", Tags: []string{"go", "fdb"}}); err != nil {
 			return err
 		}
-		if err := postRepo.Create(ctx, tr, dir, &store.Post{Id: "p1", Tags: []string{"go", "fdb"}}); err != nil {
+		if err := postRepo.Create(ctx, tx, &store.Post{Id: "p2", Tags: []string{"go", "rust"}}); err != nil {
 			return err
 		}
-		if err := postRepo.Create(ctx, tr, dir, &store.Post{Id: "p2", Tags: []string{"go", "rust"}}); err != nil {
-			return err
-		}
-		return postRepo.Create(ctx, tr, dir, &store.Post{Id: "p3", Tags: []string{"rust", "wasm"}})
+		return postRepo.Create(ctx, tx, &store.Post{Id: "p3", Tags: []string{"rust", "wasm"}})
 	})
 
 	// "go" should match p1 and p2
 	var posts []*store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.GetByTags(ctx, tr, dir, "go", fdblayer.PaginationOptions{})
+		res, err := postRepo.GetByTags(ctx, fdblayer.NewTx(tr, dir), "go", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -89,7 +82,7 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 
 	// "rust" should match p2 and p3
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.GetByTags(ctx, tr, dir, "rust", fdblayer.PaginationOptions{})
+		res, err := postRepo.GetByTags(ctx, fdblayer.NewTx(tr, dir), "rust", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -102,7 +95,7 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 
 	// "fdb" should match only p1
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.GetByTags(ctx, tr, dir, "fdb", fdblayer.PaginationOptions{})
+		res, err := postRepo.GetByTags(ctx, fdblayer.NewTx(tr, dir), "fdb", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -115,7 +108,7 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 
 	// "wasm" should match only p3
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.GetByTags(ctx, tr, dir, "wasm", fdblayer.PaginationOptions{})
+		res, err := postRepo.GetByTags(ctx, fdblayer.NewTx(tr, dir), "wasm", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -128,7 +121,7 @@ func TestIntegration_GetPostByTags_FanOut(t *testing.T) {
 
 	// Nonexistent tag
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.GetByTags(ctx, tr, dir, "python", fdblayer.PaginationOptions{})
+		res, err := postRepo.GetByTags(ctx, fdblayer.NewTx(tr, dir), "python", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -146,25 +139,21 @@ func TestIntegration_SetPost_FanOutIndexUpdated(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	postRepo := store.NewPostRepository(recordStore)
+	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
-			return err
-		}
-		return postRepo.Create(ctx, tr, dir, &store.Post{Id: "p1", Tags: []string{"alpha", "beta"}})
+		return postRepo.Create(ctx, fdblayer.NewTx(tr, dir), &store.Post{Id: "p1", Tags: []string{"alpha", "beta"}})
 	})
 
 	// Update tags: remove "alpha", keep "beta", add "gamma"
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return postRepo.Set(ctx, tr, dir, &store.Post{Id: "p1", Tags: []string{"beta", "gamma"}})
+		return postRepo.Set(ctx, fdblayer.NewTx(tr, dir), &store.Post{Id: "p1", Tags: []string{"beta", "gamma"}})
 	})
 
 	// "alpha" should no longer return any results (stale index cleared)
 	var posts []*store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.GetByTags(ctx, tr, dir, "alpha", fdblayer.PaginationOptions{})
+		res, err := postRepo.GetByTags(ctx, fdblayer.NewTx(tr, dir), "alpha", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -177,7 +166,7 @@ func TestIntegration_SetPost_FanOutIndexUpdated(t *testing.T) {
 
 	// "beta" should still find the post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.GetByTags(ctx, tr, dir, "beta", fdblayer.PaginationOptions{})
+		res, err := postRepo.GetByTags(ctx, fdblayer.NewTx(tr, dir), "beta", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -190,7 +179,7 @@ func TestIntegration_SetPost_FanOutIndexUpdated(t *testing.T) {
 
 	// "gamma" should find the post (new index entry)
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.GetByTags(ctx, tr, dir, "gamma", fdblayer.PaginationOptions{})
+		res, err := postRepo.GetByTags(ctx, fdblayer.NewTx(tr, dir), "gamma", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -208,25 +197,21 @@ func TestIntegration_DeletePost_ClearsFanOutIndex(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	postRepo := store.NewPostRepository(recordStore)
+	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
-			return err
-		}
-		return postRepo.Create(ctx, tr, dir, &store.Post{Id: "p1", Tags: []string{"x", "y", "z"}})
+		return postRepo.Create(ctx, fdblayer.NewTx(tr, dir), &store.Post{Id: "p1", Tags: []string{"x", "y", "z"}})
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return postRepo.Delete(ctx, tr, dir, "p1")
+		return postRepo.Delete(ctx, fdblayer.NewTx(tr, dir), "p1")
 	})
 
 	// All tag index entries should be cleared
 	for _, tag := range []string{"x", "y", "z"} {
 		var posts []*store.Post
 		tests.WithTx(t, db, func(tr fdb.Transaction) error {
-			res, err := postRepo.GetByTags(ctx, tr, dir, tag, fdblayer.PaginationOptions{})
+			res, err := postRepo.GetByTags(ctx, fdblayer.NewTx(tr, dir), tag, fdblayer.PaginationOptions{})
 			if err != nil {
 				return err
 			}
@@ -240,7 +225,7 @@ func TestIntegration_DeletePost_ClearsFanOutIndex(t *testing.T) {
 
 	// Get should fail
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		return postRepo.Get(ctx, tr, dir, "p1")
+		return postRepo.Get(ctx, fdblayer.NewTx(tr, dir), "p1")
 	})
 	if err == nil {
 		t.Fatal("expected not found after delete")
@@ -253,16 +238,13 @@ func TestIntegration_ListPost_WithFanOutIndex(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	postRepo := store.NewPostRepository(recordStore)
+	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
-			return err
-		}
+		tx := fdblayer.NewTx(tr, dir)
 		// Create posts with multiple tags each — generates many index entries
 		for i := 0; i < 5; i++ {
-			if err := postRepo.Create(ctx, tr, dir, &store.Post{
+			if err := postRepo.Create(ctx, tx, &store.Post{
 				Id:   fmt.Sprintf("p%d", i),
 				Tags: []string{"common", fmt.Sprintf("unique%d", i)},
 			}); err != nil {
@@ -276,7 +258,7 @@ func TestIntegration_ListPost_WithFanOutIndex(t *testing.T) {
 	var result *fdblayer.PaginatedResult[*store.Post]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = postRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 10})
+		result, err = postRepo.List(ctx, fdblayer.NewTx(tr, dir), fdblayer.PaginationOptions{Limit: 10})
 		return err
 	})
 	if len(result.Items) != 5 {
@@ -293,15 +275,12 @@ func TestIntegration_ListPost_Pagination(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	postRepo := store.NewPostRepository(recordStore)
+	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
-			return err
-		}
+		tx := fdblayer.NewTx(tr, dir)
 		for i := 0; i < 5; i++ {
-			if err := postRepo.Create(ctx, tr, dir, &store.Post{
+			if err := postRepo.Create(ctx, tx, &store.Post{
 				Id:   fmt.Sprintf("p%d", i),
 				Tags: []string{"t1", "t2", "t3"},
 			}); err != nil {
@@ -315,7 +294,7 @@ func TestIntegration_ListPost_Pagination(t *testing.T) {
 	var page1 *fdblayer.PaginatedResult[*store.Post]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = postRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 2})
+		page1, err = postRepo.List(ctx, fdblayer.NewTx(tr, dir), fdblayer.PaginationOptions{Limit: 2})
 		return err
 	})
 	if len(page1.Items) != 2 {
@@ -328,7 +307,7 @@ func TestIntegration_ListPost_Pagination(t *testing.T) {
 	var page2 *fdblayer.PaginatedResult[*store.Post]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page2, err = postRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Begin: page1.NextKey, Limit: 2})
+		page2, err = postRepo.List(ctx, fdblayer.NewTx(tr, dir), fdblayer.PaginationOptions{Begin: page1.NextKey, Limit: 2})
 		return err
 	})
 	if len(page2.Items) != 2 {
@@ -338,7 +317,7 @@ func TestIntegration_ListPost_Pagination(t *testing.T) {
 	var page3 *fdblayer.PaginatedResult[*store.Post]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page3, err = postRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Begin: page2.NextKey, Limit: 2})
+		page3, err = postRepo.List(ctx, fdblayer.NewTx(tr, dir), fdblayer.PaginationOptions{Begin: page2.NextKey, Limit: 2})
 		return err
 	})
 	if len(page3.Items) != 1 {
@@ -355,20 +334,16 @@ func TestIntegration_Post_EmptyTags(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	postRepo := store.NewPostRepository(recordStore)
+	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
-			return err
-		}
-		return postRepo.Create(ctx, tr, dir, &store.Post{Id: "p1", Tags: []string{}})
+		return postRepo.Create(ctx, fdblayer.NewTx(tr, dir), &store.Post{Id: "p1", Tags: []string{}})
 	})
 
 	var post *store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		post, err = postRepo.Get(ctx, tr, dir, "p1")
+		post, err = postRepo.Get(ctx, fdblayer.NewTx(tr, dir), "p1")
 		return err
 	})
 	if post.Id != "p1" {
@@ -385,15 +360,12 @@ func TestIntegration_BatchGetPost(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	postRepo := store.NewPostRepository(recordStore)
+	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
-			return err
-		}
+		tx := fdblayer.NewTx(tr, dir)
 		for _, id := range []string{"p1", "p2", "p3"} {
-			if err := postRepo.Create(ctx, tr, dir, &store.Post{Id: id, Tags: []string{"tag"}}); err != nil {
+			if err := postRepo.Create(ctx, tx, &store.Post{Id: id, Tags: []string{"tag"}}); err != nil {
 				return err
 			}
 		}
@@ -403,7 +375,7 @@ func TestIntegration_BatchGetPost(t *testing.T) {
 	var result []*store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = postRepo.BatchGet(ctx, tr, dir, []string{"p1", "p2", "p3"})
+		result, err = postRepo.BatchGet(ctx, fdblayer.NewTx(tr, dir), []string{"p1", "p2", "p3"})
 		return err
 	})
 	if len(result) != 3 {
@@ -421,29 +393,26 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	userRepo := store.NewUserRepository(recordStore)
-	productRepo := store.NewProductRepository(recordStore)
-	postRepo := store.NewPostRepository(recordStore)
+	userRepo := store.NewUserRepository()
+	productRepo := store.NewProductRepository()
+	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"}); err != nil {
-			return err
-		}
+		tx := fdblayer.NewTx(tr, dir)
 		// Create entities of all types simultaneously
-		if err := userRepo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"}); err != nil {
+		if err := userRepo.Create(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"}); err != nil {
 			return err
 		}
-		if err := productRepo.Create(ctx, tr, dir, &store.Product{Id: "pr1", Name: "Widget", Category: "tools", Price: 10}); err != nil {
+		if err := productRepo.Create(ctx, tx, &store.Product{Id: "pr1", Name: "Widget", Category: "tools", Price: 10}); err != nil {
 			return err
 		}
-		return postRepo.Create(ctx, tr, dir, &store.Post{Id: "po1", Tags: []string{"go"}})
+		return postRepo.Create(ctx, tx, &store.Post{Id: "po1", Tags: []string{"go"}})
 	})
 
 	// Each type's operations should be completely isolated
 	var users []*store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := userRepo.GetByEmail(ctx, tr, dir, "a@test.com", fdblayer.PaginationOptions{})
+		res, err := userRepo.GetByEmail(ctx, fdblayer.NewTx(tr, dir), "a@test.com", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -456,7 +425,7 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 
 	var posts []*store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.GetByTags(ctx, tr, dir, "go", fdblayer.PaginationOptions{})
+		res, err := postRepo.GetByTags(ctx, fdblayer.NewTx(tr, dir), "go", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -471,7 +440,7 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 	var userResult *fdblayer.PaginatedResult[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		userResult, err = userRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 10})
+		userResult, err = userRepo.List(ctx, fdblayer.NewTx(tr, dir), fdblayer.PaginationOptions{Limit: 10})
 		return err
 	})
 	if len(userResult.Items) != 1 {
@@ -481,7 +450,7 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 	var postResult *fdblayer.PaginatedResult[*store.Post]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		postResult, err = postRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 10})
+		postResult, err = postRepo.List(ctx, fdblayer.NewTx(tr, dir), fdblayer.PaginationOptions{Limit: 10})
 		return err
 	})
 	if len(postResult.Items) != 1 {
@@ -495,36 +464,30 @@ func TestIntegration_QueueEnqueueDequeue(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	taskRepo := store.NewTaskMessageRepository(recordStore)
-
-	// Sync metadata
-	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir, []string{"TaskMessage"})
-	})
+	taskRepo := store.NewTaskMessageRepository()
 
 	// 1. Enqueue three tasks sequentially in separate transactions with out-of-order ShardIds (3, 1, 2)
 	// to verify global FIFO ordering by versionstamp rather than shard_id.
 	task1 := &store.TaskMessage{QueueName: "test_queue", ShardId: 3, Payload: []byte("task 1")}
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return taskRepo.Enqueue(ctx, tr, dir, task1)
+		return taskRepo.Enqueue(ctx, fdblayer.NewTx(tr, dir), task1)
 	})
 
 	task2 := &store.TaskMessage{QueueName: "test_queue", ShardId: 1, Payload: []byte("task 2")}
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return taskRepo.Enqueue(ctx, tr, dir, task2)
+		return taskRepo.Enqueue(ctx, fdblayer.NewTx(tr, dir), task2)
 	})
 
 	task3 := &store.TaskMessage{QueueName: "test_queue", ShardId: 2, Payload: []byte("task 3")}
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return taskRepo.Enqueue(ctx, tr, dir, task3)
+		return taskRepo.Enqueue(ctx, fdblayer.NewTx(tr, dir), task3)
 	})
 
 	// 2. Dequeue tasks and verify FIFO order across shards
 	var dequeued1 *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		dequeued1, err = taskRepo.Dequeue(ctx, tr, dir, "test_queue")
+		dequeued1, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), "test_queue")
 		return err
 	})
 	if dequeued1 == nil || string(dequeued1.Payload) != "task 1" || dequeued1.ShardId != 3 {
@@ -534,7 +497,7 @@ func TestIntegration_QueueEnqueueDequeue(t *testing.T) {
 	var dequeued2 *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		dequeued2, err = taskRepo.Dequeue(ctx, tr, dir, "test_queue")
+		dequeued2, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), "test_queue")
 		return err
 	})
 	if dequeued2 == nil || string(dequeued2.Payload) != "task 2" || dequeued2.ShardId != 1 {
@@ -544,7 +507,7 @@ func TestIntegration_QueueEnqueueDequeue(t *testing.T) {
 	var dequeued3 *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		dequeued3, err = taskRepo.Dequeue(ctx, tr, dir, "test_queue")
+		dequeued3, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), "test_queue")
 		return err
 	})
 	if dequeued3 == nil || string(dequeued3.Payload) != "task 3" || dequeued3.ShardId != 2 {
@@ -555,7 +518,7 @@ func TestIntegration_QueueEnqueueDequeue(t *testing.T) {
 	var emptyResult *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		emptyResult, err = taskRepo.Dequeue(ctx, tr, dir, "test_queue")
+		emptyResult, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), "test_queue")
 		return err
 	})
 	if emptyResult != nil {
@@ -569,31 +532,25 @@ func TestIntegration_MultipleQueues(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	taskRepo := store.NewTaskMessageRepository(recordStore)
-
-	// Sync metadata
-	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir, []string{"TaskMessage"})
-	})
+	taskRepo := store.NewTaskMessageRepository()
 
 	// 1. Enqueue task A to queue_A
 	taskA := &store.TaskMessage{QueueName: "queue_A", ShardId: 1, Payload: []byte("task A")}
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return taskRepo.Enqueue(ctx, tr, dir, taskA)
+		return taskRepo.Enqueue(ctx, fdblayer.NewTx(tr, dir), taskA)
 	})
 
 	// 2. Enqueue task B to queue_B
 	taskB := &store.TaskMessage{QueueName: "queue_B", ShardId: 1, Payload: []byte("task B")}
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return taskRepo.Enqueue(ctx, tr, dir, taskB)
+		return taskRepo.Enqueue(ctx, fdblayer.NewTx(tr, dir), taskB)
 	})
 
 	// 3. Dequeue from queue_A and verify it is task A
 	var dequeuedA *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		dequeuedA, err = taskRepo.Dequeue(ctx, tr, dir, "queue_A")
+		dequeuedA, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), "queue_A")
 		return err
 	})
 	if dequeuedA == nil || string(dequeuedA.Payload) != "task A" {
@@ -604,7 +561,7 @@ func TestIntegration_MultipleQueues(t *testing.T) {
 	var dequeuedB *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		dequeuedB, err = taskRepo.Dequeue(ctx, tr, dir, "queue_B")
+		dequeuedB, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), "queue_B")
 		return err
 	})
 	if dequeuedB == nil || string(dequeuedB.Payload) != "task B" {
@@ -615,7 +572,7 @@ func TestIntegration_MultipleQueues(t *testing.T) {
 	var emptyA *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		emptyA, err = taskRepo.Dequeue(ctx, tr, dir, "queue_A")
+		emptyA, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), "queue_A")
 		return err
 	})
 	if emptyA != nil {
@@ -625,7 +582,7 @@ func TestIntegration_MultipleQueues(t *testing.T) {
 	var emptyB *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		emptyB, err = taskRepo.Dequeue(ctx, tr, dir, "queue_B")
+		emptyB, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), "queue_B")
 		return err
 	})
 	if emptyB != nil {
@@ -639,23 +596,19 @@ func TestIntegration_QueueSameTransactionEnqueue(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	taskRepo := store.NewTaskMessageRepository(recordStore)
-
-	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir, []string{"TaskMessage"})
-	})
+	taskRepo := store.NewTaskMessageRepository()
 
 	// Enqueue two tasks with the SAME QueueName and ShardId in a SINGLE transaction.
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := taskRepo.Enqueue(ctx, tr, dir, &store.TaskMessage{
+		tx := fdblayer.NewTx(tr, dir)
+		if err := taskRepo.Enqueue(ctx, tx, &store.TaskMessage{
 			QueueName: "batch_q",
 			ShardId:   1,
 			Payload:   []byte("first"),
 		}); err != nil {
 			return err
 		}
-		return taskRepo.Enqueue(ctx, tr, dir, &store.TaskMessage{
+		return taskRepo.Enqueue(ctx, tx, &store.TaskMessage{
 			QueueName: "batch_q",
 			ShardId:   1,
 			Payload:   []byte("second"),
@@ -665,7 +618,7 @@ func TestIntegration_QueueSameTransactionEnqueue(t *testing.T) {
 	var d1, d2 *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		d1, err = taskRepo.Dequeue(ctx, tr, dir, "batch_q")
+		d1, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), "batch_q")
 		return err
 	})
 	if d1 == nil || string(d1.Payload) != "first" || len(d1.Versionstamp) != 12 {
@@ -674,7 +627,7 @@ func TestIntegration_QueueSameTransactionEnqueue(t *testing.T) {
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		d2, err = taskRepo.Dequeue(ctx, tr, dir, "batch_q")
+		d2, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), "batch_q")
 		return err
 	})
 	if d2 == nil || string(d2.Payload) != "second" || len(d2.Versionstamp) != 12 {
@@ -688,12 +641,7 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	orderRepo := store.NewOrderRepository(recordStore)
-
-	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir, []string{"Order"})
-	})
+	orderRepo := store.NewOrderRepository()
 
 	order1 := &store.Order{
 		TenantId:         "acme",
@@ -710,14 +658,14 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	}
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return orderRepo.Create(ctx, tr, dir, order1)
+		return orderRepo.Create(ctx, fdblayer.NewTx(tr, dir), order1)
 	})
 
 	pk := store.OrderPrimaryKey{TenantId: "acme", OrderSeq: 101}
 	var got *store.Order
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		got, err = orderRepo.Get(ctx, tr, dir, pk)
+		got, err = orderRepo.Get(ctx, fdblayer.NewTx(tr, dir), pk)
 		return err
 	})
 	if got.Priority != store.Order_PRIORITY_HIGH || got.Address.GetCity() != "Zurich" {
@@ -727,7 +675,7 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	// Compound index lookup
 	var byStatus []*store.Order
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := orderRepo.GetByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000, fdblayer.PaginationOptions{})
+		res, err := orderRepo.GetByStatusAndCreatedAt(ctx, fdblayer.NewTx(tr, dir), store.OrderStatus_ORDER_STATUS_PENDING, 1700000000, fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -741,7 +689,7 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	// Scalar bytes index lookup
 	var byReceipt []*store.Order
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := orderRepo.GetByReceiptHash(ctx, tr, dir, []byte{0xAA, 0xBB, 0x01}, fdblayer.PaginationOptions{})
+		res, err := orderRepo.GetByReceiptHash(ctx, fdblayer.NewTx(tr, dir), []byte{0xAA, 0xBB, 0x01}, fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -755,7 +703,7 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	// Fan-out repeated bytes index lookup
 	var byAttach []*store.Order
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := orderRepo.GetByAttachmentHashes(ctx, tr, dir, []byte{0x10, 0x20}, fdblayer.PaginationOptions{})
+		res, err := orderRepo.GetByAttachmentHashes(ctx, fdblayer.NewTx(tr, dir), []byte{0x10, 0x20}, fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -768,7 +716,7 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 
 	// Update via Set
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return orderRepo.Set(ctx, tr, dir, &store.Order{
+		return orderRepo.Set(ctx, fdblayer.NewTx(tr, dir), &store.Order{
 			TenantId:         "acme",
 			OrderSeq:         101,
 			Status:           store.OrderStatus_ORDER_STATUS_SHIPPED,
@@ -780,7 +728,7 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := orderRepo.GetByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000, fdblayer.PaginationOptions{})
+		res, err := orderRepo.GetByStatusAndCreatedAt(ctx, fdblayer.NewTx(tr, dir), store.OrderStatus_ORDER_STATUS_PENDING, 1700000000, fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -792,7 +740,7 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	}
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := orderRepo.GetByAttachmentHashes(ctx, tr, dir, []byte{0x50, 0x60}, fdblayer.PaginationOptions{})
+		res, err := orderRepo.GetByAttachmentHashes(ctx, fdblayer.NewTx(tr, dir), []byte{0x50, 0x60}, fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -805,10 +753,10 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 
 	// Delete
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return orderRepo.Delete(ctx, tr, dir, pk)
+		return orderRepo.Delete(ctx, fdblayer.NewTx(tr, dir), pk)
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := orderRepo.GetByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000, fdblayer.PaginationOptions{})
+		res, err := orderRepo.GetByStatusAndCreatedAt(ctx, fdblayer.NewTx(tr, dir), store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000, fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -826,24 +774,20 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	auditRepo := store.NewAuditLogRepository(recordStore)
-
-	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir, []string{"AuditLog"})
-	})
+	auditRepo := store.NewAuditLogRepository()
 
 	// 1. Create two AuditLog entities in the same transaction with initial atomic Views,
 	// standard index (Actor), and fan-out index (Tags).
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := auditRepo.Create(ctx, tr, dir, &store.AuditLog{
+		tx := fdblayer.NewTx(tr, dir)
+		if err := auditRepo.Create(ctx, tx, &store.AuditLog{
 			Actor: "alice",
 			Tags:  []string{"auth", "login"},
 			Views: 10,
 		}); err != nil {
 			return err
 		}
-		return auditRepo.Create(ctx, tr, dir, &store.AuditLog{
+		return auditRepo.Create(ctx, tx, &store.AuditLog{
 			Actor: "bob",
 			Tags:  []string{"auth", "logout"},
 			Views: 5,
@@ -854,7 +798,7 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	var listed *fdblayer.PaginatedResult[*store.AuditLog]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		listed, err = auditRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 10})
+		listed, err = auditRepo.List(ctx, fdblayer.NewTx(tr, dir), fdblayer.PaginationOptions{Limit: 10})
 		return err
 	})
 	if len(listed.Items) != 2 || len(listed.Items[0].LogId) != 12 || len(listed.Items[1].LogId) != 12 {
@@ -873,7 +817,7 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	var got *store.AuditLog
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		got, err = auditRepo.Get(ctx, tr, dir, firstID)
+		got, err = auditRepo.Get(ctx, fdblayer.NewTx(tr, dir), firstID)
 		return err
 	})
 	if got.Actor != "alice" || !bytes.Equal(got.LogId, firstID) || got.Views != 10 {
@@ -883,12 +827,13 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	// 4. Query by standard index (GetAuditLogByActor) and fan-out index (GetAuditLogByTags)
 	var byActor, byTagAuth []*store.AuditLog
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		resActor, err := auditRepo.GetByActor(ctx, tr, dir, "alice", fdblayer.PaginationOptions{})
+		tx := fdblayer.NewTx(tr, dir)
+		resActor, err := auditRepo.GetByActor(ctx, tx, "alice", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
 		byActor = resActor.Items
-		resTag, err := auditRepo.GetByTags(ctx, tr, dir, "auth", fdblayer.PaginationOptions{})
+		resTag, err := auditRepo.GetByTags(ctx, tx, "auth", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -906,7 +851,7 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	var batchRes []*store.AuditLog
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		batchRes, err = auditRepo.BatchGet(ctx, tr, dir, [][]byte{firstID, secondID})
+		batchRes, err = auditRepo.BatchGet(ctx, fdblayer.NewTx(tr, dir), [][]byte{firstID, secondID})
 		return err
 	})
 	if len(batchRes) != 2 {
@@ -923,20 +868,21 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 
 	// 6. AddAuditLogViews atomic mutator
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return auditRepo.AddViews(ctx, tr, dir, firstID, 7)
+		return auditRepo.AddViews(ctx, fdblayer.NewTx(tr, dir), firstID, 7)
 	})
 
 	// 7. Set on existing entity updates in-place (preserving LogId and Views) and updates indexes;
 	// Set on empty LogId creates a new entity.
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := auditRepo.Set(ctx, tr, dir, &store.AuditLog{
+		tx := fdblayer.NewTx(tr, dir)
+		if err := auditRepo.Set(ctx, tx, &store.AuditLog{
 			LogId: firstID,
 			Actor: "alice_admin",
 			Tags:  []string{"auth", "elevated"},
 		}); err != nil {
 			return err
 		}
-		return auditRepo.Set(ctx, tr, dir, &store.AuditLog{
+		return auditRepo.Set(ctx, tx, &store.AuditLog{
 			Actor: "charlie",
 			Tags:  []string{"audit"},
 			Views: 3,
@@ -945,31 +891,32 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 
 	var oldActor, newActor, oldTag, newTag, charlieLogs []*store.AuditLog
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		tx := fdblayer.NewTx(tr, dir)
 		var err error
-		if got, err = auditRepo.Get(ctx, tr, dir, firstID); err != nil {
+		if got, err = auditRepo.Get(ctx, tx, firstID); err != nil {
 			return err
 		}
-		res, err := auditRepo.GetByActor(ctx, tr, dir, "alice", fdblayer.PaginationOptions{})
+		res, err := auditRepo.GetByActor(ctx, tx, "alice", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
 		oldActor = res.Items
-		res, err = auditRepo.GetByActor(ctx, tr, dir, "alice_admin", fdblayer.PaginationOptions{})
+		res, err = auditRepo.GetByActor(ctx, tx, "alice_admin", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
 		newActor = res.Items
-		res, err = auditRepo.GetByTags(ctx, tr, dir, "login", fdblayer.PaginationOptions{})
+		res, err = auditRepo.GetByTags(ctx, tx, "login", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
 		oldTag = res.Items
-		res, err = auditRepo.GetByTags(ctx, tr, dir, "elevated", fdblayer.PaginationOptions{})
+		res, err = auditRepo.GetByTags(ctx, tx, "elevated", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
 		newTag = res.Items
-		res, err = auditRepo.GetByActor(ctx, tr, dir, "charlie", fdblayer.PaginationOptions{})
+		res, err = auditRepo.GetByActor(ctx, tx, "charlie", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -992,14 +939,15 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	// 7b. ListAuditLog pagination with raw []byte Begin cursor and invalid Set length check
 	var pageFromSecond *fdblayer.PaginatedResult[*store.AuditLog]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		if err := auditRepo.Set(ctx, tr, dir, &store.AuditLog{
+		tx := fdblayer.NewTx(tr, dir)
+		if err := auditRepo.Set(ctx, tx, &store.AuditLog{
 			LogId: []byte{1, 2, 3},
 			Actor: "invalid",
 		}); err == nil {
 			t.Fatalf("expected Set with 3-byte LogId to fail")
 		}
 		var err error
-		pageFromSecond, err = auditRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{
+		pageFromSecond, err = auditRepo.List(ctx, tx, fdblayer.PaginationOptions{
 			Begin: tuple.Tuple{secondID},
 			Limit: 1,
 		})
@@ -1011,20 +959,21 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 
 	// 8. Delete clears primary record, standard index, fan-out index, and atomic field
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return auditRepo.Delete(ctx, tr, dir, firstID)
+		return auditRepo.Delete(ctx, fdblayer.NewTx(tr, dir), firstID)
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := auditRepo.GetByActor(ctx, tr, dir, "alice_admin", fdblayer.PaginationOptions{})
+		tx := fdblayer.NewTx(tr, dir)
+		res, err := auditRepo.GetByActor(ctx, tx, "alice_admin", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
 		newActor = res.Items
-		res, err = auditRepo.GetByTags(ctx, tr, dir, "elevated", fdblayer.PaginationOptions{})
+		res, err = auditRepo.GetByTags(ctx, tx, "elevated", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
 		newTag = res.Items
-		res, err = auditRepo.GetByTags(ctx, tr, dir, "auth", fdblayer.PaginationOptions{})
+		res, err = auditRepo.GetByTags(ctx, tx, "auth", fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
@@ -1045,19 +994,15 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	recordStore := fdblayer.NewRecordStore()
-	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return recordStore.SyncMetadata(ctx, tr, dir, []string{"TaskMessage", "Order"})
-	})
-
-	taskRepo := store.NewTaskMessageRepository(recordStore)
-	orderRepo := store.NewOrderRepository(recordStore)
+	taskRepo := store.NewTaskMessageRepository()
+	orderRepo := store.NewOrderRepository()
 
 	// 1. Enqueue 3 messages in the same transaction (including pre-filled Versionstamp to test BUG-4)
-	// and dequeue in batches of 2 then 2 (testing PERF-5 and BUG-2 automatic cross-tx reset).
+	// and dequeue in batches of 2 then 2 (testing PERF-5 and per-Tx userVersionSeq isolation).
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		tx := fdblayer.NewTx(tr, dir)
 		for i := 1; i <= 3; i++ {
-			if err := taskRepo.Enqueue(ctx, tr, dir, &store.TaskMessage{
+			if err := taskRepo.Enqueue(ctx, tx, &store.TaskMessage{
 				QueueName:    "batch_live",
 				ShardId:      uint32(i),
 				Versionstamp: []byte{9, 9, 9},
@@ -1072,7 +1017,7 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 	var batch1, batch2 []*store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		batch1, err = taskRepo.DequeueBatch(ctx, tr, dir, "batch_live", 2)
+		batch1, err = taskRepo.DequeueBatch(ctx, fdblayer.NewTx(tr, dir), "batch_live", 2)
 		return err
 	})
 	if len(batch1) != 2 || string(batch1[0].Payload) != "msg-1" || string(batch1[1].Payload) != "msg-2" || len(batch1[0].Versionstamp) != 12 {
@@ -1081,7 +1026,7 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		batch2, err = taskRepo.DequeueBatch(ctx, tr, dir, "batch_live", 2)
+		batch2, err = taskRepo.DequeueBatch(ctx, fdblayer.NewTx(tr, dir), "batch_live", 2)
 		return err
 	})
 	if len(batch2) != 1 || string(batch2[0].Payload) != "msg-3" {
@@ -1090,8 +1035,9 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 
 	// 2. Prefix + Reverse pagination on compound PK Order in live FDB (PERF-1, PERF-3, BUG-5)
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		tx := fdblayer.NewTx(tr, dir)
 		for _, seq := range []int32{10, 20, 30} {
-			if err := orderRepo.Create(ctx, tr, dir, &store.Order{
+			if err := orderRepo.Create(ctx, tx, &store.Order{
 				TenantId: "tenant_a",
 				OrderSeq: seq,
 				Status:   store.OrderStatus_ORDER_STATUS_PENDING,
@@ -1099,7 +1045,7 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 				return err
 			}
 		}
-		return orderRepo.Create(ctx, tr, dir, &store.Order{
+		return orderRepo.Create(ctx, tx, &store.Order{
 			TenantId: "tenant_b",
 			OrderSeq: 99,
 			Status:   store.OrderStatus_ORDER_STATUS_PENDING,
@@ -1109,8 +1055,9 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 	var page1, page2 *fdblayer.PaginatedResult[*store.Order]
 	var byPK []*store.Order
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		tx := fdblayer.NewTx(tr, dir)
 		var err error
-		page1, err = orderRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{
+		page1, err = orderRepo.List(ctx, tx, fdblayer.PaginationOptions{
 			Prefix:  tuple.Tuple{"tenant_a"},
 			Limit:   2,
 			Reverse: true,
@@ -1118,7 +1065,7 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		page2, err = orderRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{
+		page2, err = orderRepo.List(ctx, tx, fdblayer.PaginationOptions{
 			Prefix:  tuple.Tuple{"tenant_a"},
 			Begin:   page1.NextKey,
 			Limit:   2,
@@ -1127,7 +1074,7 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		byPK, err = orderRepo.BatchGet(ctx, tr, dir, []store.OrderPrimaryKey{
+		byPK, err = orderRepo.BatchGet(ctx, tx, []store.OrderPrimaryKey{
 			{TenantId: "tenant_a", OrderSeq: 10},
 			{TenantId: "tenant_b", OrderSeq: 99},
 		})
@@ -1147,32 +1094,33 @@ func TestIntegration_DequeueBatch_AndPrefixReverseListOrder(t *testing.T) {
 	var allPending []*store.Order
 	var statusFwd1, statusFwd2, statusRev1, statusRev2 *fdblayer.PaginatedResult[*store.Order]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{})
+		tx := fdblayer.NewTx(tr, dir)
+		res, err := orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{})
 		if err != nil {
 			return err
 		}
 		allPending = res.Items
-		statusFwd1, err = orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
+		statusFwd1, err = orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
 			Limit: 2,
 		})
 		if err != nil {
 			return err
 		}
-		statusFwd2, err = orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
+		statusFwd2, err = orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
 			Begin: statusFwd1.NextKey,
 			Limit: 3,
 		})
 		if err != nil {
 			return err
 		}
-		statusRev1, err = orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
+		statusRev1, err = orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
 			Limit:   2,
 			Reverse: true,
 		})
 		if err != nil {
 			return err
 		}
-		statusRev2, err = orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
+		statusRev2, err = orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
 			Begin:   statusRev1.NextKey,
 			Limit:   3,
 			Reverse: true,

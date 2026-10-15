@@ -155,15 +155,17 @@ func TestGenerateMessage_EntityAndQueue(t *testing.T) {
 	out := p.sb.String()
 
 	for _, expectedSnippet := range []string{
+		fmt.Sprintf("const OrderTypeID int64 = %d", ir.ComputeTypeID("Order")),
+		"func NewOrderRepository() OrderRepository {",
 		"type OrderPrimaryKey struct {",
-		"func (r *orderRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk OrderPrimaryKey)",
-		"func (r *orderRepository) GetByStatusAndOrderSeq(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, OrderSeq uint64, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)",
-		"func (r *orderRepository) GetByStatus(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Status OrderStatus, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)",
-		"func (r *orderRepository) GetByHashes(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Hashes []byte, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)",
-		"func (r *orderRepository) AddCounter(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk OrderPrimaryKey, val int64)",
-		"func (r *orderRepository) SetCounter(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk OrderPrimaryKey, val int64)",
-		"func (r *orderRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []OrderPrimaryKey) ([]*Order, error)",
-		"func (r *orderRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)",
+		"func (r *orderRepository) Get(ctx context.Context, tx *fdblayer.Tx, pk OrderPrimaryKey)",
+		"func (r *orderRepository) GetByStatusAndOrderSeq(ctx context.Context, tx *fdblayer.Tx, Status OrderStatus, OrderSeq uint64, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)",
+		"func (r *orderRepository) GetByStatus(ctx context.Context, tx *fdblayer.Tx, Status OrderStatus, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)",
+		"func (r *orderRepository) GetByHashes(ctx context.Context, tx *fdblayer.Tx, Hashes []byte, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)",
+		"func (r *orderRepository) AddCounter(ctx context.Context, tx *fdblayer.Tx, pk OrderPrimaryKey, val int64)",
+		"func (r *orderRepository) SetCounter(ctx context.Context, tx *fdblayer.Tx, pk OrderPrimaryKey, val int64)",
+		"func (r *orderRepository) BatchGet(ctx context.Context, tx *fdblayer.Tx, pks []OrderPrimaryKey) ([]*Order, error)",
+		"func (r *orderRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)",
 		"fdblayer.ErrNotFound",
 		"oldSet := make(map[string]struct{}, len(old.Hashes))",
 	} {
@@ -179,6 +181,7 @@ func TestGenerateMessage_EntityAndQueue(t *testing.T) {
 	queueSpec := ir.MessageSpec{
 		Name:             "TaskMessage",
 		GoPackageName:    "testspb",
+		TypeID:           42,
 		Fields:           []ir.FieldSpec{qName, vs, shardID},
 		PrimaryKeyFields: []ir.FieldSpec{qName, vs, shardID},
 		IsQueue:          true,
@@ -189,10 +192,12 @@ func TestGenerateMessage_EntityAndQueue(t *testing.T) {
 	qOut := qp.sb.String()
 
 	for _, expectedSnippet := range []string{
-		"func (r *taskmessageRepository) Enqueue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *TaskMessage)",
-		"func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string)",
-		"func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string, limit int)",
-		"userVersion, err := r.store.NextUserVersion()",
+		"const TaskMessageTypeID int64 = 42",
+		"func NewTaskMessageRepository() TaskMessageRepository {",
+		"func (r *taskmessageRepository) Enqueue(ctx context.Context, tx *fdblayer.Tx, entity *TaskMessage)",
+		"func (r *taskmessageRepository) Dequeue(ctx context.Context, tx *fdblayer.Tx, queuename string)",
+		"func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tx *fdblayer.Tx, queuename string, limit int)",
+		"userVersion, err := tx.NextUserVersion()",
 		"tr.SetVersionstampedKey(key, value)",
 		"tuple.IncompleteVersionstamp(userVersion)",
 	} {
@@ -266,16 +271,16 @@ func TestGenerateMessage_NonQueueVersionstampWithIndexesAndAtomics(t *testing.T)
 	}
 
 	for _, expectedSnippet := range []string{
-		"userVersion, err := r.store.NextUserVersion()",
+		"userVersion, err := tx.NextUserVersion()",
 		"tuple.IncompleteVersionstamp(userVersion)",
-		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.IndexNamespace, 1001, entity.Actor, tuple.IncompleteVersionstamp(userVersion)})",
-		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.IndexNamespace, 1002,",
-		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.IndexNamespace, 1003, entity.Action, tuple.IncompleteVersionstamp(userVersion)})",
-		"fieldKey, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.FieldNamespace, tuple.IncompleteVersionstamp(userVersion), 4})",
+		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 1001, entity.Actor, tuple.IncompleteVersionstamp(userVersion)})",
+		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 1002,",
+		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 1003, entity.Action, tuple.IncompleteVersionstamp(userVersion)})",
+		"fieldKey, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.FieldNamespace, tuple.IncompleteVersionstamp(userVersion), 4})",
 		"entity.LogId = fdblayer.BytesToVersionstamp(pk).Bytes()",
 		"if len(entity.LogId) != 0 && len(entity.LogId) != 12 {",
 		"if !hasOldVS {",
-		"return r.Create(ctx, tr, dir, entity)",
+		"return r.Create(ctx, tx, entity)",
 		"unmarshaled.LogId = entity.LogId",
 		"entity.LogId = pk",
 		"beginTpl[2+0] = fdblayer.BytesToVersionstamp(rawVS)",
@@ -301,6 +306,7 @@ func TestGenerateGoRepository_KeywordQueueParam(t *testing.T) {
 		{"tuple", "Tuple"},
 		{"len", "Len"},
 		{"string", "String"},
+		{"tx", "Tx"},
 	} {
 		qField := ir.FieldSpec{ProtoName: reserved.protoName, GoName: reserved.goName, Number: 1, Kind: ir.KindString}
 		spec := ir.MessageSpec{

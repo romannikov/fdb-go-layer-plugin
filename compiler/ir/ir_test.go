@@ -88,6 +88,51 @@ func TestComputeIndexID_MatchesReferenceHashes(t *testing.T) {
 	}
 }
 
+func TestComputeTypeID_ExplicitTypeIDAndCollision(t *testing.T) {
+	userTypeID := ComputeTypeID("User")
+	productTypeID := ComputeTypeID("Product")
+	if userTypeID == 0 || productTypeID == 0 || userTypeID == productTypeID {
+		t.Fatalf("expected distinct non-zero FNV-1a type IDs for User (%d) and Product (%d)", userTypeID, productTypeID)
+	}
+
+	fields := []FieldSpec{
+		{ProtoName: "id", GoName: "Id", Kind: KindString},
+	}
+	fieldMap := map[string]FieldSpec{
+		"id": fields[0],
+	}
+
+	defaultSpec, err := BuildMessageSpec("User", fields, fieldMap, []string{"id"}, nil, false)
+	if err != nil {
+		t.Fatalf("BuildMessageSpec failed: %v", err)
+	}
+	if defaultSpec.TypeID != userTypeID {
+		t.Fatalf("expected default TypeID %d, got %d", userTypeID, defaultSpec.TypeID)
+	}
+
+	explicitSpec, err := BuildMessageSpecWithTypeID("Account", fields, fieldMap, []string{"id"}, nil, false, 42)
+	if err != nil {
+		t.Fatalf("BuildMessageSpecWithTypeID failed: %v", err)
+	}
+	if explicitSpec.TypeID != 42 {
+		t.Fatalf("expected explicit TypeID 42, got %d", explicitSpec.TypeID)
+	}
+
+	// Distinct TypeIDs pass validation
+	if err := ValidateUniqueTypeIDs([]MessageSpec{*defaultSpec, *explicitSpec}); err != nil {
+		t.Fatalf("expected distinct TypeIDs to pass validation, got %v", err)
+	}
+
+	// Colliding TypeIDs fail validation
+	collidingSpec, err := BuildMessageSpecWithTypeID("Profile", fields, fieldMap, []string{"id"}, nil, false, 42)
+	if err != nil {
+		t.Fatalf("BuildMessageSpecWithTypeID failed: %v", err)
+	}
+	if err := ValidateUniqueTypeIDs([]MessageSpec{*explicitSpec, *collidingSpec}); err == nil || !strings.Contains(err.Error(), "collision") {
+		t.Fatalf("expected message type ID collision error, got %v", err)
+	}
+}
+
 func TestBuildSecondaryIndex_ExplicitIDAndCollision(t *testing.T) {
 	fieldMap := map[string]FieldSpec{
 		"email": {ProtoName: "email", GoName: "Email", Kind: KindString},

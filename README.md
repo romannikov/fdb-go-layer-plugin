@@ -8,11 +8,11 @@ The compiler is structured around a **language-neutral Intermediate Representati
 
 ## Supported Features
 
-- **Shared Protobuf Annotations (`proto/fdb-layer/annotations.proto`)**: Single source of truth for primary keys, secondary/fan-out indexes, atomic field mutations, versionstamped primary keys, and FIFO queues.
+- **Shared Protobuf Annotations (`proto/fdb-layer/annotations.proto`)**: Single source of truth for compile-time message `type_id`s, primary keys, secondary/fan-out indexes, atomic field mutations, versionstamped primary keys, and FIFO queues.
 - **Extensible Compiler Architecture**:
-  - `compiler/ir`: Extracts `FileSpec`, `MessageSpec`, `FieldSpec`, `SecondaryIndexSpec`, and `IndexPrefixSpec` from `protogen.File`, validates all schema invariants, and computes deterministic 32-bit FNV-1a index IDs.
+  - `compiler/ir`: Extracts `FileSpec`, `MessageSpec`, `FieldSpec`, `SecondaryIndexSpec`, and `IndexPrefixSpec` from `protogen.File`, validates all schema invariants (including `type_id` uniqueness across the compilation unit), and computes deterministic 32-bit FNV-1a message `type_id`s and index IDs.
   - `compiler/backend`: Defines the language-agnostic `Generator` interface, `Registry`, `Options`, and `RunProtogen` helper.
-  - `compiler/backend/golang`: Emits strongly-typed `*.fdb.go` repositories for Go.
+  - `compiler/backend/golang`: Emits strongly-typed, zero-allocation `*.fdb.go` repositories for Go with compile-time `<MsgName>TypeID` constants.
 - **CRUD Operations**: Full support for `Create` (with `ErrAlreadyExists` protection), `Get` (with `ErrNotFound`), `Set` (with minimal-write index delta updates), `Delete`, strongly-typed `BatchGet`, and cursor-paginated `List` (including compound primary key `opts.Prefix` filtering).
 - **Primary Keys**: Single-field and compound primary keys composed of scalar, `bytes`, or `enum` fields.
 - **Secondary & Fan-Out Indexes**:
@@ -20,7 +20,7 @@ The compiler is structured around a **language-neutral Intermediate Representati
   - Automatic generation of **partial-prefix query methods** (`GetBy<Prefix>`) for leading prefixes of composite secondary indexes.
   - **Fan-out** indexes on `repeated` fields with deduplication and minimal-write delta updates on `Set`.
 - **Atomic Operations**: Support for FoundationDB atomic mutations (`MUTATION_ADD`, `MUTATION_MAX`, `MUTATION_MIN`) stored in an isolated `FieldNamespace` (`2`) so `Set` never overwrites concurrent atomic updates, plus `Set<Field>` for explicit resets.
-- **Versionstamps & FIFO Queues**: Built-in support for `[(annotations.is_versionstamp) = true]` primary keys and `option (annotations.is_queue) = true` FIFO queues (`Enqueue`, `Dequeue`, `DequeueBatch`) with automatic per-transaction user version monotonicity.
+- **Versionstamps & FIFO Queues**: Built-in support for `[(annotations.is_versionstamp) = true]` primary keys and `option (annotations.is_queue) = true` FIFO queues (`Enqueue`, `Dequeue`, `DequeueBatch`) with per-transaction user version monotonicity scoped to `*fdblayer.Tx` (`fdblayer.NewTx(tr, dir)`).
 
 ---
 
@@ -30,7 +30,7 @@ The compiler is structured around a **language-neutral Intermediate Representati
 fdb-layer/
 ├── proto/
 │   └── fdb-layer/
-│       └── annotations.proto          # Shared Protobuf options (tags 50001..50005)
+│       └── annotations.proto          # Shared Protobuf options (tags 50000..50005)
 ├── compiler/                          # Extensible protoc compiler written in Go
 │   ├── ir/                            # Language-neutral Intermediate Representation (IR)
 │   ├── backend/                       # Common backend Generator interface & Registry
@@ -94,23 +94,22 @@ All keys are packed inside the caller-provided `directory.DirectorySubspace`.
 
 ### Key-Value Layout
 
+Each generated message has a compile-time `TypeID` (`int64`): an explicit `option (annotations.type_id) = <N>;` if non-zero (compact 2-byte FDB Tuple encoding when `<N> <= 255`), or `int64(fnv32a(message_name))` by default.
+
 Assume `User` has `TypeID = 1`, `TaskMessage` has `TypeID = 2`, and `Counter` has `TypeID = 3`:
 
-1. **Metadata Registry**:
-   - **Key**: `[Meta Subspace] + ("User")`
-   - **Value**: `(1)` (packed 1-element tuple containing `int64` `TypeID`)
-2. **Standard Data Record**:
+1. **Standard Data Record**:
    - **Key**: `[Data Subspace] + (1, 0, "u123")` (`TypeID = 1`, `DataNamespace = 0`, primary key `"u123"`)
    - **Value**: `[Serialized User Protobuf Bytes]` (atomic `mutation` fields are zeroed on a shallow copy before serialization without mutating the caller's struct, and overlaid from `FieldNamespace` on read).
-3. **Secondary & Fan-Out Index**:
+2. **Secondary & Fan-Out Index**:
    - **Key**: `[Data Subspace] + (1, 1, index_id, "user@example.com", "u123")`
      - `index_id`: Explicit `SecondaryIndex.id` if non-zero, otherwise `int64(fnv32a(lowercase_comma_joined_field_names))`.
    - **Value**: `[]` (empty byte slice; primary key elements trail the index key elements).
-4. **FIFO Queue Message**:
+3. **FIFO Queue Message**:
    - **Key**: `[Data Subspace] + (2, 0, queue_name, versionstamp, shard_id)`
      - The compiler automatically orders `versionstamp` immediately after the queue partition key (`queue_name`) and before tie-breaker fields (`shard_id`).
    - **Value**: `[Serialized TaskMessage Protobuf Bytes]`
-5. **Atomic Mutation Field Record**:
+4. **Atomic Mutation Field Record**:
    - **Key**: `[Data Subspace] + (3, 2, "cnt1", field_number)` (`TypeID = 3`, `FieldNamespace = 2`, primary key `"cnt1"`, `int64(field_number)`)
    - **Value**:
      - `MUTATION_ADD` (and unsigned `MUTATION_MAX` / `MUTATION_MIN`): 8-byte little-endian `uint64`.

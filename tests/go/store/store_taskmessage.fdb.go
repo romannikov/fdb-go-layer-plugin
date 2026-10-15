@@ -7,43 +7,41 @@ import (
 	"context"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
-	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
 	"google.golang.org/protobuf/proto"
 )
 
+// TaskMessageTypeID is the compile-time type prefix for TaskMessage records in FoundationDB.
+const TaskMessageTypeID int64 = 2046254763
+
 // TaskMessageRepository defines the repository interface for the TaskMessage queue.
 type TaskMessageRepository interface {
-	Enqueue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, msg *TaskMessage) error
-	Dequeue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string) (*TaskMessage, error)
-	DequeueBatch(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string, limit int) ([]*TaskMessage, error)
+	Enqueue(ctx context.Context, tx *fdblayer.Tx, msg *TaskMessage) error
+	Dequeue(ctx context.Context, tx *fdblayer.Tx, queuename string) (*TaskMessage, error)
+	DequeueBatch(ctx context.Context, tx *fdblayer.Tx, queuename string, limit int) ([]*TaskMessage, error)
 }
 
-type taskmessageRepository struct {
-	store *fdblayer.RecordStore
-}
+type taskmessageRepository struct{}
 
 // NewTaskMessageRepository creates a new TaskMessageRepository instance.
-func NewTaskMessageRepository(store *fdblayer.RecordStore) TaskMessageRepository {
-	return &taskmessageRepository{store: store}
+func NewTaskMessageRepository() TaskMessageRepository {
+	return &taskmessageRepository{}
 }
 
 // Enqueue adds a TaskMessage to the queue.
-func (r *taskmessageRepository) Enqueue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *TaskMessage) error {
+func (r *taskmessageRepository) Enqueue(ctx context.Context, tx *fdblayer.Tx, entity *TaskMessage) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	typeID, err := r.store.GetTypeID("TaskMessage")
-	if err != nil {
-		return err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
-	userVersion, err := r.store.NextUserVersion()
+	userVersion, err := tx.NextUserVersion()
 	if err != nil {
 		return err
 	}
-	key, err := dir.PackWithVersionstamp(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.QueueName, tuple.IncompleteVersionstamp(userVersion), uint64(entity.ShardId)})
+	key, err := dir.PackWithVersionstamp(tuple.Tuple{TaskMessageTypeID, fdblayer.DataNamespace, entity.QueueName, tuple.IncompleteVersionstamp(userVersion), uint64(entity.ShardId)})
 	if err != nil {
 		return err
 	}
@@ -68,16 +66,14 @@ func (r *taskmessageRepository) Enqueue(ctx context.Context, tr fdblayer.Transac
 }
 
 // Dequeue reads and removes the single oldest message from the queue.
-func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string) (*TaskMessage, error) {
+func (r *taskmessageRepository) Dequeue(ctx context.Context, tx *fdblayer.Tx, queuename string) (*TaskMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	typeID, err := r.store.GetTypeID("TaskMessage")
-	if err != nil {
-		return nil, err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
-	prefixTuple := tuple.Tuple{typeID, fdblayer.DataNamespace, queuename}
+	prefixTuple := tuple.Tuple{TaskMessageTypeID, fdblayer.DataNamespace, queuename}
 	prefixRange, err := fdb.PrefixRange(dir.Pack(prefixTuple))
 	if err != nil {
 		return nil, err
@@ -115,19 +111,17 @@ func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transac
 }
 
 // DequeueBatch reads and removes up to limit oldest messages from the queue in a single range scan.
-func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, queuename string, limit int) ([]*TaskMessage, error) {
+func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tx *fdblayer.Tx, queuename string, limit int) ([]*TaskMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if limit <= 0 {
 		return nil, nil
 	}
-	typeID, err := r.store.GetTypeID("TaskMessage")
-	if err != nil {
-		return nil, err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
-	prefixTuple := tuple.Tuple{typeID, fdblayer.DataNamespace, queuename}
+	prefixTuple := tuple.Tuple{TaskMessageTypeID, fdblayer.DataNamespace, queuename}
 	prefixRange, err := fdb.PrefixRange(dir.Pack(prefixTuple))
 	if err != nil {
 		return nil, err

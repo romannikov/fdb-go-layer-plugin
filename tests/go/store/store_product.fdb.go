@@ -8,39 +8,37 @@ import (
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
-	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
 	"google.golang.org/protobuf/proto"
 )
 
+// ProductTypeID is the compile-time type prefix for Product records in FoundationDB.
+const ProductTypeID int64 = 1385980108
+
 // ProductRepository defines the repository interface for Product.
 type ProductRepository interface {
 	fdblayer.GenericRepository[*Product, string]
 
-	GetByCategory(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Category string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Product], error)
+	GetByCategory(ctx context.Context, tx *fdblayer.Tx, Category string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Product], error)
 }
 
-type productRepository struct {
-	store *fdblayer.RecordStore
-}
+type productRepository struct{}
 
 // NewProductRepository creates a new ProductRepository instance.
-func NewProductRepository(store *fdblayer.RecordStore) ProductRepository {
-	return &productRepository{store: store}
+func NewProductRepository() ProductRepository {
+	return &productRepository{}
 }
 
 // Create creates a new Product entity in the database.
-func (r *productRepository) Create(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *Product) error {
+func (r *productRepository) Create(ctx context.Context, tx *fdblayer.Tx, entity *Product) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	typeID, err := r.store.GetTypeID("Product")
-	if err != nil {
-		return err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
+	key := dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.DataNamespace, entity.Id})
 	if existing := tr.Get(key).MustGet(); existing != nil {
 		return fmt.Errorf("product %w", fdblayer.ErrAlreadyExists)
 	}
@@ -53,30 +51,27 @@ func (r *productRepository) Create(ctx context.Context, tr fdblayer.Transaction,
 	tr.Set(key, value)
 
 	// Standard index
-	tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 3475980913, entity.Category, entity.Id}), []byte{})
+	tr.Set(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, 3475980913, entity.Category, entity.Id}), []byte{})
 
 	return nil
 }
 
 // Get retrieves a Product entity by its primary key.
-func (r *productRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk string) (*Product, error) {
+func (r *productRepository) Get(ctx context.Context, tx *fdblayer.Tx, pk string) (*Product, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	typeID, err := r.store.GetTypeID("Product")
-	if err != nil {
-		return nil, err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
+	key := dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.DataNamespace, pk})
 	valueFuture := tr.Get(key)
 	value := valueFuture.MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("product %w", fdblayer.ErrNotFound)
 	}
 	entity := &Product{}
-	err = proto.Unmarshal(value, entity)
-	if err != nil {
+	if err := proto.Unmarshal(value, entity); err != nil {
 		return nil, err
 	}
 
@@ -84,18 +79,16 @@ func (r *productRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir
 }
 
 // Set updates an existing Product entity in the database (or inserts it if not present).
-func (r *productRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *Product) error {
+func (r *productRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *Product) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	typeID, err := r.store.GetTypeID("Product")
-	if err != nil {
-		return err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
 	var old *Product
 
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
+	key := dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.DataNamespace, entity.Id})
 
 	if oldValue := tr.Get(key).MustGet(); oldValue != nil {
 		var unmarshaled Product
@@ -116,25 +109,23 @@ func (r *productRepository) Set(ctx context.Context, tr fdblayer.Transaction, di
 	// Standard index
 	if old == nil || old.Category != entity.Category {
 		if old != nil {
-			tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 3475980913, old.Category, old.Id}))
+			tr.Clear(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, 3475980913, old.Category, old.Id}))
 		}
-		tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 3475980913, entity.Category, entity.Id}), []byte{})
+		tr.Set(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, 3475980913, entity.Category, entity.Id}), []byte{})
 	}
 
 	return nil
 }
 
 // Delete removes a Product entity from the database.
-func (r *productRepository) Delete(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string) error {
+func (r *productRepository) Delete(ctx context.Context, tx *fdblayer.Tx, pk string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	typeID, err := r.store.GetTypeID("Product")
-	if err != nil {
-		return err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
+	key := dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.DataNamespace, pk})
 	value := tr.Get(key).MustGet()
 	if value != nil {
 		entity := &Product{}
@@ -143,7 +134,7 @@ func (r *productRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 		}
 		entity.Id = pk
 		// Standard index
-		tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 3475980913, entity.Category, entity.Id}))
+		tr.Clear(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, 3475980913, entity.Category, entity.Id}))
 	}
 	tr.Clear(key)
 
@@ -151,23 +142,21 @@ func (r *productRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 }
 
 // BatchGet retrieves multiple Product entities by their primary keys.
-func (r *productRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Product, error) {
+func (r *productRepository) BatchGet(ctx context.Context, tx *fdblayer.Tx, pks []string) ([]*Product, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if len(pks) == 0 {
 		return nil, nil
 	}
-	typeID, err := r.store.GetTypeID("Product")
-	if err != nil {
-		return nil, err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 	futures := make([]fdb.FutureByteSlice, len(pks))
 	for i, pk := range pks {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
+		key := dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.DataNamespace, pk})
 		futures[i] = tr.Get(key)
 	}
 	entities := make([]*Product, 0, len(pks))
@@ -189,14 +178,12 @@ func (r *productRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction
 }
 
 // List retrieves a list of Product entities starting from the given key.
-func (r *productRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Product], error) {
+func (r *productRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Product], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	typeID, err := r.store.GetTypeID("Product")
-	if err != nil {
-		return nil, err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
 	result := &fdblayer.PaginatedResult[*Product]{
 		Items: make([]*Product, 0),
@@ -204,7 +191,7 @@ func (r *productRepository) List(ctx context.Context, tr fdb.ReadTransaction, di
 
 	// Compute data prefix range (scoped to opts.Prefix when provided).
 	prefixTpl := make(tuple.Tuple, 2+len(opts.Prefix))
-	prefixTpl[0] = typeID
+	prefixTpl[0] = ProductTypeID
 	prefixTpl[1] = fdblayer.DataNamespace
 	for j, el := range opts.Prefix {
 		prefixTpl[2+j] = fdblayer.NormalizeTupleElement(el)
@@ -216,7 +203,7 @@ func (r *productRepository) List(ctx context.Context, tr fdb.ReadTransaction, di
 	}
 
 	beginTpl := make(tuple.Tuple, 2+len(opts.Begin))
-	beginTpl[0] = typeID
+	beginTpl[0] = ProductTypeID
 	beginTpl[1] = fdblayer.DataNamespace
 	for j, el := range opts.Begin {
 		beginTpl[2+j] = fdblayer.NormalizeTupleElement(el)
@@ -281,19 +268,17 @@ func (r *productRepository) List(ctx context.Context, tr fdb.ReadTransaction, di
 }
 
 // GetByCategory retrieves a paginated page of Product entities by their Category index.
-func (r *productRepository) GetByCategory(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Category string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Product], error) {
+func (r *productRepository) GetByCategory(ctx context.Context, tx *fdblayer.Tx, Category string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Product], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	typeID, err := r.store.GetTypeID("Product")
-	if err != nil {
-		return nil, err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
 	result := &fdblayer.PaginatedResult[*Product]{
 		Items: make([]*Product, 0),
 	}
-	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, 3475980913, Category}
+	baseTpl := tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, 3475980913, Category}
 	indexKeyPrefix := dir.Pack(baseTpl)
 	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
 	if err != nil {
@@ -355,7 +340,7 @@ func (r *productRepository) GetByCategory(ctx context.Context, tr fdb.ReadTransa
 		}
 		pkTuple := tpl[pkIndexStart:]
 		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
-		keyTpl[0] = typeID
+		keyTpl[0] = ProductTypeID
 		keyTpl[1] = fdblayer.DataNamespace
 		copy(keyTpl[2:], pkTuple)
 		futures[i] = tr.Get(dir.Pack(keyTpl))

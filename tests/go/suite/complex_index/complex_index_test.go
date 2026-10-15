@@ -20,25 +20,24 @@ func init() {
 
 func TestFanOutIndex(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
-	postRepo := store.NewPostRepository(recordStore)
+	postRepo := store.NewPostRepository()
 
 	post := &store.Post{
 		Id:   "post1",
 		Tags: []string{"tag1", "tag2", "tag3"},
 	}
 
-	err := postRepo.Create(ctx, tr, dir, post)
+	err := postRepo.Create(ctx, tx, post)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Verify index entries in MockKV using the public metadata lookup
-	typeID := recordStore.Metadata()["Post"]
-
+	// Verify index entries in MockKV using the compile-time TypeID constant
 	for _, tag := range post.Tags {
-		indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(4095142816), tag, post.Id})
+		indexKey := dir.Pack(tuple.Tuple{store.PostTypeID, fdblayer.IndexNamespace, int64(4095142816), tag, post.Id})
 		if !kv.HasKey(indexKey) {
 			t.Errorf("Missing index entry for tag %s", tag)
 		}
@@ -47,16 +46,17 @@ func TestFanOutIndex(t *testing.T) {
 
 func TestFanOutIndex_SetDeltaUpdates(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
-	postRepo := store.NewPostRepository(recordStore)
+	postRepo := store.NewPostRepository()
 
 	post := &store.Post{
 		Id:   "post1",
 		Tags: []string{"tag1", "tag2", "tag3"},
 	}
 
-	if err := postRepo.Create(ctx, tr, dir, post); err != nil {
+	if err := postRepo.Create(ctx, tx, post); err != nil {
 		t.Fatal(err)
 	}
 
@@ -66,11 +66,9 @@ func TestFanOutIndex_SetDeltaUpdates(t *testing.T) {
 		Id:   "post1",
 		Tags: []string{"tag2", "tag3", "tag4"},
 	}
-	if err := postRepo.Set(ctx, tr, dir, updatedPost); err != nil {
+	if err := postRepo.Set(ctx, tx, updatedPost); err != nil {
 		t.Fatal(err)
 	}
-
-	typeID := recordStore.Metadata()["Post"]
 
 	// Only "tag1" should have been cleared (1 Clear call instead of 3)
 	if len(tr.ClearCalls) != 1 {
@@ -81,13 +79,13 @@ func TestFanOutIndex_SetDeltaUpdates(t *testing.T) {
 		t.Fatalf("expected exactly 2 Set calls (primary key + new tag4 index), got %d", len(tr.SetCalls))
 	}
 
-	removedKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(4095142816), "tag1", post.Id})
+	removedKey := dir.Pack(tuple.Tuple{store.PostTypeID, fdblayer.IndexNamespace, int64(4095142816), "tag1", post.Id})
 	if kv.HasKey(removedKey) {
 		t.Errorf("Removed tag1 index entry still present")
 	}
 
 	for _, tag := range updatedPost.Tags {
-		indexKey := dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(4095142816), tag, post.Id})
+		indexKey := dir.Pack(tuple.Tuple{store.PostTypeID, fdblayer.IndexNamespace, int64(4095142816), tag, post.Id})
 		if !kv.HasKey(indexKey) {
 			t.Errorf("Missing index entry for tag %s", tag)
 		}
@@ -96,9 +94,10 @@ func TestFanOutIndex_SetDeltaUpdates(t *testing.T) {
 
 func TestVersionstampedPrimaryKey(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
-	taskRepo := store.NewTaskMessageRepository(recordStore)
+	taskRepo := store.NewTaskMessageRepository()
 
 	task := &store.TaskMessage{
 		QueueName: "email_queue",
@@ -106,12 +105,10 @@ func TestVersionstampedPrimaryKey(t *testing.T) {
 		Payload:   []byte("send email"),
 	}
 
-	err := taskRepo.Enqueue(ctx, tr, dir, task)
+	err := taskRepo.Enqueue(ctx, tx, task)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	typeID := recordStore.Metadata()["TaskMessage"]
 
 	// The mock transaction's SetVersionstampedKey replaces the incomplete versionstamp
 	// placeholder with dummyVS transaction bytes.
@@ -119,7 +116,7 @@ func TestVersionstampedPrimaryKey(t *testing.T) {
 		TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
 		UserVersion:        0,
 	}
-	expectedKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "email_queue", dummyVS, uint64(1)})
+	expectedKey := dir.Pack(tuple.Tuple{store.TaskMessageTypeID, fdblayer.DataNamespace, "email_queue", dummyVS, uint64(1)})
 
 	if !kv.HasKey(expectedKey) {
 		t.Fatalf("Expected key not found in mock store: %v", expectedKey)
@@ -132,34 +129,34 @@ func TestVersionstampedPrimaryKey(t *testing.T) {
 		ShardId:   1,
 		Payload:   []byte("send second email"),
 	}
-	if err := taskRepo.Enqueue(ctx, tr, dir, task2); err != nil {
+	if err := taskRepo.Enqueue(ctx, tx, task2); err != nil {
 		t.Fatal(err)
 	}
 	dummyVS2 := tuple.Versionstamp{
 		TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
 		UserVersion:        1,
 	}
-	expectedKey2 := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "email_queue", dummyVS2, uint64(1)})
+	expectedKey2 := dir.Pack(tuple.Tuple{store.TaskMessageTypeID, fdblayer.DataNamespace, "email_queue", dummyVS2, uint64(1)})
 	if !kv.HasKey(expectedKey2) {
 		t.Fatalf("Expected second versionstamped key with UserVersion=1 not found in mock store: %v", expectedKey2)
 	}
 
 	// Verify Dequeue works in MockTransaction via fdblayer.GetRange
-	d1, err := taskRepo.Dequeue(ctx, tr, dir, "email_queue")
+	d1, err := taskRepo.Dequeue(ctx, tx, "email_queue")
 	if err != nil {
 		t.Fatalf("Dequeue 1 failed: %v", err)
 	}
 	if d1 == nil || string(d1.Payload) != "send email" || len(d1.Versionstamp) != 12 {
 		t.Fatalf("unexpected Dequeue 1 result: %+v", d1)
 	}
-	d2, err := taskRepo.Dequeue(ctx, tr, dir, "email_queue")
+	d2, err := taskRepo.Dequeue(ctx, tx, "email_queue")
 	if err != nil {
 		t.Fatalf("Dequeue 2 failed: %v", err)
 	}
 	if d2 == nil || string(d2.Payload) != "send second email" || len(d2.Versionstamp) != 12 {
 		t.Fatalf("unexpected Dequeue 2 result: %+v", d2)
 	}
-	dEmpty, err := taskRepo.Dequeue(ctx, tr, dir, "email_queue")
+	dEmpty, err := taskRepo.Dequeue(ctx, tx, "email_queue")
 	if err != nil || dEmpty != nil {
 		t.Fatalf("expected empty queue after 2 dequeues, got %+v, err=%v", dEmpty, err)
 	}
@@ -167,12 +164,10 @@ func TestVersionstampedPrimaryKey(t *testing.T) {
 
 func TestOrder_CompoundPK_CompoundIndex_BytesIndexes_NestedTypes(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
-	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Order"}); err != nil {
-		t.Fatalf("failed to sync Order metadata: %v", err)
-	}
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
-	orderRepo := store.NewOrderRepository(recordStore)
+	orderRepo := store.NewOrderRepository()
 
 	order1 := &store.Order{
 		TenantId:         "acme",
@@ -191,14 +186,13 @@ func TestOrder_CompoundPK_CompoundIndex_BytesIndexes_NestedTypes(t *testing.T) {
 		},
 	}
 
-	if err := orderRepo.Create(ctx, tr, dir, order1); err != nil {
+	if err := orderRepo.Create(ctx, tx, order1); err != nil {
 		t.Fatalf("Create order1 failed: %v", err)
 	}
 
 	// Verify explicit index ID 1001 in MockKV for compound index (status, created_at)
-	typeID := recordStore.Metadata()["Order"]
 	compoundIdxKey := dir.Pack(tuple.Tuple{
-		typeID,
+		store.OrderTypeID,
 		fdblayer.IndexNamespace,
 		int64(1001),
 		int64(store.OrderStatus_ORDER_STATUS_PENDING),
@@ -212,7 +206,7 @@ func TestOrder_CompoundPK_CompoundIndex_BytesIndexes_NestedTypes(t *testing.T) {
 
 	// 1. Get by compound primary key
 	pk := store.OrderPrimaryKey{TenantId: "acme", OrderSeq: 101}
-	got, err := orderRepo.Get(ctx, tr, dir, pk)
+	got, err := orderRepo.Get(ctx, tx, pk)
 	if err != nil {
 		t.Fatalf("Get order1 failed: %v", err)
 	}
@@ -221,19 +215,19 @@ func TestOrder_CompoundPK_CompoundIndex_BytesIndexes_NestedTypes(t *testing.T) {
 	}
 
 	// 2. Query by compound secondary index (status, created_at)
-	byStatus, err := orderRepo.GetByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000, fdblayer.PaginationOptions{})
+	byStatus, err := orderRepo.GetByStatusAndCreatedAt(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000, fdblayer.PaginationOptions{})
 	if err != nil || len(byStatus.Items) != 1 || byStatus.Items[0].OrderSeq != 101 {
 		t.Fatalf("GetOrderByStatusAndCreatedAt failed: got %+v, err=%v", byStatus, err)
 	}
 
 	// 3. Query by scalar bytes secondary index (receipt_hash)
-	byReceipt, err := orderRepo.GetByReceiptHash(ctx, tr, dir, []byte{0xAA, 0xBB, 0x01}, fdblayer.PaginationOptions{})
+	byReceipt, err := orderRepo.GetByReceiptHash(ctx, tx, []byte{0xAA, 0xBB, 0x01}, fdblayer.PaginationOptions{})
 	if err != nil || len(byReceipt.Items) != 1 || byReceipt.Items[0].OrderSeq != 101 {
 		t.Fatalf("GetOrderByReceiptHash failed: got %+v, err=%v", byReceipt, err)
 	}
 
 	// 4. Query by fan-out repeated bytes secondary index (attachment_hashes)
-	byAttach, err := orderRepo.GetByAttachmentHashes(ctx, tr, dir, []byte{0x10, 0x20}, fdblayer.PaginationOptions{})
+	byAttach, err := orderRepo.GetByAttachmentHashes(ctx, tx, []byte{0x10, 0x20}, fdblayer.PaginationOptions{})
 	if err != nil || len(byAttach.Items) != 1 || byAttach.Items[0].OrderSeq != 101 {
 		t.Fatalf("GetOrderByAttachmentHashes failed: got %+v, err=%v", byAttach, err)
 	}
@@ -248,68 +242,66 @@ func TestOrder_CompoundPK_CompoundIndex_BytesIndexes_NestedTypes(t *testing.T) {
 		AttachmentHashes: [][]byte{{0x30, 0x40}, {0x50, 0x60}},
 		Priority:         store.Order_PRIORITY_LOW,
 	}
-	if err := orderRepo.Set(ctx, tr, dir, updatedOrder); err != nil {
+	if err := orderRepo.Set(ctx, tx, updatedOrder); err != nil {
 		t.Fatalf("Set updatedOrder failed: %v", err)
 	}
 
 	// Old compound index, old receipt hash, and removed attachment hash must return 0 results
-	if res, _ := orderRepo.GetByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
+	if res, _ := orderRepo.GetByStatusAndCreatedAt(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
 		t.Fatalf("stale compound index after Set: %+v", res)
 	}
-	if res, _ := orderRepo.GetByReceiptHash(ctx, tr, dir, []byte{0xAA, 0xBB, 0x01}, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
+	if res, _ := orderRepo.GetByReceiptHash(ctx, tx, []byte{0xAA, 0xBB, 0x01}, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
 		t.Fatalf("stale receipt_hash index after Set: %+v", res)
 	}
-	if res, _ := orderRepo.GetByAttachmentHashes(ctx, tr, dir, []byte{0x10, 0x20}, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
+	if res, _ := orderRepo.GetByAttachmentHashes(ctx, tx, []byte{0x10, 0x20}, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
 		t.Fatalf("stale attachment_hashes index after Set: %+v", res)
 	}
 
 	// New index entries must resolve
-	if res, _ := orderRepo.GetByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
+	if res, _ := orderRepo.GetByStatusAndCreatedAt(ctx, tx, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
 		t.Fatalf("missing updated compound index after Set: %+v", res)
 	}
-	if res, _ := orderRepo.GetByReceiptHash(ctx, tr, dir, []byte{0xCC, 0xDD, 0x02}, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
+	if res, _ := orderRepo.GetByReceiptHash(ctx, tx, []byte{0xCC, 0xDD, 0x02}, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
 		t.Fatalf("missing updated receipt_hash index after Set: %+v", res)
 	}
-	if res, _ := orderRepo.GetByAttachmentHashes(ctx, tr, dir, []byte{0x50, 0x60}, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
+	if res, _ := orderRepo.GetByAttachmentHashes(ctx, tx, []byte{0x50, 0x60}, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
 		t.Fatalf("missing new attachment_hashes index after Set: %+v", res)
 	}
 
 	// 6. BatchGetOrder and Delete with compound primary key
-	batchRes, err := orderRepo.BatchGet(ctx, tr, dir, []store.OrderPrimaryKey{pk})
+	batchRes, err := orderRepo.BatchGet(ctx, tx, []store.OrderPrimaryKey{pk})
 	if err != nil || len(batchRes) != 1 {
 		t.Fatalf("BatchGetOrder failed: got %+v, err=%v", batchRes, err)
 	}
 
-	if err := orderRepo.Delete(ctx, tr, dir, pk); err != nil {
+	if err := orderRepo.Delete(ctx, tx, pk); err != nil {
 		t.Fatalf("Delete order1 failed: %v", err)
 	}
-	if res, _ := orderRepo.GetByStatusAndCreatedAt(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
+	if res, _ := orderRepo.GetByStatusAndCreatedAt(ctx, tx, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
 		t.Fatalf("compound index not cleared after Delete: %+v", res)
 	}
-	if res, _ := orderRepo.GetByAttachmentHashes(ctx, tr, dir, []byte{0x30, 0x40}, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
+	if res, _ := orderRepo.GetByAttachmentHashes(ctx, tx, []byte{0x30, 0x40}, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
 		t.Fatalf("fan-out bytes index not cleared after Delete: %+v", res)
 	}
 }
 
 func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
-	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"AuditLog"}); err != nil {
-		t.Fatalf("failed to sync AuditLog metadata: %v", err)
-	}
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
-	auditRepo := store.NewAuditLogRepository(recordStore)
+	auditRepo := store.NewAuditLogRepository()
 
 	// 1. Create two AuditLog entities in the same transaction with initial atomic Views,
 	// standard index (Actor), and fan-out index (Tags).
-	if err := auditRepo.Create(ctx, tr, dir, &store.AuditLog{
+	if err := auditRepo.Create(ctx, tx, &store.AuditLog{
 		Actor: "alice",
 		Tags:  []string{"auth", "login"},
 		Views: 10,
 	}); err != nil {
 		t.Fatalf("Create AuditLog 1 failed: %v", err)
 	}
-	if err := auditRepo.Create(ctx, tr, dir, &store.AuditLog{
+	if err := auditRepo.Create(ctx, tx, &store.AuditLog{
 		Actor: "bob",
 		Tags:  []string{"auth", "logout"},
 		Views: 5,
@@ -319,7 +311,7 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 
 	// 2. ListAuditLog must unpack the 12-byte versionstamp from the primary key into LogId
 	// and populate the atomic Views field.
-	listed, err := auditRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 10})
+	listed, err := auditRepo.List(ctx, tx, fdblayer.PaginationOptions{Limit: 10})
 	if err != nil || len(listed.Items) != 2 {
 		t.Fatalf("ListAuditLog expected 2 items, got %+v, err=%v", listed, err)
 	}
@@ -333,7 +325,7 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 	}
 
 	// 3. Get by log_id using the unpacked 12-byte versionstamp
-	got, err := auditRepo.Get(ctx, tr, dir, firstLogID)
+	got, err := auditRepo.Get(ctx, tx, firstLogID)
 	if err != nil {
 		t.Fatalf("Get AuditLog by versionstamp failed: %v", err)
 	}
@@ -342,7 +334,7 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 	}
 
 	// 4. Query by standard secondary index (GetAuditLogByActor)
-	byActor, err := auditRepo.GetByActor(ctx, tr, dir, "alice", fdblayer.PaginationOptions{})
+	byActor, err := auditRepo.GetByActor(ctx, tx, "alice", fdblayer.PaginationOptions{})
 	if err != nil || len(byActor.Items) != 1 {
 		t.Fatalf("GetAuditLogByActor('alice') expected 1 item, got %+v, err=%v", byActor, err)
 	}
@@ -351,7 +343,7 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 	}
 
 	// 5. Query by fan-out secondary index (GetAuditLogByTags)
-	byTagAuth, err := auditRepo.GetByTags(ctx, tr, dir, "auth", fdblayer.PaginationOptions{})
+	byTagAuth, err := auditRepo.GetByTags(ctx, tx, "auth", fdblayer.PaginationOptions{})
 	if err != nil || len(byTagAuth.Items) != 2 {
 		t.Fatalf("GetAuditLogByTags('auth') expected 2 items, got %+v, err=%v", byTagAuth, err)
 	}
@@ -360,7 +352,7 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 	}
 
 	// 6. BatchGetAuditLog with 12-byte versionstamp primary keys
-	batchRes, err := auditRepo.BatchGet(ctx, tr, dir, [][]byte{firstLogID, secondLogID})
+	batchRes, err := auditRepo.BatchGet(ctx, tx, [][]byte{firstLogID, secondLogID})
 	if err != nil || len(batchRes) != 2 {
 		t.Fatalf("BatchGetAuditLog expected 2 items, got %+v, err=%v", batchRes, err)
 	}
@@ -374,64 +366,64 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 	}
 
 	// 7. Atomic mutator AddAuditLogViews
-	if err := auditRepo.AddViews(ctx, tr, dir, firstLogID, 7); err != nil {
+	if err := auditRepo.AddViews(ctx, tx, firstLogID, 7); err != nil {
 		t.Fatalf("AddAuditLogViews failed: %v", err)
 	}
-	gotAfterAdd, err := auditRepo.Get(ctx, tr, dir, firstLogID)
+	gotAfterAdd, err := auditRepo.Get(ctx, tx, firstLogID)
 	if err != nil || gotAfterAdd.Views != 17 {
 		t.Fatalf("expected Views=17 after AddAuditLogViews, got %+v, err=%v", gotAfterAdd, err)
 	}
 
 	// 8. Set on existing entity updates in-place (preserving LogId and atomic Views) and updates indexes
-	if err := auditRepo.Set(ctx, tr, dir, &store.AuditLog{
+	if err := auditRepo.Set(ctx, tx, &store.AuditLog{
 		LogId: firstLogID,
 		Actor: "alice_admin",
 		Tags:  []string{"auth", "elevated"},
 	}); err != nil {
 		t.Fatalf("Set existing AuditLog failed: %v", err)
 	}
-	gotAfterSet, err := auditRepo.Get(ctx, tr, dir, firstLogID)
+	gotAfterSet, err := auditRepo.Get(ctx, tx, firstLogID)
 	if err != nil || gotAfterSet.Actor != "alice_admin" || gotAfterSet.Views != 17 {
 		t.Fatalf("expected updated Actor='alice_admin' and preserved Views=17 after Set, got %+v, err=%v", gotAfterSet, err)
 	}
-	if oldIdx, _ := auditRepo.GetByActor(ctx, tr, dir, "alice", fdblayer.PaginationOptions{}); len(oldIdx.Items) != 0 {
+	if oldIdx, _ := auditRepo.GetByActor(ctx, tx, "alice", fdblayer.PaginationOptions{}); len(oldIdx.Items) != 0 {
 		t.Fatalf("expected old Actor index 'alice' cleared after Set, got %+v", oldIdx)
 	}
-	if newIdx, _ := auditRepo.GetByActor(ctx, tr, dir, "alice_admin", fdblayer.PaginationOptions{}); len(newIdx.Items) != 1 || !bytes.Equal(newIdx.Items[0].LogId, firstLogID) {
+	if newIdx, _ := auditRepo.GetByActor(ctx, tx, "alice_admin", fdblayer.PaginationOptions{}); len(newIdx.Items) != 1 || !bytes.Equal(newIdx.Items[0].LogId, firstLogID) {
 		t.Fatalf("expected new Actor index 'alice_admin' after Set, got %+v", newIdx)
 	}
-	if oldTag, _ := auditRepo.GetByTags(ctx, tr, dir, "login", fdblayer.PaginationOptions{}); len(oldTag.Items) != 0 {
+	if oldTag, _ := auditRepo.GetByTags(ctx, tx, "login", fdblayer.PaginationOptions{}); len(oldTag.Items) != 0 {
 		t.Fatalf("expected removed tag 'login' cleared after Set, got %+v", oldTag)
 	}
-	if newTag, _ := auditRepo.GetByTags(ctx, tr, dir, "elevated", fdblayer.PaginationOptions{}); len(newTag.Items) != 1 || !bytes.Equal(newTag.Items[0].LogId, firstLogID) {
+	if newTag, _ := auditRepo.GetByTags(ctx, tx, "elevated", fdblayer.PaginationOptions{}); len(newTag.Items) != 1 || !bytes.Equal(newTag.Items[0].LogId, firstLogID) {
 		t.Fatalf("expected added tag 'elevated' indexed after Set, got %+v", newTag)
 	}
 
 	// 9. Set with empty LogId delegates to Create; malformed non-12-byte LogId returns error
-	if err := auditRepo.Set(ctx, tr, dir, &store.AuditLog{
+	if err := auditRepo.Set(ctx, tx, &store.AuditLog{
 		LogId: []byte{1, 2, 3},
 		Actor: "malformed",
 	}); err == nil {
 		t.Fatalf("expected Set with 3-byte LogId to return error")
 	}
-	if err := auditRepo.Set(ctx, tr, dir, &store.AuditLog{
+	if err := auditRepo.Set(ctx, tx, &store.AuditLog{
 		Actor: "charlie",
 		Tags:  []string{"audit"},
 		Views: 3,
 	}); err != nil {
 		t.Fatalf("Set new AuditLog (empty LogId) failed: %v", err)
 	}
-	byCharlie, err := auditRepo.GetByActor(ctx, tr, dir, "charlie", fdblayer.PaginationOptions{})
+	byCharlie, err := auditRepo.GetByActor(ctx, tx, "charlie", fdblayer.PaginationOptions{})
 	if err != nil || len(byCharlie.Items) != 1 || len(byCharlie.Items[0].LogId) != 12 || byCharlie.Items[0].Views != 3 {
 		t.Fatalf("expected Set with empty LogId to create indexed AuditLog, got %+v, err=%v", byCharlie, err)
 	}
 
 	// 9b. ListAuditLog pagination with Limit=1 and raw []byte Begin cursor
-	page1, err := auditRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 1})
+	page1, err := auditRepo.List(ctx, tx, fdblayer.PaginationOptions{Limit: 1})
 	if err != nil || len(page1.Items) != 1 || !page1.HasMore {
 		t.Fatalf("expected page1 with 1 item and HasMore=true, got %+v, err=%v", page1, err)
 	}
-	page2, err := auditRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{
+	page2, err := auditRepo.List(ctx, tx, fdblayer.PaginationOptions{
 		Begin: tuple.Tuple{secondLogID},
 		Limit: 1,
 	})
@@ -440,23 +432,22 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 	}
 
 	// 10. Delete by log_id clears primary data, standard index, fan-out index, and atomic field
-	if err := auditRepo.Delete(ctx, tr, dir, firstLogID); err != nil {
+	if err := auditRepo.Delete(ctx, tx, firstLogID); err != nil {
 		t.Fatalf("Delete AuditLog by versionstamp failed: %v", err)
 	}
-	if _, err := auditRepo.Get(ctx, tr, dir, firstLogID); err == nil {
+	if _, err := auditRepo.Get(ctx, tx, firstLogID); err == nil {
 		t.Fatalf("expected Get after Delete to fail")
 	}
-	if idxAfterDel, _ := auditRepo.GetByActor(ctx, tr, dir, "alice_admin", fdblayer.PaginationOptions{}); len(idxAfterDel.Items) != 0 {
+	if idxAfterDel, _ := auditRepo.GetByActor(ctx, tx, "alice_admin", fdblayer.PaginationOptions{}); len(idxAfterDel.Items) != 0 {
 		t.Fatalf("expected Actor index cleared after Delete, got %+v", idxAfterDel)
 	}
-	if tagAfterDel, _ := auditRepo.GetByTags(ctx, tr, dir, "elevated", fdblayer.PaginationOptions{}); len(tagAfterDel.Items) != 0 {
+	if tagAfterDel, _ := auditRepo.GetByTags(ctx, tx, "elevated", fdblayer.PaginationOptions{}); len(tagAfterDel.Items) != 0 {
 		t.Fatalf("expected fan-out tag 'elevated' cleared after Delete, got %+v", tagAfterDel)
 	}
-	if sharedTagAfterDel, _ := auditRepo.GetByTags(ctx, tr, dir, "auth", fdblayer.PaginationOptions{}); len(sharedTagAfterDel.Items) != 1 || sharedTagAfterDel.Items[0].Actor != "bob" {
+	if sharedTagAfterDel, _ := auditRepo.GetByTags(ctx, tx, "auth", fdblayer.PaginationOptions{}); len(sharedTagAfterDel.Items) != 1 || sharedTagAfterDel.Items[0].Actor != "bob" {
 		t.Fatalf("expected only bob on 'auth' tag after Delete, got %+v", sharedTagAfterDel)
 	}
-	typeID := recordStore.Metadata()["AuditLog"]
-	fieldKey := dir.Pack(tuple.Tuple{typeID, fdblayer.FieldNamespace, fdblayer.BytesToVersionstamp(firstLogID), int64(4)})
+	fieldKey := dir.Pack(tuple.Tuple{store.AuditLogTypeID, fdblayer.FieldNamespace, fdblayer.BytesToVersionstamp(firstLogID), int64(4)})
 	if kv.HasKey(fieldKey) {
 		t.Fatalf("expected atomic field key cleared after Delete")
 	}
@@ -464,15 +455,16 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 
 func TestFanOutIndex_CreateDeduplicatesRepeatedTags(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	postRepo := store.NewPostRepository(recordStore)
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	postRepo := store.NewPostRepository()
 
 	tr.ResetLog()
 	post := &store.Post{
 		Id:   "post_dup",
 		Tags: []string{"go", "go", "fdb", "go"},
 	}
-	if err := postRepo.Create(ctx, tr, dir, post); err != nil {
+	if err := postRepo.Create(ctx, tx, post); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
 	// 1 primary record write + 2 unique tag index writes ("go", "fdb") = 3 SetCalls total (BUG-7)
@@ -483,8 +475,9 @@ func TestFanOutIndex_CreateDeduplicatesRepeatedTags(t *testing.T) {
 
 func TestQueue_EnqueueZerosVersionstampPayload_AndDequeueBatch(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
-	taskRepo := store.NewTaskMessageRepository(recordStore)
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	taskRepo := store.NewTaskMessageRepository()
 
 	staleVS := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
 	msg1 := &store.TaskMessage{
@@ -493,7 +486,7 @@ func TestQueue_EnqueueZerosVersionstampPayload_AndDequeueBatch(t *testing.T) {
 		Versionstamp: staleVS,
 		Payload:      []byte("item-1"),
 	}
-	if err := taskRepo.Enqueue(ctx, tr, dir, msg1); err != nil {
+	if err := taskRepo.Enqueue(ctx, tx, msg1); err != nil {
 		t.Fatalf("Enqueue 1 failed: %v", err)
 	}
 	// Caller's struct must not be mutated
@@ -502,12 +495,11 @@ func TestQueue_EnqueueZerosVersionstampPayload_AndDequeueBatch(t *testing.T) {
 	}
 
 	// Raw stored protobuf value in FDB must have Versionstamp zeroed (BUG-4)
-	typeID := recordStore.Metadata()["TaskMessage"]
 	dummyVS := tuple.Versionstamp{
 		TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
 		UserVersion:        0,
 	}
-	rawKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "q_batch", dummyVS, uint64(1)})
+	rawKey := dir.Pack(tuple.Tuple{store.TaskMessageTypeID, fdblayer.DataNamespace, "q_batch", dummyVS, uint64(1)})
 	rawVal := kv.Get(rawKey)
 	rawMsg := &store.TaskMessage{}
 	if err := proto.Unmarshal(rawVal, rawMsg); err != nil {
@@ -518,10 +510,10 @@ func TestQueue_EnqueueZerosVersionstampPayload_AndDequeueBatch(t *testing.T) {
 	}
 
 	// Enqueue 2 more items and test DequeueBatch (PERF-5)
-	_ = taskRepo.Enqueue(ctx, tr, dir, &store.TaskMessage{QueueName: "q_batch", ShardId: 2, Payload: []byte("item-2")})
-	_ = taskRepo.Enqueue(ctx, tr, dir, &store.TaskMessage{QueueName: "q_batch", ShardId: 3, Payload: []byte("item-3")})
+	_ = taskRepo.Enqueue(ctx, tx, &store.TaskMessage{QueueName: "q_batch", ShardId: 2, Payload: []byte("item-2")})
+	_ = taskRepo.Enqueue(ctx, tx, &store.TaskMessage{QueueName: "q_batch", ShardId: 3, Payload: []byte("item-3")})
 
-	batch, err := taskRepo.DequeueBatch(ctx, tr, dir, "q_batch", 2)
+	batch, err := taskRepo.DequeueBatch(ctx, tx, "q_batch", 2)
 	if err != nil || len(batch) != 2 {
 		t.Fatalf("DequeueBatch(2) expected 2 items, got %+v, err=%v", batch, err)
 	}
@@ -529,7 +521,7 @@ func TestQueue_EnqueueZerosVersionstampPayload_AndDequeueBatch(t *testing.T) {
 		t.Fatalf("unexpected DequeueBatch(2) items: %+v", batch)
 	}
 
-	rem, err := taskRepo.DequeueBatch(ctx, tr, dir, "q_batch", 5)
+	rem, err := taskRepo.DequeueBatch(ctx, tx, "q_batch", 5)
 	if err != nil || len(rem) != 1 || string(rem[0].Payload) != "item-3" {
 		t.Fatalf("DequeueBatch remaining expected 1 item ('item-3'), got %+v, err=%v", rem, err)
 	}
@@ -537,25 +529,25 @@ func TestQueue_EnqueueZerosVersionstampPayload_AndDequeueBatch(t *testing.T) {
 
 func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	_ = recordStore.SyncMetadata(ctx, tr, dir, []string{"Order"})
-	orderRepo := store.NewOrderRepository(recordStore)
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	orderRepo := store.NewOrderRepository()
 
 	for _, seq := range []int32{1, 2, 3} {
-		_ = orderRepo.Create(ctx, tr, dir, &store.Order{
+		_ = orderRepo.Create(ctx, tx, &store.Order{
 			TenantId: "acme",
 			OrderSeq: seq,
 			Status:   store.OrderStatus_ORDER_STATUS_PENDING,
 		})
 	}
-	_ = orderRepo.Create(ctx, tr, dir, &store.Order{
+	_ = orderRepo.Create(ctx, tx, &store.Order{
 		TenantId: "other",
 		OrderSeq: 1,
 		Status:   store.OrderStatus_ORDER_STATUS_PENDING,
 	})
 
 	// 1. ListOrder with Prefix={"acme"} and Reverse=true (PERF-1, PERF-3)
-	acmeRev, err := orderRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{
+	acmeRev, err := orderRepo.List(ctx, tx, fdblayer.PaginationOptions{
 		Prefix:  tuple.Tuple{"acme"},
 		Limit:   2,
 		Reverse: true,
@@ -567,7 +559,7 @@ func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 		t.Fatalf("expected OrderSeq [3, 2], got [%d, %d]", acmeRev.Items[0].OrderSeq, acmeRev.Items[1].OrderSeq)
 	}
 
-	acmeRev2, err := orderRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{
+	acmeRev2, err := orderRepo.List(ctx, tx, fdblayer.PaginationOptions{
 		Prefix:  tuple.Tuple{"acme"},
 		Begin:   acmeRev.NextKey,
 		Limit:   2,
@@ -578,7 +570,7 @@ func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 	}
 
 	// 2. BatchGetOrder with strongly-typed compound primary key (BUG-5)
-	batchByPK, err := orderRepo.BatchGet(ctx, tr, dir, []store.OrderPrimaryKey{
+	batchByPK, err := orderRepo.BatchGet(ctx, tx, []store.OrderPrimaryKey{
 		{TenantId: "acme", OrderSeq: 1},
 		{TenantId: "acme", OrderSeq: 3},
 	})
@@ -588,7 +580,7 @@ func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 
 	// 3. Out-of-bounds Begin cursor with Prefix={"acme"} must be clamped to prefix range
 	// without leaking records from "other" or causing an inverted range.
-	clampedForwardBefore, err := orderRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{
+	clampedForwardBefore, err := orderRepo.List(ctx, tx, fdblayer.PaginationOptions{
 		Prefix: tuple.Tuple{"acme"},
 		Begin:  tuple.Tuple{"aaa", int64(1)},
 		Limit:  10,
@@ -596,7 +588,7 @@ func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 	if err != nil || len(clampedForwardBefore.Items) != 3 {
 		t.Fatalf("expected Begin<'acme' to be clamped to 'acme' start (3 items), got %+v, err=%v", clampedForwardBefore, err)
 	}
-	clampedForwardAfter, err := orderRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{
+	clampedForwardAfter, err := orderRepo.List(ctx, tx, fdblayer.PaginationOptions{
 		Prefix: tuple.Tuple{"acme"},
 		Begin:  tuple.Tuple{"zzz", int64(1)},
 		Limit:  10,
@@ -604,7 +596,7 @@ func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 	if err != nil || len(clampedForwardAfter.Items) != 0 {
 		t.Fatalf("expected Begin>'acme' to return 0 items without inverted range, got %+v, err=%v", clampedForwardAfter, err)
 	}
-	clampedReverseBefore, err := orderRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{
+	clampedReverseBefore, err := orderRepo.List(ctx, tx, fdblayer.PaginationOptions{
 		Prefix:  tuple.Tuple{"acme"},
 		Begin:   tuple.Tuple{"aaa", int64(1)},
 		Limit:   10,
@@ -613,7 +605,7 @@ func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 	if err != nil || len(clampedReverseBefore.Items) != 0 {
 		t.Fatalf("expected Reverse=true with Begin<'acme' to return 0 items, got %+v, err=%v", clampedReverseBefore, err)
 	}
-	clampedReverseAfter, err := orderRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{
+	clampedReverseAfter, err := orderRepo.List(ctx, tx, fdblayer.PaginationOptions{
 		Prefix:  tuple.Tuple{"acme"},
 		Begin:   tuple.Tuple{"zzz", int64(1)},
 		Limit:   10,
@@ -626,13 +618,13 @@ func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
 
 func TestOrder_CompositeIndexPrefixQueries(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	_ = recordStore.SyncMetadata(ctx, tr, dir, []string{"Order"})
-	orderRepo := store.NewOrderRepository(recordStore)
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	orderRepo := store.NewOrderRepository()
 
 	// Create 3 PENDING orders with distinct CreatedAt timestamps and 1 SHIPPED order
 	for i, ts := range []int64{1000, 2000, 3000} {
-		if err := orderRepo.Create(ctx, tr, dir, &store.Order{
+		if err := orderRepo.Create(ctx, tx, &store.Order{
 			TenantId:  "acme",
 			OrderSeq:  int32(i + 1),
 			Status:    store.OrderStatus_ORDER_STATUS_PENDING,
@@ -641,7 +633,7 @@ func TestOrder_CompositeIndexPrefixQueries(t *testing.T) {
 			t.Fatalf("Create pending order %d failed: %v", i+1, err)
 		}
 	}
-	if err := orderRepo.Create(ctx, tr, dir, &store.Order{
+	if err := orderRepo.Create(ctx, tx, &store.Order{
 		TenantId:  "acme",
 		OrderSeq:  99,
 		Status:    store.OrderStatus_ORDER_STATUS_SHIPPED,
@@ -651,7 +643,7 @@ func TestOrder_CompositeIndexPrefixQueries(t *testing.T) {
 	}
 
 	// 1. GetOrderByStatus (partial prefix of (status, created_at)) returns all 3 PENDING orders ordered by CreatedAt
-	pendingRes, err := orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{})
+	pendingRes, err := orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{})
 	if err != nil || len(pendingRes.Items) != 3 {
 		t.Fatalf("GetOrderByStatus(PENDING) expected 3 orders, got %+v, err=%v", pendingRes, err)
 	}
@@ -661,7 +653,7 @@ func TestOrder_CompositeIndexPrefixQueries(t *testing.T) {
 	}
 
 	// 2. GetOrderByStatus forward pagination (Limit=2) across different CreatedAt values
-	fwd1, err := orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
+	fwd1, err := orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
 		Limit: 2,
 	})
 	if err != nil || len(fwd1.Items) != 2 || !fwd1.HasMore {
@@ -671,7 +663,7 @@ func TestOrder_CompositeIndexPrefixQueries(t *testing.T) {
 		t.Fatalf("expected OrderSeq [1, 2], got [%d, %d]", fwd1.Items[0].OrderSeq, fwd1.Items[1].OrderSeq)
 	}
 
-	fwd2, err := orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
+	fwd2, err := orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
 		Begin: fwd1.NextKey,
 		Limit: 2,
 	})
@@ -680,7 +672,7 @@ func TestOrder_CompositeIndexPrefixQueries(t *testing.T) {
 	}
 
 	// 3. GetOrderByStatus reverse pagination (Limit=2, Reverse=true)
-	rev1, err := orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
+	rev1, err := orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
 		Limit:   2,
 		Reverse: true,
 	})
@@ -691,7 +683,7 @@ func TestOrder_CompositeIndexPrefixQueries(t *testing.T) {
 		t.Fatalf("expected reverse OrderSeq [3, 2], got [%d, %d]", rev1.Items[0].OrderSeq, rev1.Items[1].OrderSeq)
 	}
 
-	rev2, err := orderRepo.GetByStatus(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
+	rev2, err := orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
 		Begin:   rev1.NextKey,
 		Limit:   2,
 		Reverse: true,
@@ -703,10 +695,11 @@ func TestOrder_CompositeIndexPrefixQueries(t *testing.T) {
 
 func TestFanOutIndex_SetAndDeleteDeduplicateRepeatedTags(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	postRepo := store.NewPostRepository(recordStore)
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	postRepo := store.NewPostRepository()
 
-	if err := postRepo.Create(ctx, tr, dir, &store.Post{
+	if err := postRepo.Create(ctx, tx, &store.Post{
 		Id:   "p_dup",
 		Tags: []string{"a", "a", "b"},
 	}); err != nil {
@@ -714,7 +707,7 @@ func TestFanOutIndex_SetAndDeleteDeduplicateRepeatedTags(t *testing.T) {
 	}
 
 	tr.ResetLog()
-	if err := postRepo.Set(ctx, tr, dir, &store.Post{
+	if err := postRepo.Set(ctx, tx, &store.Post{
 		Id:   "p_dup",
 		Tags: []string{"b", "c", "c", "c"},
 	}); err != nil {
@@ -725,7 +718,7 @@ func TestFanOutIndex_SetAndDeleteDeduplicateRepeatedTags(t *testing.T) {
 	}
 
 	tr.ResetLog()
-	if err := postRepo.Delete(ctx, tr, dir, "p_dup"); err != nil {
+	if err := postRepo.Delete(ctx, tx, "p_dup"); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 	if len(tr.ClearCalls) != 3 {
@@ -735,25 +728,25 @@ func TestFanOutIndex_SetAndDeleteDeduplicateRepeatedTags(t *testing.T) {
 
 func TestQueue_CorruptedPayloadPreservesEntry(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
-	taskRepo := store.NewTaskMessageRepository(recordStore)
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	taskRepo := store.NewTaskMessageRepository()
 
-	typeID := recordStore.Metadata()["TaskMessage"]
 	dummyVS := tuple.Versionstamp{
 		TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
 		UserVersion:        0,
 	}
-	corruptKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "corrupt_q", dummyVS, uint64(1)})
+	corruptKey := dir.Pack(tuple.Tuple{store.TaskMessageTypeID, fdblayer.DataNamespace, "corrupt_q", dummyVS, uint64(1)})
 	tr.Set(corruptKey, []byte{0x00, 0xff, 0xff})
 
-	if _, err := taskRepo.Dequeue(ctx, tr, dir, "corrupt_q"); err == nil {
+	if _, err := taskRepo.Dequeue(ctx, tx, "corrupt_q"); err == nil {
 		t.Fatal("expected unmarshal error from Dequeue on corrupted payload")
 	}
 	if !kv.HasKey(corruptKey) {
 		t.Fatal("expected corrupted queue item to remain in store after Dequeue error")
 	}
 
-	if _, err := taskRepo.DequeueBatch(ctx, tr, dir, "corrupt_q", 5); err == nil {
+	if _, err := taskRepo.DequeueBatch(ctx, tx, "corrupt_q", 5); err == nil {
 		t.Fatal("expected unmarshal error from DequeueBatch on corrupted payload")
 	}
 	if !kv.HasKey(corruptKey) {
@@ -763,15 +756,12 @@ func TestQueue_CorruptedPayloadPreservesEntry(t *testing.T) {
 
 func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Order"}); err != nil {
-		t.Fatalf("failed to sync Order metadata: %v", err)
-	}
-	orderRepo := store.NewOrderRepository(recordStore)
-	typeID := recordStore.Metadata()["Order"]
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	orderRepo := store.NewOrderRepository()
 
 	countOrderIndexKeys := func() int {
-		prefix, err := fdb.PrefixRange(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace}))
+		prefix, err := fdb.PrefixRange(dir.Pack(tuple.Tuple{store.OrderTypeID, fdblayer.IndexNamespace}))
 		if err != nil {
 			t.Fatalf("PrefixRange failed: %v", err)
 		}
@@ -790,7 +780,7 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 	//    - 2 keys for fan-out (attachment_hashes)
 	//    - 2 keys for composite fan-out (status, attachment_hashes)
 	//    Total = 6 index keys.
-	if err := orderRepo.Create(ctx, tr, dir, &store.Order{
+	if err := orderRepo.Create(ctx, tx, &store.Order{
 		TenantId:         pk.TenantId,
 		OrderSeq:         pk.OrderSeq,
 		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
@@ -803,16 +793,16 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 	if got := countOrderIndexKeys(); got != 6 {
 		t.Fatalf("expected 6 index keys after Create, got %d", got)
 	}
-	if res, err := orderRepo.GetByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashA, fdblayer.PaginationOptions{}); err != nil || len(res.Items) != 1 {
+	if res, err := orderRepo.GetByStatusAndAttachmentHashes(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, hashA, fdblayer.PaginationOptions{}); err != nil || len(res.Items) != 1 {
 		t.Fatalf("expected 1 order for (PENDING, hashA), got %+v, err=%v", res, err)
 	}
-	if res, err := orderRepo.GetByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashB, fdblayer.PaginationOptions{}); err != nil || len(res.Items) != 1 {
+	if res, err := orderRepo.GetByStatusAndAttachmentHashes(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, hashB, fdblayer.PaginationOptions{}); err != nil || len(res.Items) != 1 {
 		t.Fatalf("expected 1 order for (PENDING, hashB), got %+v, err=%v", res, err)
 	}
 
 	// 2. Set with UNCHANGED Status (PENDING) and updated AttachmentHashes ({hashB, hashC}):
 	//    Delta path must remove hashA, keep hashB, and add hashC on both fan-out indexes.
-	if err := orderRepo.Set(ctx, tr, dir, &store.Order{
+	if err := orderRepo.Set(ctx, tx, &store.Order{
 		TenantId:         pk.TenantId,
 		OrderSeq:         pk.OrderSeq,
 		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
@@ -825,17 +815,17 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 	if got := countOrderIndexKeys(); got != 6 {
 		t.Fatalf("expected 6 index keys after Set (same status), got %d", got)
 	}
-	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashA, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
+	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, hashA, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
 		t.Fatalf("expected (PENDING, hashA) cleared after Set, got %+v", res)
 	}
-	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashC, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
+	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, hashC, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
 		t.Fatalf("expected (PENDING, hashC) added after Set, got %+v", res)
 	}
 
 	// 3. Set with CHANGED Status (PENDING -> SHIPPED) and overlapping AttachmentHashes ({hashC, hashD}):
 	//    Non-repeated field changed in composite fan-out index (status, attachment_hashes),
 	//    so ALL old (PENDING, hashB) and (PENDING, hashC) keys must be cleared, and (SHIPPED, hashC) + (SHIPPED, hashD) written!
-	if err := orderRepo.Set(ctx, tr, dir, &store.Order{
+	if err := orderRepo.Set(ctx, tx, &store.Order{
 		TenantId:         pk.TenantId,
 		OrderSeq:         pk.OrderSeq,
 		Status:           store.OrderStatus_ORDER_STATUS_SHIPPED,
@@ -848,18 +838,18 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 	if got := countOrderIndexKeys(); got != 6 {
 		t.Fatalf("expected 6 index keys after Set (changed status), got %d", got)
 	}
-	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_PENDING, hashC, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
+	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, hashC, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
 		t.Fatalf("stale composite fan-out key (PENDING, hashC) was not cleared when status changed: %+v", res)
 	}
-	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, hashC, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
+	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tx, store.OrderStatus_ORDER_STATUS_SHIPPED, hashC, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
 		t.Fatalf("missing composite fan-out key (SHIPPED, hashC) after status change: %+v", res)
 	}
-	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tr, dir, store.OrderStatus_ORDER_STATUS_SHIPPED, hashD, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
+	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tx, store.OrderStatus_ORDER_STATUS_SHIPPED, hashD, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
 		t.Fatalf("missing composite fan-out key (SHIPPED, hashD) after status change: %+v", res)
 	}
 
 	// 4. Set with empty AttachmentHashes (nil): all fan-out keys must be cleared, leaving only the 2 standard index keys.
-	if err := orderRepo.Set(ctx, tr, dir, &store.Order{
+	if err := orderRepo.Set(ctx, tx, &store.Order{
 		TenantId:         pk.TenantId,
 		OrderSeq:         pk.OrderSeq,
 		Status:           store.OrderStatus_ORDER_STATUS_SHIPPED,
@@ -874,7 +864,7 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 	}
 
 	// 5. Delete must clear all remaining index keys, leaving 0 keys in IndexNamespace.
-	if err := orderRepo.Delete(ctx, tr, dir, pk); err != nil {
+	if err := orderRepo.Delete(ctx, tx, pk); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 	if got := countOrderIndexKeys(); got != 0 {
@@ -885,7 +875,7 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 	//    and Delete must still clear all index keys even if primary key fields inside the stored
 	//    protobuf value were omitted.
 	pk2 := store.OrderPrimaryKey{TenantId: "t2", OrderSeq: 9}
-	if err := orderRepo.Set(ctx, tr, dir, &store.Order{
+	if err := orderRepo.Set(ctx, tx, &store.Order{
 		TenantId:         pk2.TenantId,
 		OrderSeq:         pk2.OrderSeq,
 		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
@@ -900,7 +890,7 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 	}
 
 	// Simulate a stored protobuf value whose PK fields were omitted from the serialized body.
-	rawDataKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk2.TenantId, int64(pk2.OrderSeq)})
+	rawDataKey := dir.Pack(tuple.Tuple{store.OrderTypeID, fdblayer.DataNamespace, pk2.TenantId, int64(pk2.OrderSeq)})
 	strippedBytes, err := proto.Marshal(&store.Order{
 		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
 		CreatedAt:        300,
@@ -912,7 +902,7 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 	}
 	tr.Set(rawDataKey, strippedBytes)
 
-	if err := orderRepo.Delete(ctx, tr, dir, pk2); err != nil {
+	if err := orderRepo.Delete(ctx, tx, pk2); err != nil {
 		t.Fatalf("Delete after PK-stripped payload failed: %v", err)
 	}
 	if got := countOrderIndexKeys(); got != 0 {

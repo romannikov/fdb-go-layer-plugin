@@ -116,6 +116,7 @@ type SecondaryIndexSpec struct {
 // MessageSpec describes an FDB-persisted Protobuf message, FIFO queue, or helper message.
 type MessageSpec struct {
 	Name             string // Protobuf message name (e.g., "User")
+	TypeID           int64  // Compile-time FDB type prefix (explicit annotations.type_id or FNV-1a 32-bit hash of Name)
 	Fields           []FieldSpec
 	PrimaryKeyFields []FieldSpec
 	SecondaryIndexes []SecondaryIndexSpec
@@ -155,6 +156,25 @@ func (f *FileSpec) AnnotatedMessages() []MessageSpec {
 		}
 	}
 	return out
+}
+
+// ValidateUniqueTypeIDs checks that no two annotated messages share the same TypeID.
+func ValidateUniqueTypeIDs(messages []MessageSpec) error {
+	usedTypeIDs := make(map[int64]string, len(messages))
+	for _, m := range messages {
+		if !m.HasRepository() {
+			continue
+		}
+		typeID := m.TypeID
+		if typeID == 0 {
+			typeID = ComputeTypeID(m.Name)
+		}
+		if existingMsg, ok := usedTypeIDs[typeID]; ok {
+			return fmt.Errorf("message type ID collision detected: messages %q and %q share the same type ID %d", m.Name, existingMsg, typeID)
+		}
+		usedTypeIDs[typeID] = m.Name
+	}
+	return nil
 }
 
 // ParseFile extracts and validates a language-neutral FileSpec from a protogen.File.
@@ -211,6 +231,10 @@ func ParseFile(file *protogen.File) (*FileSpec, error) {
 		}
 	}
 
+	if err := ValidateUniqueTypeIDs(spec.Messages); err != nil {
+		return nil, err
+	}
+
 	return spec, nil
 }
 
@@ -240,6 +264,9 @@ func ParsePlugin(plugin *protogen.Plugin) ([]MessageSpec, error) {
 			return nil, err
 		}
 		messages = append(messages, fileSpec.AnnotatedMessages()...)
+	}
+	if err := ValidateUniqueTypeIDs(messages); err != nil {
+		return nil, err
 	}
 	return messages, nil
 }
@@ -326,7 +353,20 @@ func ProcessMessageAll(message *protogen.Message, msgOptions proto.Message) (*Me
 		}
 	}
 
-	spec, err := buildMessageSpecInternal(msgName, fields, fieldMap, primaryKey, rawIndexes, isQueue, true)
+	var explicitTypeID uint32
+	if msgOptions != nil && proto.HasExtension(msgOptions, annotationspb.E_TypeId) {
+		val := proto.GetExtension(msgOptions, annotationspb.E_TypeId)
+		if val != nil {
+			switch v := val.(type) {
+			case uint32:
+				explicitTypeID = v
+			default:
+				return nil, fmt.Errorf("unknown type for type_id in message %s: %T", msgName, v)
+			}
+		}
+	}
+
+	spec, err := buildMessageSpecInternal(msgName, fields, fieldMap, primaryKey, rawIndexes, isQueue, explicitTypeID, true)
 	if err != nil {
 		return nil, err
 	}
@@ -389,7 +429,21 @@ func BuildMessageSpec(
 	rawIndexes []*annotationspb.SecondaryIndex,
 	isQueue bool,
 ) (*MessageSpec, error) {
-	return buildMessageSpecInternal(msgName, fields, fieldMap, primaryKey, rawIndexes, isQueue, false)
+	return buildMessageSpecInternal(msgName, fields, fieldMap, primaryKey, rawIndexes, isQueue, 0, false)
+}
+
+// BuildMessageSpecWithTypeID validates and constructs a MessageSpec with an optional explicit type ID.
+// If explicitTypeID is 0, TypeID defaults to ComputeTypeID(msgName).
+func BuildMessageSpecWithTypeID(
+	msgName string,
+	fields []FieldSpec,
+	fieldMap map[string]FieldSpec,
+	primaryKey []string,
+	rawIndexes []*annotationspb.SecondaryIndex,
+	isQueue bool,
+	explicitTypeID uint32,
+) (*MessageSpec, error) {
+	return buildMessageSpecInternal(msgName, fields, fieldMap, primaryKey, rawIndexes, isQueue, explicitTypeID, false)
 }
 
 func buildMessageSpecInternal(
@@ -399,6 +453,7 @@ func buildMessageSpecInternal(
 	primaryKey []string,
 	rawIndexes []*annotationspb.SecondaryIndex,
 	isQueue bool,
+	explicitTypeID uint32,
 	allowUnannotated bool,
 ) (*MessageSpec, error) {
 	vsCount := 0
@@ -468,8 +523,18 @@ func buildMessageSpecInternal(
 		primaryKeyFields = ReorderQueuePrimaryKeyFields(primaryKeyFields)
 	}
 
+	var typeID int64
+	if len(primaryKeyFields) > 0 || isQueue {
+		if explicitTypeID != 0 {
+			typeID = int64(explicitTypeID)
+		} else {
+			typeID = ComputeTypeID(msgName)
+		}
+	}
+
 	return &MessageSpec{
 		Name:             msgName,
+		TypeID:           typeID,
 		Fields:           fields,
 		PrimaryKeyFields: primaryKeyFields,
 		SecondaryIndexes: secondaryIndexes,
@@ -707,6 +772,13 @@ func EffectiveIndexPrefixes(indexes []SecondaryIndexSpec, idxPos int) []IndexPre
 		}
 	}
 	return prefixes
+}
+
+// ComputeTypeID computes the 32-bit FNV-1a hash of msgName as int64.
+func ComputeTypeID(msgName string) int64 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(msgName))
+	return int64(h.Sum32())
 }
 
 // ComputeIndexID computes the 32-bit FNV-1a hash of the lowercase comma-joined field signature as int64.

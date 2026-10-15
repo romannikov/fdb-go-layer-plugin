@@ -8,39 +8,37 @@ import (
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
-	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
 	"google.golang.org/protobuf/proto"
 )
 
+// PostTypeID is the compile-time type prefix for Post records in FoundationDB.
+const PostTypeID int64 = 4039610727
+
 // PostRepository defines the repository interface for Post.
 type PostRepository interface {
 	fdblayer.GenericRepository[*Post, string]
 
-	GetByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Post], error)
+	GetByTags(ctx context.Context, tx *fdblayer.Tx, Tags string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Post], error)
 }
 
-type postRepository struct {
-	store *fdblayer.RecordStore
-}
+type postRepository struct{}
 
 // NewPostRepository creates a new PostRepository instance.
-func NewPostRepository(store *fdblayer.RecordStore) PostRepository {
-	return &postRepository{store: store}
+func NewPostRepository() PostRepository {
+	return &postRepository{}
 }
 
 // Create creates a new Post entity in the database.
-func (r *postRepository) Create(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *Post) error {
+func (r *postRepository) Create(ctx context.Context, tx *fdblayer.Tx, entity *Post) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	typeID, err := r.store.GetTypeID("Post")
-	if err != nil {
-		return err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
+	key := dir.Pack(tuple.Tuple{PostTypeID, fdblayer.DataNamespace, entity.Id})
 	if existing := tr.Get(key).MustGet(); existing != nil {
 		return fmt.Errorf("post %w", fdblayer.ErrAlreadyExists)
 	}
@@ -60,7 +58,7 @@ func (r *postRepository) Create(ctx context.Context, tr fdblayer.Transaction, di
 				continue
 			}
 			seen[item] = struct{}{}
-			tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+			tr.Set(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, 4095142816,
 				item,
 				entity.Id,
 			}), []byte{})
@@ -71,24 +69,21 @@ func (r *postRepository) Create(ctx context.Context, tr fdblayer.Transaction, di
 }
 
 // Get retrieves a Post entity by its primary key.
-func (r *postRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk string) (*Post, error) {
+func (r *postRepository) Get(ctx context.Context, tx *fdblayer.Tx, pk string) (*Post, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	typeID, err := r.store.GetTypeID("Post")
-	if err != nil {
-		return nil, err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
+	key := dir.Pack(tuple.Tuple{PostTypeID, fdblayer.DataNamespace, pk})
 	valueFuture := tr.Get(key)
 	value := valueFuture.MustGet()
 	if value == nil {
 		return nil, fmt.Errorf("post %w", fdblayer.ErrNotFound)
 	}
 	entity := &Post{}
-	err = proto.Unmarshal(value, entity)
-	if err != nil {
+	if err := proto.Unmarshal(value, entity); err != nil {
 		return nil, err
 	}
 
@@ -96,18 +91,16 @@ func (r *postRepository) Get(ctx context.Context, tr fdb.ReadTransaction, dir di
 }
 
 // Set updates an existing Post entity in the database (or inserts it if not present).
-func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, entity *Post) error {
+func (r *postRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *Post) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	typeID, err := r.store.GetTypeID("Post")
-	if err != nil {
-		return err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
 	var old *Post
 
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, entity.Id})
+	key := dir.Pack(tuple.Tuple{PostTypeID, fdblayer.DataNamespace, entity.Id})
 
 	if oldValue := tr.Get(key).MustGet(); oldValue != nil {
 		var unmarshaled Post
@@ -138,7 +131,7 @@ func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 		for _, item := range old.Tags {
 			if _, keep := newSet[item]; !keep {
 				newSet[item] = struct{}{}
-				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+				tr.Clear(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, 4095142816,
 					item,
 					old.Id,
 				}))
@@ -147,7 +140,7 @@ func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 		for _, item := range entity.Tags {
 			if _, existed := oldSet[item]; !existed {
 				oldSet[item] = struct{}{}
-				tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+				tr.Set(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, 4095142816,
 					item,
 					entity.Id,
 				}), []byte{})
@@ -160,7 +153,7 @@ func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 				continue
 			}
 			seen[item] = struct{}{}
-			tr.Set(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+			tr.Set(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, 4095142816,
 				item,
 				entity.Id,
 			}), []byte{})
@@ -171,16 +164,14 @@ func (r *postRepository) Set(ctx context.Context, tr fdblayer.Transaction, dir d
 }
 
 // Delete removes a Post entity from the database.
-func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, dir directory.DirectorySubspace, pk string) error {
+func (r *postRepository) Delete(ctx context.Context, tx *fdblayer.Tx, pk string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	typeID, err := r.store.GetTypeID("Post")
-	if err != nil {
-		return err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
-	key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
+	key := dir.Pack(tuple.Tuple{PostTypeID, fdblayer.DataNamespace, pk})
 	value := tr.Get(key).MustGet()
 	if value != nil {
 		entity := &Post{}
@@ -196,7 +187,7 @@ func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 					continue
 				}
 				seen[item] = struct{}{}
-				tr.Clear(dir.Pack(tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816,
+				tr.Clear(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, 4095142816,
 					item,
 					entity.Id,
 				}))
@@ -209,23 +200,21 @@ func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, di
 }
 
 // BatchGet retrieves multiple Post entities by their primary keys.
-func (r *postRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []string) ([]*Post, error) {
+func (r *postRepository) BatchGet(ctx context.Context, tx *fdblayer.Tx, pks []string) ([]*Post, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if len(pks) == 0 {
 		return nil, nil
 	}
-	typeID, err := r.store.GetTypeID("Post")
-	if err != nil {
-		return nil, err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 	futures := make([]fdb.FutureByteSlice, len(pks))
 	for i, pk := range pks {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		key := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, pk})
+		key := dir.Pack(tuple.Tuple{PostTypeID, fdblayer.DataNamespace, pk})
 		futures[i] = tr.Get(key)
 	}
 	entities := make([]*Post, 0, len(pks))
@@ -247,14 +236,12 @@ func (r *postRepository) BatchGet(ctx context.Context, tr fdb.ReadTransaction, d
 }
 
 // List retrieves a list of Post entities starting from the given key.
-func (r *postRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Post], error) {
+func (r *postRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Post], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	typeID, err := r.store.GetTypeID("Post")
-	if err != nil {
-		return nil, err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
 	result := &fdblayer.PaginatedResult[*Post]{
 		Items: make([]*Post, 0),
@@ -262,7 +249,7 @@ func (r *postRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir d
 
 	// Compute data prefix range (scoped to opts.Prefix when provided).
 	prefixTpl := make(tuple.Tuple, 2+len(opts.Prefix))
-	prefixTpl[0] = typeID
+	prefixTpl[0] = PostTypeID
 	prefixTpl[1] = fdblayer.DataNamespace
 	for j, el := range opts.Prefix {
 		prefixTpl[2+j] = fdblayer.NormalizeTupleElement(el)
@@ -274,7 +261,7 @@ func (r *postRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir d
 	}
 
 	beginTpl := make(tuple.Tuple, 2+len(opts.Begin))
-	beginTpl[0] = typeID
+	beginTpl[0] = PostTypeID
 	beginTpl[1] = fdblayer.DataNamespace
 	for j, el := range opts.Begin {
 		beginTpl[2+j] = fdblayer.NormalizeTupleElement(el)
@@ -339,19 +326,17 @@ func (r *postRepository) List(ctx context.Context, tr fdb.ReadTransaction, dir d
 }
 
 // GetByTags retrieves a paginated page of Post entities by their Tags index.
-func (r *postRepository) GetByTags(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, Tags string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Post], error) {
+func (r *postRepository) GetByTags(ctx context.Context, tx *fdblayer.Tx, Tags string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Post], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	typeID, err := r.store.GetTypeID("Post")
-	if err != nil {
-		return nil, err
-	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
 
 	result := &fdblayer.PaginatedResult[*Post]{
 		Items: make([]*Post, 0),
 	}
-	baseTpl := tuple.Tuple{typeID, fdblayer.IndexNamespace, 4095142816, Tags}
+	baseTpl := tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, 4095142816, Tags}
 	indexKeyPrefix := dir.Pack(baseTpl)
 	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
 	if err != nil {
@@ -413,7 +398,7 @@ func (r *postRepository) GetByTags(ctx context.Context, tr fdb.ReadTransaction, 
 		}
 		pkTuple := tpl[pkIndexStart:]
 		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
-		keyTpl[0] = typeID
+		keyTpl[0] = PostTypeID
 		keyTpl[1] = fdblayer.DataNamespace
 		copy(keyTpl[2:], pkTuple)
 		futures[i] = tr.Get(dir.Pack(keyTpl))

@@ -14,16 +14,10 @@ import (
 
 func TestAtomicMutations(t *testing.T) {
 	ctx := context.Background()
-	kv := tests.NewMockKV()
-	tr := tests.NewMockTransaction(kv)
-	dir := &tests.MockDirectorySubspace{}
-	recordStore := fdblayer.NewRecordStore()
-	err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"})
-	if err != nil {
-		t.Fatalf("failed to sync metadata: %v", err)
-	}
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
-	counterRepo := atomic.NewCounterRepository(recordStore)
+	counterRepo := atomic.NewCounterRepository()
 
 	// 1. Create a counter
 	c := &atomic.Counter{
@@ -33,13 +27,13 @@ func TestAtomicMutations(t *testing.T) {
 		MinValue: 5,
 	}
 
-	err = counterRepo.Create(ctx, tr, dir, c)
+	err := counterRepo.Create(ctx, tx, c)
 	if err != nil {
 		t.Fatalf("failed to create counter: %v", err)
 	}
 
 	// Verify initial state
-	retrieved, err := counterRepo.Get(ctx, tr, dir, "c1")
+	retrieved, err := counterRepo.Get(ctx, tx, "c1")
 	if err != nil {
 		t.Fatalf("failed to get counter: %v", err)
 	}
@@ -48,50 +42,50 @@ func TestAtomicMutations(t *testing.T) {
 	}
 
 	// 2. Test Add
-	err = counterRepo.AddValue(ctx, tr, dir, "c1", 5)
+	err = counterRepo.AddValue(ctx, tx, "c1", 5)
 	if err != nil {
 		t.Fatalf("failed to add value: %v", err)
 	}
 
-	retrieved, _ = counterRepo.Get(ctx, tr, dir, "c1")
+	retrieved, _ = counterRepo.Get(ctx, tx, "c1")
 	if retrieved.Value != 15 {
 		t.Fatalf("expected value 15, got %d", retrieved.Value)
 	}
 
 	// 3. Test Max
-	err = counterRepo.MaxMaxValue(ctx, tr, dir, "c1", 50) // should not change
+	err = counterRepo.MaxMaxValue(ctx, tx, "c1", 50) // should not change
 	if err != nil {
 		t.Fatalf("failed to max value: %v", err)
 	}
-	retrieved, _ = counterRepo.Get(ctx, tr, dir, "c1")
+	retrieved, _ = counterRepo.Get(ctx, tx, "c1")
 	if retrieved.MaxValue != 100 {
 		t.Fatalf("expected max_value 100, got %d", retrieved.MaxValue)
 	}
 
-	err = counterRepo.MaxMaxValue(ctx, tr, dir, "c1", 150) // should change
+	err = counterRepo.MaxMaxValue(ctx, tx, "c1", 150) // should change
 	if err != nil {
 		t.Fatalf("failed to max value: %v", err)
 	}
-	retrieved, _ = counterRepo.Get(ctx, tr, dir, "c1")
+	retrieved, _ = counterRepo.Get(ctx, tx, "c1")
 	if retrieved.MaxValue != 150 {
 		t.Fatalf("expected max_value 150, got %d", retrieved.MaxValue)
 	}
 
 	// 4. Test Min
-	err = counterRepo.MinMinValue(ctx, tr, dir, "c1", 10) // should not change
+	err = counterRepo.MinMinValue(ctx, tx, "c1", 10) // should not change
 	if err != nil {
 		t.Fatalf("failed to min value: %v", err)
 	}
-	retrieved, _ = counterRepo.Get(ctx, tr, dir, "c1")
+	retrieved, _ = counterRepo.Get(ctx, tx, "c1")
 	if retrieved.MinValue != 5 {
 		t.Fatalf("expected min_value 5, got %d", retrieved.MinValue)
 	}
 
-	err = counterRepo.MinMinValue(ctx, tr, dir, "c1", 2) // should change
+	err = counterRepo.MinMinValue(ctx, tx, "c1", 2) // should change
 	if err != nil {
 		t.Fatalf("failed to min value: %v", err)
 	}
-	retrieved, _ = counterRepo.Get(ctx, tr, dir, "c1")
+	retrieved, _ = counterRepo.Get(ctx, tx, "c1")
 	if retrieved.MinValue != 2 {
 		t.Fatalf("expected min_value 2, got %d", retrieved.MinValue)
 	}
@@ -101,7 +95,7 @@ func TestAtomicMutations(t *testing.T) {
 	var genCounterRepo fdblayer.GenericRepository[*atomic.Counter, string] = counterRepoInterface
 
 	// Test Get via GenericRepository interface
-	genRetrieved, err := genCounterRepo.Get(ctx, tr, dir, "c1")
+	genRetrieved, err := genCounterRepo.Get(ctx, tx, "c1")
 	if err != nil {
 		t.Fatalf("generic counter Get failed: %v", err)
 	}
@@ -110,7 +104,7 @@ func TestAtomicMutations(t *testing.T) {
 	}
 
 	// 5. Verify BatchGetCounter populates atomic fields
-	batchRes, err := counterRepo.BatchGet(ctx, tr, dir, []string{"c1"})
+	batchRes, err := counterRepo.BatchGet(ctx, tx, []string{"c1"})
 	if err != nil {
 		t.Fatalf("BatchGetCounter failed: %v", err)
 	}
@@ -123,11 +117,11 @@ func TestAtomicMutations(t *testing.T) {
 	}
 
 	// 6. Verify Set does not overwrite atomic fields in FieldNamespace (C-2)
-	err = counterRepo.Set(ctx, tr, dir, &atomic.Counter{Id: "c1"})
+	err = counterRepo.Set(ctx, tx, &atomic.Counter{Id: "c1"})
 	if err != nil {
 		t.Fatalf("Set failed: %v", err)
 	}
-	retrievedAfterSet, err := counterRepo.Get(ctx, tr, dir, "c1")
+	retrievedAfterSet, err := counterRepo.Get(ctx, tx, "c1")
 	if err != nil {
 		t.Fatalf("Get after Set failed: %v", err)
 	}
@@ -136,15 +130,15 @@ func TestAtomicMutations(t *testing.T) {
 	}
 
 	// 7. Verify Create with default zero MinValue allows positive Min mutations (C-3)
-	err = counterRepo.Create(ctx, tr, dir, &atomic.Counter{Id: "c_zero"})
+	err = counterRepo.Create(ctx, tx, &atomic.Counter{Id: "c_zero"})
 	if err != nil {
 		t.Fatalf("failed to create zero-initialized counter: %v", err)
 	}
-	err = counterRepo.MinMinValue(ctx, tr, dir, "c_zero", 42)
+	err = counterRepo.MinMinValue(ctx, tx, "c_zero", 42)
 	if err != nil {
 		t.Fatalf("failed to apply Min on zero-initialized counter: %v", err)
 	}
-	retrievedZero, err := counterRepo.Get(ctx, tr, dir, "c_zero")
+	retrievedZero, err := counterRepo.Get(ctx, tx, "c_zero")
 	if err != nil {
 		t.Fatalf("failed to get c_zero: %v", err)
 	}
@@ -153,7 +147,7 @@ func TestAtomicMutations(t *testing.T) {
 	}
 
 	// 8. Verify negative int64 values on Create and Max/Min/Add mutations
-	err = counterRepo.Create(ctx, tr, dir, &atomic.Counter{
+	err = counterRepo.Create(ctx, tx, &atomic.Counter{
 		Id:       "c_neg",
 		Value:    -10,
 		MaxValue: -100,
@@ -162,7 +156,7 @@ func TestAtomicMutations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create negative counter: %v", err)
 	}
-	retrievedNeg, err := counterRepo.Get(ctx, tr, dir, "c_neg")
+	retrievedNeg, err := counterRepo.Get(ctx, tx, "c_neg")
 	if err != nil {
 		t.Fatalf("failed to get c_neg: %v", err)
 	}
@@ -171,38 +165,38 @@ func TestAtomicMutations(t *testing.T) {
 	}
 
 	// Max: -200 < -100 (should stay -100), -50 > -100 (should become -50)
-	_ = counterRepo.MaxMaxValue(ctx, tr, dir, "c_neg", -200)
-	retrievedNeg, _ = counterRepo.Get(ctx, tr, dir, "c_neg")
+	_ = counterRepo.MaxMaxValue(ctx, tx, "c_neg", -200)
+	retrievedNeg, _ = counterRepo.Get(ctx, tx, "c_neg")
 	if retrievedNeg.MaxValue != -100 {
 		t.Fatalf("expected max_value -100 after -200, got %d", retrievedNeg.MaxValue)
 	}
-	_ = counterRepo.MaxMaxValue(ctx, tr, dir, "c_neg", -50)
-	retrievedNeg, _ = counterRepo.Get(ctx, tr, dir, "c_neg")
+	_ = counterRepo.MaxMaxValue(ctx, tx, "c_neg", -50)
+	retrievedNeg, _ = counterRepo.Get(ctx, tx, "c_neg")
 	if retrievedNeg.MaxValue != -50 {
 		t.Fatalf("expected max_value -50 after -50, got %d", retrievedNeg.MaxValue)
 	}
 
 	// Min: -2 > -5 (should stay -5), -20 < -5 (should become -20)
-	_ = counterRepo.MinMinValue(ctx, tr, dir, "c_neg", -2)
-	retrievedNeg, _ = counterRepo.Get(ctx, tr, dir, "c_neg")
+	_ = counterRepo.MinMinValue(ctx, tx, "c_neg", -2)
+	retrievedNeg, _ = counterRepo.Get(ctx, tx, "c_neg")
 	if retrievedNeg.MinValue != -5 {
 		t.Fatalf("expected min_value -5 after -2, got %d", retrievedNeg.MinValue)
 	}
-	_ = counterRepo.MinMinValue(ctx, tr, dir, "c_neg", -20)
-	retrievedNeg, _ = counterRepo.Get(ctx, tr, dir, "c_neg")
+	_ = counterRepo.MinMinValue(ctx, tx, "c_neg", -20)
+	retrievedNeg, _ = counterRepo.Get(ctx, tx, "c_neg")
 	if retrievedNeg.MinValue != -20 {
 		t.Fatalf("expected min_value -20 after -20, got %d", retrievedNeg.MinValue)
 	}
 
 	// Negative Max on positive counter c1 (currently MaxValue=150) must NOT overwrite 150
-	_ = counterRepo.MaxMaxValue(ctx, tr, dir, "c1", -1)
-	retrievedC1, _ := counterRepo.Get(ctx, tr, dir, "c1")
+	_ = counterRepo.MaxMaxValue(ctx, tx, "c1", -1)
+	retrievedC1, _ := counterRepo.Get(ctx, tx, "c1")
 	if retrievedC1.MaxValue != 150 {
 		t.Fatalf("expected c1 max_value to stay 150 after Max(-1), got %d", retrievedC1.MaxValue)
 	}
 	// Negative Min on positive counter c1 (currently MinValue=2) MUST update to -10
-	_ = counterRepo.MinMinValue(ctx, tr, dir, "c1", -10)
-	retrievedC1, _ = counterRepo.Get(ctx, tr, dir, "c1")
+	_ = counterRepo.MinMinValue(ctx, tx, "c1", -10)
+	retrievedC1, _ = counterRepo.Get(ctx, tx, "c1")
 	if retrievedC1.MinValue != -10 {
 		t.Fatalf("expected c1 min_value to become -10 after Min(-10), got %d", retrievedC1.MinValue)
 	}
@@ -210,14 +204,8 @@ func TestAtomicMutations(t *testing.T) {
 
 func TestConcurrentSetAndCreate_DoesNotMutateCallerStruct(t *testing.T) {
 	ctx := context.Background()
-	kv := tests.NewMockKV()
-	tr := tests.NewMockTransaction(kv)
-	dir := &tests.MockDirectorySubspace{}
-	recordStore := fdblayer.NewRecordStore()
-	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"}); err != nil {
-		t.Fatalf("failed to sync metadata: %v", err)
-	}
-	counterRepo := atomic.NewCounterRepository(recordStore)
+	_, dir, _ := tests.Setup()
+	counterRepo := atomic.NewCounterRepository()
 
 	shared := &atomic.Counter{
 		Id:       "shared-counter",
@@ -233,8 +221,9 @@ func TestConcurrentSetAndCreate_DoesNotMutateCallerStruct(t *testing.T) {
 			defer wg.Done()
 			localKV := tests.NewMockKV()
 			localTr := tests.NewMockTransaction(localKV)
+			localTx := fdblayer.NewTx(localTr, dir)
 			for j := 0; j < 200; j++ {
-				_ = counterRepo.Set(ctx, localTr, dir, shared)
+				_ = counterRepo.Set(ctx, localTx, shared)
 				if shared.Value != 999 || shared.MaxValue != 5000 || shared.MinValue != 10 {
 					t.Errorf("caller struct mutated during concurrent Set: %+v", shared)
 					return
@@ -251,21 +240,12 @@ func TestConcurrentSetAndCreate_DoesNotMutateCallerStruct(t *testing.T) {
 
 func TestReadZerosAtomicFieldsBeforeFieldNamespace(t *testing.T) {
 	ctx := context.Background()
-	kv := tests.NewMockKV()
-	tr := tests.NewMockTransaction(kv)
-	dir := &tests.MockDirectorySubspace{}
-	recordStore := fdblayer.NewRecordStore()
-	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"}); err != nil {
-		t.Fatalf("failed to sync metadata: %v", err)
-	}
-	counterRepo := atomic.NewCounterRepository(recordStore)
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	counterRepo := atomic.NewCounterRepository()
 
 	// Simulate a legacy/external write where DataNamespace contains non-zero atomic fields
 	// in the protobuf blob while FieldNamespace has no keys.
-	typeID, err := recordStore.GetTypeID("Counter")
-	if err != nil {
-		t.Fatalf("failed to get typeID: %v", err)
-	}
 	rawBytes, err := proto.Marshal(&atomic.Counter{
 		Id:       "legacy",
 		Value:    777,
@@ -275,11 +255,11 @@ func TestReadZerosAtomicFieldsBeforeFieldNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to marshal legacy counter: %v", err)
 	}
-	dataKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "legacy"})
+	dataKey := dir.Pack(tuple.Tuple{atomic.CounterTypeID, fdblayer.DataNamespace, "legacy"})
 	tr.Set(dataKey, rawBytes)
 
 	// Get must return 0 for all atomic fields since FieldNamespace is empty.
-	got, err := counterRepo.Get(ctx, tr, dir, "legacy")
+	got, err := counterRepo.Get(ctx, tx, "legacy")
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
@@ -288,7 +268,7 @@ func TestReadZerosAtomicFieldsBeforeFieldNamespace(t *testing.T) {
 	}
 
 	// BatchGetCounter must also return 0 for all atomic fields.
-	batchGot, err := counterRepo.BatchGet(ctx, tr, dir, []string{"legacy"})
+	batchGot, err := counterRepo.BatchGet(ctx, tx, []string{"legacy"})
 	if err != nil {
 		t.Fatalf("BatchGetCounter failed: %v", err)
 	}
@@ -297,7 +277,7 @@ func TestReadZerosAtomicFieldsBeforeFieldNamespace(t *testing.T) {
 	}
 
 	// ListCounter must also return 0 for all atomic fields.
-	listGot, err := counterRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{})
+	listGot, err := counterRepo.List(ctx, tx, fdblayer.PaginationOptions{})
 	if err != nil {
 		t.Fatalf("ListCounter failed: %v", err)
 	}
@@ -308,14 +288,9 @@ func TestReadZerosAtomicFieldsBeforeFieldNamespace(t *testing.T) {
 
 func TestDeleteCounter_ClearsFieldNamespace(t *testing.T) {
 	ctx := context.Background()
-	kv := tests.NewMockKV()
-	tr := tests.NewMockTransaction(kv)
-	dir := &tests.MockDirectorySubspace{}
-	recordStore := fdblayer.NewRecordStore()
-	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"}); err != nil {
-		t.Fatalf("failed to sync metadata: %v", err)
-	}
-	counterRepo := atomic.NewCounterRepository(recordStore)
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	counterRepo := atomic.NewCounterRepository()
 
 	c := &atomic.Counter{
 		Id:       "c_del",
@@ -326,22 +301,22 @@ func TestDeleteCounter_ClearsFieldNamespace(t *testing.T) {
 		I32Min:   -20,
 		U32Add:   40,
 	}
-	if err := counterRepo.Create(ctx, tr, dir, c); err != nil {
+	if err := counterRepo.Create(ctx, tx, c); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	if err := counterRepo.AddValue(ctx, tr, dir, "c_del", 50); err != nil {
+	if err := counterRepo.AddValue(ctx, tx, "c_del", 50); err != nil {
 		t.Fatalf("AddCounterValue failed: %v", err)
 	}
 
-	if err := counterRepo.Delete(ctx, tr, dir, "c_del"); err != nil {
+	if err := counterRepo.Delete(ctx, tx, "c_del"); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 
 	// Re-create the same primary key with zero values — stale FieldNamespace keys must not leak!
-	if err := counterRepo.Create(ctx, tr, dir, &atomic.Counter{Id: "c_del"}); err != nil {
+	if err := counterRepo.Create(ctx, tx, &atomic.Counter{Id: "c_del"}); err != nil {
 		t.Fatalf("re-Create failed: %v", err)
 	}
-	got, err := counterRepo.Get(ctx, tr, dir, "c_del")
+	got, err := counterRepo.Get(ctx, tx, "c_del")
 	if err != nil {
 		t.Fatalf("Get after re-Create failed: %v", err)
 	}
@@ -352,14 +327,9 @@ func TestDeleteCounter_ClearsFieldNamespace(t *testing.T) {
 
 func TestAtomicMutations_UnsignedAnd32Bit(t *testing.T) {
 	ctx := context.Background()
-	kv := tests.NewMockKV()
-	tr := tests.NewMockTransaction(kv)
-	dir := &tests.MockDirectorySubspace{}
-	recordStore := fdblayer.NewRecordStore()
-	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"}); err != nil {
-		t.Fatalf("failed to sync metadata: %v", err)
-	}
-	counterRepo := atomic.NewCounterRepository(recordStore)
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	counterRepo := atomic.NewCounterRepository()
 
 	c := &atomic.Counter{
 		Id:     "c_types",
@@ -367,48 +337,48 @@ func TestAtomicMutations_UnsignedAnd32Bit(t *testing.T) {
 		I32Min: -50,
 		U32Add: 10,
 	}
-	if err := counterRepo.Create(ctx, tr, dir, c); err != nil {
+	if err := counterRepo.Create(ctx, tx, c); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
 
 	// 1. uint64 Max including values > math.MaxInt64 (high bit set)
 	const highU64 uint64 = 1<<63 + 12345
-	if err := counterRepo.MaxU64Max(ctx, tr, dir, "c_types", 500); err != nil {
+	if err := counterRepo.MaxU64Max(ctx, tx, "c_types", 500); err != nil {
 		t.Fatalf("MaxCounterU64Max(500) failed: %v", err)
 	}
-	got, _ := counterRepo.Get(ctx, tr, dir, "c_types")
+	got, _ := counterRepo.Get(ctx, tx, "c_types")
 	if got.U64Max != 1000 {
 		t.Fatalf("expected U64Max 1000, got %d", got.U64Max)
 	}
-	if err := counterRepo.MaxU64Max(ctx, tr, dir, "c_types", highU64); err != nil {
+	if err := counterRepo.MaxU64Max(ctx, tx, "c_types", highU64); err != nil {
 		t.Fatalf("MaxCounterU64Max(highU64) failed: %v", err)
 	}
-	got, _ = counterRepo.Get(ctx, tr, dir, "c_types")
+	got, _ = counterRepo.Get(ctx, tx, "c_types")
 	if got.U64Max != highU64 {
 		t.Fatalf("expected U64Max %d, got %d", highU64, got.U64Max)
 	}
 
 	// 2. int32 Min with negative values
-	if err := counterRepo.MinI32Min(ctx, tr, dir, "c_types", -10); err != nil {
+	if err := counterRepo.MinI32Min(ctx, tx, "c_types", -10); err != nil {
 		t.Fatalf("MinCounterI32Min(-10) failed: %v", err)
 	}
-	got, _ = counterRepo.Get(ctx, tr, dir, "c_types")
+	got, _ = counterRepo.Get(ctx, tx, "c_types")
 	if got.I32Min != -50 {
 		t.Fatalf("expected I32Min -50, got %d", got.I32Min)
 	}
-	if err := counterRepo.MinI32Min(ctx, tr, dir, "c_types", -200); err != nil {
+	if err := counterRepo.MinI32Min(ctx, tx, "c_types", -200); err != nil {
 		t.Fatalf("MinCounterI32Min(-200) failed: %v", err)
 	}
-	got, _ = counterRepo.Get(ctx, tr, dir, "c_types")
+	got, _ = counterRepo.Get(ctx, tx, "c_types")
 	if got.I32Min != -200 {
 		t.Fatalf("expected I32Min -200, got %d", got.I32Min)
 	}
 
 	// 3. uint32 Add
-	if err := counterRepo.AddU32Add(ctx, tr, dir, "c_types", 25); err != nil {
+	if err := counterRepo.AddU32Add(ctx, tx, "c_types", 25); err != nil {
 		t.Fatalf("AddCounterU32Add(25) failed: %v", err)
 	}
-	got, _ = counterRepo.Get(ctx, tr, dir, "c_types")
+	got, _ = counterRepo.Get(ctx, tx, "c_types")
 	if got.U32Add != 35 {
 		t.Fatalf("expected U32Add 35, got %d", got.U32Add)
 	}
@@ -416,23 +386,18 @@ func TestAtomicMutations_UnsignedAnd32Bit(t *testing.T) {
 
 func TestZeroInitializedMaxAndSetAtomicFields(t *testing.T) {
 	ctx := context.Background()
-	kv := tests.NewMockKV()
-	tr := tests.NewMockTransaction(kv)
-	dir := &tests.MockDirectorySubspace{}
-	recordStore := fdblayer.NewRecordStore()
-	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Counter"}); err != nil {
-		t.Fatalf("failed to sync metadata: %v", err)
-	}
-	counterRepo := atomic.NewCounterRepository(recordStore)
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	counterRepo := atomic.NewCounterRepository()
 
 	// 1. Create with MaxValue=0 then MaxCounterMaxValue(-100) must stay 0 (not become -100)
-	if err := counterRepo.Create(ctx, tr, dir, &atomic.Counter{Id: "c_max_zero"}); err != nil {
+	if err := counterRepo.Create(ctx, tx, &atomic.Counter{Id: "c_max_zero"}); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	if err := counterRepo.MaxMaxValue(ctx, tr, dir, "c_max_zero", -100); err != nil {
+	if err := counterRepo.MaxMaxValue(ctx, tx, "c_max_zero", -100); err != nil {
 		t.Fatalf("MaxCounterMaxValue(-100) failed: %v", err)
 	}
-	gotZero, err := counterRepo.Get(ctx, tr, dir, "c_max_zero")
+	gotZero, err := counterRepo.Get(ctx, tx, "c_max_zero")
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
@@ -442,7 +407,7 @@ func TestZeroInitializedMaxAndSetAtomicFields(t *testing.T) {
 
 	// 2. Set upsert with non-zero atomic fields must persist them to FieldNamespace,
 	// and Set upsert with MaxValue=0 must write signed bias so subsequent Max(-100) stays 0 (BUG-1).
-	if err := counterRepo.Set(ctx, tr, dir, &atomic.Counter{
+	if err := counterRepo.Set(ctx, tx, &atomic.Counter{
 		Id:       "c_set_upsert",
 		Value:    42,
 		MaxValue: 0,
@@ -450,10 +415,10 @@ func TestZeroInitializedMaxAndSetAtomicFields(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Set failed: %v", err)
 	}
-	if err := counterRepo.MaxMaxValue(ctx, tr, dir, "c_set_upsert", -100); err != nil {
+	if err := counterRepo.MaxMaxValue(ctx, tx, "c_set_upsert", -100); err != nil {
 		t.Fatalf("MaxCounterMaxValue(-100) after Set upsert failed: %v", err)
 	}
-	gotUpsert, err := counterRepo.Get(ctx, tr, dir, "c_set_upsert")
+	gotUpsert, err := counterRepo.Get(ctx, tx, "c_set_upsert")
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
@@ -463,18 +428,18 @@ func TestZeroInitializedMaxAndSetAtomicFields(t *testing.T) {
 
 	// 3. Read-modify-write via Get + concurrent Add + Set MUST NOT clobber FieldNamespace
 	// even when the struct passed to Set has non-zero atomic field values from the earlier Get (BUG-1).
-	staleCopy, err := counterRepo.Get(ctx, tr, dir, "c_set_upsert")
+	staleCopy, err := counterRepo.Get(ctx, tx, "c_set_upsert")
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
-	if err := counterRepo.AddValue(ctx, tr, dir, "c_set_upsert", 58); err != nil {
+	if err := counterRepo.AddValue(ctx, tx, "c_set_upsert", 58); err != nil {
 		t.Fatalf("AddCounterValue failed: %v", err)
 	}
 	// staleCopy.Value is still 42 (non-zero!), while FieldNamespace is now 100.
-	if err := counterRepo.Set(ctx, tr, dir, staleCopy); err != nil {
+	if err := counterRepo.Set(ctx, tx, staleCopy); err != nil {
 		t.Fatalf("Set with staleCopy failed: %v", err)
 	}
-	gotAfterRMW, err := counterRepo.Get(ctx, tr, dir, "c_set_upsert")
+	gotAfterRMW, err := counterRepo.Get(ctx, tx, "c_set_upsert")
 	if err != nil {
 		t.Fatalf("Get after RMW Set failed: %v", err)
 	}
@@ -483,19 +448,19 @@ func TestZeroInitializedMaxAndSetAtomicFields(t *testing.T) {
 	}
 
 	// 4. Explicit SetCounter* methods can set and reset atomic fields to 0 (BUG-1).
-	if err := counterRepo.SetValue(ctx, tr, dir, "c_set_upsert", 0); err != nil {
+	if err := counterRepo.SetValue(ctx, tx, "c_set_upsert", 0); err != nil {
 		t.Fatalf("SetCounterValue(0) failed: %v", err)
 	}
-	if err := counterRepo.SetMaxValue(ctx, tr, dir, "c_set_upsert", 0); err != nil {
+	if err := counterRepo.SetMaxValue(ctx, tx, "c_set_upsert", 0); err != nil {
 		t.Fatalf("SetCounterMaxValue(0) failed: %v", err)
 	}
-	if err := counterRepo.SetMinValue(ctx, tr, dir, "c_set_upsert", 0); err != nil {
+	if err := counterRepo.SetMinValue(ctx, tx, "c_set_upsert", 0); err != nil {
 		t.Fatalf("SetCounterMinValue(0) failed: %v", err)
 	}
 	// After resetting MaxValue=0 and MinValue=0, Max(-50) must stay 0 and Min(25) must become 25.
-	_ = counterRepo.MaxMaxValue(ctx, tr, dir, "c_set_upsert", -50)
-	_ = counterRepo.MinMinValue(ctx, tr, dir, "c_set_upsert", 25)
-	gotReset, err := counterRepo.Get(ctx, tr, dir, "c_set_upsert")
+	_ = counterRepo.MaxMaxValue(ctx, tx, "c_set_upsert", -50)
+	_ = counterRepo.MinMinValue(ctx, tx, "c_set_upsert", 25)
+	gotReset, err := counterRepo.Get(ctx, tx, "c_set_upsert")
 	if err != nil {
 		t.Fatalf("Get after SetCounter* reset failed: %v", err)
 	}
@@ -504,13 +469,13 @@ func TestZeroInitializedMaxAndSetAtomicFields(t *testing.T) {
 	}
 
 	// 5. BatchGetCounter strongly-typed batch lookup and ListCounter with Reverse: true (BUG-5, PERF-3).
-	_ = counterRepo.SetValue(ctx, tr, dir, "c_max_zero", 11)
-	byPK, err := counterRepo.BatchGet(ctx, tr, dir, []string{"c_max_zero", "c_set_upsert"})
+	_ = counterRepo.SetValue(ctx, tx, "c_max_zero", 11)
+	byPK, err := counterRepo.BatchGet(ctx, tx, []string{"c_max_zero", "c_set_upsert"})
 	if err != nil || len(byPK) != 2 {
 		t.Fatalf("BatchGetCounter failed: got %+v, err=%v", byPK, err)
 	}
 
-	revList, err := counterRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{
+	revList, err := counterRepo.List(ctx, tx, fdblayer.PaginationOptions{
 		Limit:   10,
 		Reverse: true,
 	})

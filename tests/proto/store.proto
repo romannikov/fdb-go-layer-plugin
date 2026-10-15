@@ -58,6 +58,7 @@ enum OrderStatus {
 }
 
 message Order {
+    option (annotations.type_id) = 100;
     option (annotations.primary_key) = "tenant_id";
     option (annotations.primary_key) = "order_seq";
 

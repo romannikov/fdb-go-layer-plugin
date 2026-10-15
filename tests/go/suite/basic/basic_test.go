@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -15,100 +16,33 @@ import (
 	"github.com/romannikov/fdb-layer/tests/go/store"
 )
 
-// RecordStore & Metadata Tests
-
-func TestSyncMetadata_FreshStore(t *testing.T) {
-	recordStore, _, _, kv := tests.SyncAndSetup()
-
-	meta := recordStore.Metadata()
-	if meta["User"] == 0 || meta["Product"] == 0 {
-		t.Fatalf("metadata not populated: %v", meta)
-	}
-	if meta["User"] == meta["Product"] {
-		t.Fatalf("User and Product got the same type ID")
-	}
-	// Four metadata keys should have been written
-	if len(kv.Snapshot()) != 4 {
-		t.Fatalf("expected 4 keys written, got %d", len(kv.Snapshot()))
-	}
+func init() {
+	fdb.MustAPIVersion(710)
 }
 
-func TestSyncMetadata_Idempotent(t *testing.T) {
-	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	firstMeta := recordStore.Metadata()
+// Compile-Time TypeID Tests
 
-	// Sync again — IDs should remain stable, no extra writes
-	err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"})
-	if err != nil {
-		t.Fatalf("second SyncMetadata failed: %v", err)
+func TestCompileTimeTypeIDs_DistinctAndDeterministic(t *testing.T) {
+	ids := map[string]int64{
+		"User":        store.UserTypeID,
+		"Product":     store.ProductTypeID,
+		"Post":        store.PostTypeID,
+		"TaskMessage": store.TaskMessageTypeID,
+		"Order":       store.OrderTypeID,
+		"AuditLog":    store.AuditLogTypeID,
 	}
-	secondMeta := recordStore.Metadata()
-	if firstMeta["User"] != secondMeta["User"] || firstMeta["Product"] != secondMeta["Product"] {
-		t.Fatalf("IDs changed on second sync: %v → %v", firstMeta, secondMeta)
+	seen := make(map[int64]string, len(ids))
+	for name, id := range ids {
+		if id <= 0 {
+			t.Fatalf("expected positive compile-time TypeID for %s, got %d", name, id)
+		}
+		if prev, exists := seen[id]; exists {
+			t.Fatalf("TypeID collision between %s and %s (%d)", prev, name, id)
+		}
+		seen[id] = name
 	}
-}
-
-func TestMetadata_ReturnsCopy(t *testing.T) {
-	recordStore, _, _, _ := tests.SyncAndSetup()
-	m := recordStore.Metadata()
-	m["User"] = 9999
-	if recordStore.Metadata()["User"] == 9999 {
-		t.Fatal("Metadata() returned a reference, not a copy")
-	}
-}
-
-func TestNewRecordStore_EmptyMetadata(t *testing.T) {
-	recordStore := fdblayer.NewRecordStore()
-	m := recordStore.Metadata()
-	if len(m) != 0 {
-		t.Fatalf("expected empty metadata, got %v", m)
-	}
-}
-
-func TestSyncMetadata_TransactionRetry(t *testing.T) {
-	ctx := context.Background()
-	recordStore := fdblayer.NewRecordStore()
-	dir := &tests.MockDirectorySubspace{}
-
-	// Attempt 1: populates in-memory recordStore, but its transactionKV is discarded (simulating FDB conflict).
-	abortedKV := tests.NewMockKV()
-	abortedTr := tests.NewMockTransaction(abortedKV)
-	if err := recordStore.SyncMetadata(ctx, abortedTr, dir, []string{"User", "Product"}); err != nil {
-		t.Fatalf("first attempt SyncMetadata failed: %v", err)
-	}
-
-	// Attempt 2: runs on a fresh committed KV. It must still write the metadata keys to committedKV.
-	committedKV := tests.NewMockKV()
-	committedTr := tests.NewMockTransaction(committedKV)
-	if err := recordStore.SyncMetadata(ctx, committedTr, dir, []string{"User", "Product"}); err != nil {
-		t.Fatalf("retry SyncMetadata failed: %v", err)
-	}
-
-	if len(committedKV.Snapshot()) != 2 {
-		t.Fatalf("expected 2 metadata keys written on retry, got %d", len(committedKV.Snapshot()))
-	}
-}
-
-func TestSyncMetadata_IncrementalAndCancelSafe(t *testing.T) {
-	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-
-	if err := recordStore.SyncMetadata(ctx, tr, dir, []string{"Order"}); err != nil {
-		t.Fatalf("incremental SyncMetadata failed: %v", err)
-	}
-	meta := recordStore.Metadata()
-	if meta["User"] != 1 || meta["Order"] != 5 {
-		t.Fatalf("expected User=1 and Order=5 after incremental SyncMetadata, got %v", meta)
-	}
-
-	cancelCtx, cancel := context.WithCancel(ctx)
-	cancel()
-	if err := recordStore.SyncMetadata(cancelCtx, tr, dir, []string{"AuditLog"}); err == nil {
-		t.Fatal("expected error for canceled context")
-	}
-	if recordStore.Metadata()["User"] != 1 || recordStore.Metadata()["Order"] != 5 {
-		t.Fatalf("canceled SyncMetadata corrupted existing metadata: %v", recordStore.Metadata())
+	if store.OrderTypeID != 100 {
+		t.Fatalf("expected explicit OrderTypeID = 100, got %d", store.OrderTypeID)
 	}
 }
 
@@ -117,22 +51,22 @@ func TestSyncMetadata_IncrementalAndCancelSafe(t *testing.T) {
 // Create
 func TestCreateUser_Success(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 	user := &store.User{Id: "u1", Name: "Alice", Email: "alice@example.com"}
 
-	repo := store.NewUserRepository(recordStore)
-	if err := repo.Create(ctx, tr, dir, user); err != nil {
+	repo := store.NewUserRepository()
+	if err := repo.Create(ctx, tx, user); err != nil {
 		t.Fatalf("CreateUser failed: %v", err)
 	}
 
-	typeID := recordStore.Metadata()["User"]
 	// Primary key
-	pk := tuple.Tuple{typeID, fdblayer.DataNamespace, "u1"}.Pack()
+	pk := tuple.Tuple{store.UserTypeID, fdblayer.DataNamespace, "u1"}.Pack()
 	if !kv.HasKey(pk) {
 		t.Fatal("primary key not written")
 	}
 	// Index key
-	ik := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(2324124615), "alice@example.com", "u1"}.Pack()
+	ik := tuple.Tuple{store.UserTypeID, fdblayer.IndexNamespace, int64(2324124615), "alice@example.com", "u1"}.Pack()
 	if !kv.HasKey(ik) {
 		t.Fatal("index key not written")
 	}
@@ -149,20 +83,20 @@ func TestCreateUser_Success(t *testing.T) {
 
 func TestCreateProduct_Success(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 	p := &store.Product{Id: "p1", Name: "Widget", Category: "tools", Price: 42}
 
-	repo := store.NewProductRepository(recordStore)
-	if err := repo.Create(ctx, tr, dir, p); err != nil {
+	repo := store.NewProductRepository()
+	if err := repo.Create(ctx, tx, p); err != nil {
 		t.Fatalf("CreateProduct failed: %v", err)
 	}
 
-	typeID := recordStore.Metadata()["Product"]
-	pk := tuple.Tuple{typeID, fdblayer.DataNamespace, "p1"}.Pack()
+	pk := tuple.Tuple{store.ProductTypeID, fdblayer.DataNamespace, "p1"}.Pack()
 	if !kv.HasKey(pk) {
 		t.Fatal("primary key not written")
 	}
-	ik := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(3475980913), "tools", "p1"}.Pack()
+	ik := tuple.Tuple{store.ProductTypeID, fdblayer.IndexNamespace, int64(3475980913), "tools", "p1"}.Pack()
 	if !kv.HasKey(ik) {
 		t.Fatal("category index key not written")
 	}
@@ -178,11 +112,12 @@ func TestCreateProduct_Success(t *testing.T) {
 
 func TestCreateUser_AlreadyExists(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
-	repo := store.NewUserRepository(recordStore)
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewUserRepository()
 
 	first := &store.User{Id: "u1", Name: "Alice", Email: "alice@example.com"}
-	if err := repo.Create(ctx, tr, dir, first); err != nil {
+	if err := repo.Create(ctx, tx, first); err != nil {
 		t.Fatalf("initial Create failed: %v", err)
 	}
 
@@ -190,12 +125,12 @@ func TestCreateUser_AlreadyExists(t *testing.T) {
 	// must fail with fdblayer.ErrAlreadyExists and leave both the primary record
 	// and secondary index untouched.
 	duplicate := &store.User{Id: "u1", Name: "Bob", Email: "bob@example.com"}
-	err := repo.Create(ctx, tr, dir, duplicate)
+	err := repo.Create(ctx, tx, duplicate)
 	if !errors.Is(err, fdblayer.ErrAlreadyExists) {
 		t.Fatalf("expected ErrAlreadyExists on duplicate Create, got: %v", err)
 	}
 
-	got, err := repo.Get(ctx, tr, dir, "u1")
+	got, err := repo.Get(ctx, tx, "u1")
 	if err != nil {
 		t.Fatalf("Get after rejected Create failed: %v", err)
 	}
@@ -203,39 +138,22 @@ func TestCreateUser_AlreadyExists(t *testing.T) {
 		t.Fatalf("existing record was overwritten by duplicate Create: %+v", got)
 	}
 
-	typeID := recordStore.Metadata()["User"]
-	bobIdx := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(2324124615), "bob@example.com", "u1"}.Pack()
+	bobIdx := tuple.Tuple{store.UserTypeID, fdblayer.IndexNamespace, int64(2324124615), "bob@example.com", "u1"}.Pack()
 	if kv.HasKey(bobIdx) {
 		t.Fatal("duplicate Create must not write secondary index entry")
-	}
-}
-
-func TestCreate_BeforeSync(t *testing.T) {
-	ctx := context.Background()
-	kv := tests.NewMockKV()
-	tr := tests.NewMockTransaction(kv)
-	dir := &tests.MockDirectorySubspace{}
-	recordStore := fdblayer.NewRecordStore() // no SyncMetadata
-
-	repo := store.NewUserRepository(recordStore)
-	err := repo.Create(ctx, tr, dir, &store.User{Id: "u1"})
-	if err == nil {
-		t.Fatal("expected error when metadata not synced")
-	}
-	if !strings.Contains(err.Error(), "not found in metadata") {
-		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 // Get
 func TestGetUser_Success(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 	user := &store.User{Id: "u1", Name: "Alice", Email: "alice@example.com"}
-	repo := store.NewUserRepository(recordStore)
-	_ = repo.Create(ctx, tr, dir, user)
+	repo := store.NewUserRepository()
+	_ = repo.Create(ctx, tx, user)
 
-	got, err := repo.Get(ctx, tr, dir, "u1")
+	got, err := repo.Get(ctx, tx, "u1")
 	if err != nil {
 		t.Fatalf("GetUser failed: %v", err)
 	}
@@ -246,10 +164,11 @@ func TestGetUser_Success(t *testing.T) {
 
 func TestGetUser_NotFound(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
-	repo := store.NewUserRepository(recordStore)
-	_, err := repo.Get(ctx, tr, dir, "nonexistent")
+	repo := store.NewUserRepository()
+	_, err := repo.Get(ctx, tx, "nonexistent")
 	if err == nil {
 		t.Fatal("expected not found error")
 	}
@@ -260,11 +179,12 @@ func TestGetUser_NotFound(t *testing.T) {
 
 func TestGetProduct_Success(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	repo := store.NewProductRepository(recordStore)
-	_ = repo.Create(ctx, tr, dir, &store.Product{Id: "p1", Name: "Gizmo", Category: "tech", Price: 99})
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewProductRepository()
+	_ = repo.Create(ctx, tx, &store.Product{Id: "p1", Name: "Gizmo", Category: "tech", Price: 99})
 
-	got, err := repo.Get(ctx, tr, dir, "p1")
+	got, err := repo.Get(ctx, tx, "p1")
 	if err != nil {
 		t.Fatalf("GetProduct failed: %v", err)
 	}
@@ -273,33 +193,20 @@ func TestGetProduct_Success(t *testing.T) {
 	}
 }
 
-func TestGet_BeforeSync(t *testing.T) {
-	ctx := context.Background()
-	recordStore := fdblayer.NewRecordStore()
-	kv := tests.NewMockKV()
-	tr := tests.NewMockTransaction(kv)
-	dir := &tests.MockDirectorySubspace{}
-
-	repo := store.NewUserRepository(recordStore)
-	_, err := repo.Get(ctx, tr, dir, "u1")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-}
-
 // Set (Update)
 func TestSetUser_UpdateFields(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	repo := store.NewUserRepository(recordStore)
-	_ = repo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewUserRepository()
+	_ = repo.Create(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
 
 	updated := &store.User{Id: "u1", Name: "Bob", Email: "b@test.com"}
-	if err := repo.Set(ctx, tr, dir, updated); err != nil {
+	if err := repo.Set(ctx, tx, updated); err != nil {
 		t.Fatalf("SetUser failed: %v", err)
 	}
 
-	got, _ := repo.Get(ctx, tr, dir, "u1")
+	got, _ := repo.Get(ctx, tx, "u1")
 	if got.Name != "Bob" || got.Email != "b@test.com" {
 		t.Fatalf("update not applied: %+v", got)
 	}
@@ -307,25 +214,25 @@ func TestSetUser_UpdateFields(t *testing.T) {
 
 func TestSetUser_IndexUpdated(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
-	typeID := recordStore.Metadata()["User"]
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
-	repo := store.NewUserRepository(recordStore)
-	_ = repo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "old@test.com"})
-	oldIdx := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(2324124615), "old@test.com", "u1"}.Pack()
+	repo := store.NewUserRepository()
+	_ = repo.Create(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "old@test.com"})
+	oldIdx := tuple.Tuple{store.UserTypeID, fdblayer.IndexNamespace, int64(2324124615), "old@test.com", "u1"}.Pack()
 	if !kv.HasKey(oldIdx) {
 		t.Fatal("old index should exist after create")
 	}
 
 	// Update email
-	_ = repo.Set(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "new@test.com"})
+	_ = repo.Set(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "new@test.com"})
 
 	// Old index should be cleared
 	if kv.HasKey(oldIdx) {
 		t.Fatal("stale old index key was NOT cleared")
 	}
 	// New index should exist
-	newIdx := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(2324124615), "new@test.com", "u1"}.Pack()
+	newIdx := tuple.Tuple{store.UserTypeID, fdblayer.IndexNamespace, int64(2324124615), "new@test.com", "u1"}.Pack()
 	if !kv.HasKey(newIdx) {
 		t.Fatal("new index key not written")
 	}
@@ -333,17 +240,17 @@ func TestSetUser_IndexUpdated(t *testing.T) {
 
 func TestSetUser_UnchangedIndexSkipsIndexWrite(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
-	typeID := recordStore.Metadata()["User"]
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
-	repo := store.NewUserRepository(recordStore)
-	if err := repo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "same@test.com"}); err != nil {
+	repo := store.NewUserRepository()
+	if err := repo.Create(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "same@test.com"}); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
 
 	tr.ResetLog()
 	// Update Name only while keeping Email unchanged
-	if err := repo.Set(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice Updated", Email: "same@test.com"}); err != nil {
+	if err := repo.Set(ctx, tx, &store.User{Id: "u1", Name: "Alice Updated", Email: "same@test.com"}); err != nil {
 		t.Fatalf("Set failed: %v", err)
 	}
 
@@ -353,7 +260,7 @@ func TestSetUser_UnchangedIndexSkipsIndexWrite(t *testing.T) {
 	if len(tr.SetCalls) != 1 {
 		t.Fatalf("expected 1 Set call (primary record only) when indexed field is unchanged, got %d", len(tr.SetCalls))
 	}
-	idxKey := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(2324124615), "same@test.com", "u1"}.Pack()
+	idxKey := tuple.Tuple{store.UserTypeID, fdblayer.IndexNamespace, int64(2324124615), "same@test.com", "u1"}.Pack()
 	if !kv.HasKey(idxKey) {
 		t.Fatal("existing index key should remain present")
 	}
@@ -361,12 +268,13 @@ func TestSetUser_UnchangedIndexSkipsIndexWrite(t *testing.T) {
 
 func TestSetProduct_UpdatePrice(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	repo := store.NewProductRepository(recordStore)
-	_ = repo.Create(ctx, tr, dir, &store.Product{Id: "p1", Name: "X", Category: "a", Price: 10})
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewProductRepository()
+	_ = repo.Create(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "a", Price: 10})
 
-	_ = repo.Set(ctx, tr, dir, &store.Product{Id: "p1", Name: "X", Category: "a", Price: 50})
-	got, _ := repo.Get(ctx, tr, dir, "p1")
+	_ = repo.Set(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "a", Price: 50})
+	got, _ := repo.Get(ctx, tx, "p1")
 	if got.Price != 50 {
 		t.Fatalf("expected price 50, got %d", got.Price)
 	}
@@ -374,21 +282,21 @@ func TestSetProduct_UpdatePrice(t *testing.T) {
 
 func TestSetProduct_IndexUpdated(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
-	typeID := recordStore.Metadata()["Product"]
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
-	repo := store.NewProductRepository(recordStore)
-	_ = repo.Create(ctx, tr, dir, &store.Product{Id: "p1", Name: "X", Category: "old_cat", Price: 1})
-	oldIdx := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(3475980913), "old_cat", "p1"}.Pack()
+	repo := store.NewProductRepository()
+	_ = repo.Create(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "old_cat", Price: 1})
+	oldIdx := tuple.Tuple{store.ProductTypeID, fdblayer.IndexNamespace, int64(3475980913), "old_cat", "p1"}.Pack()
 	if !kv.HasKey(oldIdx) {
 		t.Fatal("old index should exist after create")
 	}
 
-	_ = repo.Set(ctx, tr, dir, &store.Product{Id: "p1", Name: "X", Category: "new_cat", Price: 1})
+	_ = repo.Set(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "new_cat", Price: 1})
 	if kv.HasKey(oldIdx) {
 		t.Fatal("stale old index was NOT cleared")
 	}
-	newIdx := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(3475980913), "new_cat", "p1"}.Pack()
+	newIdx := tuple.Tuple{store.ProductTypeID, fdblayer.IndexNamespace, int64(3475980913), "new_cat", "p1"}.Pack()
 	if !kv.HasKey(newIdx) {
 		t.Fatal("new index key not written")
 	}
@@ -397,25 +305,25 @@ func TestSetProduct_IndexUpdated(t *testing.T) {
 // Delete
 func TestDeleteUser_Success(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
-	typeID := recordStore.Metadata()["User"]
-	repo := store.NewUserRepository(recordStore)
-	_ = repo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewUserRepository()
+	_ = repo.Create(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
 
-	if err := repo.Delete(ctx, tr, dir, "u1"); err != nil {
+	if err := repo.Delete(ctx, tx, "u1"); err != nil {
 		t.Fatalf("DeleteUser failed: %v", err)
 	}
 
-	pk := tuple.Tuple{typeID, fdblayer.DataNamespace, "u1"}.Pack()
+	pk := tuple.Tuple{store.UserTypeID, fdblayer.DataNamespace, "u1"}.Pack()
 	if kv.HasKey(pk) {
 		t.Fatal("primary key not cleared")
 	}
-	ik := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(2324124615), "a@test.com", "u1"}.Pack()
+	ik := tuple.Tuple{store.UserTypeID, fdblayer.IndexNamespace, int64(2324124615), "a@test.com", "u1"}.Pack()
 	if kv.HasKey(ik) {
 		t.Fatal("index key not cleared")
 	}
 	// Get should fail
-	_, err := repo.Get(ctx, tr, dir, "u1")
+	_, err := repo.Get(ctx, tx, "u1")
 	if err == nil {
 		t.Fatal("expected not found after delete")
 	}
@@ -423,24 +331,25 @@ func TestDeleteUser_Success(t *testing.T) {
 
 func TestDeleteUser_NonExistent(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	repo := store.NewUserRepository(recordStore)
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewUserRepository()
 	// Should not error or panic
-	if err := repo.Delete(ctx, tr, dir, "ghost"); err != nil {
+	if err := repo.Delete(ctx, tx, "ghost"); err != nil {
 		t.Fatalf("delete of non-existent should not error, got: %v", err)
 	}
 }
 
 func TestDeleteProduct_ClearsIndex(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
-	typeID := recordStore.Metadata()["Product"]
-	repo := store.NewProductRepository(recordStore)
-	_ = repo.Create(ctx, tr, dir, &store.Product{Id: "p1", Name: "X", Category: "cat1", Price: 5})
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewProductRepository()
+	_ = repo.Create(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "cat1", Price: 5})
 
-	_ = repo.Delete(ctx, tr, dir, "p1")
-	pk := tuple.Tuple{typeID, fdblayer.DataNamespace, "p1"}.Pack()
-	ik := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(3475980913), "cat1", "p1"}.Pack()
+	_ = repo.Delete(ctx, tx, "p1")
+	pk := tuple.Tuple{store.ProductTypeID, fdblayer.DataNamespace, "p1"}.Pack()
+	ik := tuple.Tuple{store.ProductTypeID, fdblayer.IndexNamespace, int64(3475980913), "cat1", "p1"}.Pack()
 	if kv.HasKey(pk) {
 		t.Fatal("primary key not cleared")
 	}
@@ -453,11 +362,12 @@ func TestDeleteProduct_ClearsIndex(t *testing.T) {
 
 func TestGetUserByEmail_NoResults(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
-	repo := store.NewUserRepository(recordStore)
+	repo := store.NewUserRepository()
 	// GetRange returns empty → no results
-	results, err := repo.GetByEmail(ctx, tr, dir, "nobody@test.com", fdblayer.PaginationOptions{})
+	results, err := repo.GetByEmail(ctx, tx, "nobody@test.com", fdblayer.PaginationOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -468,10 +378,11 @@ func TestGetUserByEmail_NoResults(t *testing.T) {
 
 func TestGetProductByCategory_NoResults(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
-	repo := store.NewProductRepository(recordStore)
-	results, err := repo.GetByCategory(ctx, tr, dir, "nonexistent", fdblayer.PaginationOptions{})
+	repo := store.NewProductRepository()
+	results, err := repo.GetByCategory(ctx, tx, "nonexistent", fdblayer.PaginationOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -481,10 +392,8 @@ func TestGetProductByCategory_NoResults(t *testing.T) {
 }
 
 func TestIndex_CrossTypeIsolation(t *testing.T) {
-	recordStore, _, _, _ := tests.SyncAndSetup()
-	meta := recordStore.Metadata()
 	// Type IDs should be different, ensuring key-space isolation
-	if meta["User"] == meta["Product"] {
+	if store.UserTypeID == store.ProductTypeID {
 		t.Fatal("User and Product share the same type ID — no isolation")
 	}
 }
@@ -494,14 +403,15 @@ func TestIndex_CrossTypeIsolation(t *testing.T) {
 // BatchGet
 func TestBatchGetUser_AllFound(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	repo := store.NewUserRepository(recordStore)
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewUserRepository()
 	for _, id := range []string{"u1", "u2", "u3"} {
-		_ = repo.Create(ctx, tr, dir, &store.User{Id: id, Name: "Name" + id, Email: id + "@test.com"})
+		_ = repo.Create(ctx, tx, &store.User{Id: id, Name: "Name" + id, Email: id + "@test.com"})
 	}
 
 	ids := []string{"u1", "u2", "u3"}
-	result, err := repo.BatchGet(ctx, tr, dir, ids)
+	result, err := repo.BatchGet(ctx, tx, ids)
 	if err != nil {
 		t.Fatalf("BatchGetUser failed: %v", err)
 	}
@@ -512,13 +422,14 @@ func TestBatchGetUser_AllFound(t *testing.T) {
 
 func TestBatchGetUser_PartialFound(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	repo := store.NewUserRepository(recordStore)
-	_ = repo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "A", Email: "a@t.com"})
-	_ = repo.Create(ctx, tr, dir, &store.User{Id: "u2", Name: "B", Email: "b@t.com"})
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewUserRepository()
+	_ = repo.Create(ctx, tx, &store.User{Id: "u1", Name: "A", Email: "a@t.com"})
+	_ = repo.Create(ctx, tx, &store.User{Id: "u2", Name: "B", Email: "b@t.com"})
 
 	ids := []string{"u1", "u2", "u3"} // u3 doesn't exist
-	result, err := repo.BatchGet(ctx, tr, dir, ids)
+	result, err := repo.BatchGet(ctx, tx, ids)
 	if err != nil {
 		t.Fatalf("BatchGetUser failed: %v", err)
 	}
@@ -529,11 +440,12 @@ func TestBatchGetUser_PartialFound(t *testing.T) {
 
 func TestBatchGetUser_NoneFound(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
-	repo := store.NewUserRepository(recordStore)
+	repo := store.NewUserRepository()
 	ids := []string{"x1", "x2"}
-	result, err := repo.BatchGet(ctx, tr, dir, ids)
+	result, err := repo.BatchGet(ctx, tx, ids)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -544,10 +456,11 @@ func TestBatchGetUser_NoneFound(t *testing.T) {
 
 func TestBatchGetUser_EmptyInput(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
-	repo := store.NewUserRepository(recordStore)
-	result, err := repo.BatchGet(ctx, tr, dir, []string{})
+	repo := store.NewUserRepository()
+	result, err := repo.BatchGet(ctx, tx, []string{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -558,13 +471,14 @@ func TestBatchGetUser_EmptyInput(t *testing.T) {
 
 func TestBatchGetProduct_Success(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	repo := store.NewProductRepository(recordStore)
-	_ = repo.Create(ctx, tr, dir, &store.Product{Id: "p1", Name: "A", Category: "c", Price: 1})
-	_ = repo.Create(ctx, tr, dir, &store.Product{Id: "p2", Name: "B", Category: "c", Price: 2})
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewProductRepository()
+	_ = repo.Create(ctx, tx, &store.Product{Id: "p1", Name: "A", Category: "c", Price: 1})
+	_ = repo.Create(ctx, tx, &store.Product{Id: "p2", Name: "B", Category: "c", Price: 2})
 
 	ids := []string{"p1", "p2"}
-	result, err := repo.BatchGet(ctx, tr, dir, ids)
+	result, err := repo.BatchGet(ctx, tx, ids)
 	if err != nil {
 		t.Fatalf("BatchGetProduct failed: %v", err)
 	}
@@ -579,13 +493,13 @@ func TestBatchGetProduct_Success(t *testing.T) {
 
 func TestCreateUser_IndexKeyStructure(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	typeID := recordStore.Metadata()["User"]
-	repo := store.NewUserRepository(recordStore)
-	_ = repo.Create(ctx, tr, dir, &store.User{Id: "u1", Name: "A", Email: "a@t.com"})
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewUserRepository()
+	_ = repo.Create(ctx, tx, &store.User{Id: "u1", Name: "A", Email: "a@t.com"})
 
 	// Use the mock helper to scan for index keys
-	prefix := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(2324124615), "a@t.com"}.Pack()
+	prefix := tuple.Tuple{store.UserTypeID, fdblayer.IndexNamespace, int64(2324124615), "a@t.com"}.Pack()
 	kr, _ := fdb.PrefixRange(prefix)
 	kvs := tr.GetRangeSlice(kr, fdb.RangeOptions{})
 	if len(kvs) != 1 {
@@ -607,13 +521,13 @@ func TestCreateUser_IndexKeyStructure(t *testing.T) {
 
 func TestCreateProduct_MultipleInSameCategory(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	typeID := recordStore.Metadata()["Product"]
-	repo := store.NewProductRepository(recordStore)
-	_ = repo.Create(ctx, tr, dir, &store.Product{Id: "p1", Name: "A", Category: "tools", Price: 1})
-	_ = repo.Create(ctx, tr, dir, &store.Product{Id: "p2", Name: "B", Category: "tools", Price: 2})
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewProductRepository()
+	_ = repo.Create(ctx, tx, &store.Product{Id: "p1", Name: "A", Category: "tools", Price: 1})
+	_ = repo.Create(ctx, tx, &store.Product{Id: "p2", Name: "B", Category: "tools", Price: 2})
 
-	prefix := tuple.Tuple{typeID, fdblayer.IndexNamespace, int64(3475980913), "tools"}.Pack()
+	prefix := tuple.Tuple{store.ProductTypeID, fdblayer.IndexNamespace, int64(3475980913), "tools"}.Pack()
 	kr, _ := fdb.PrefixRange(prefix)
 	kvs := tr.GetRangeSlice(kr, fdb.RangeOptions{})
 	if len(kvs) != 2 {
@@ -623,28 +537,28 @@ func TestCreateProduct_MultipleInSameCategory(t *testing.T) {
 
 func TestGenericRepository_User(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
 
 	// Instantiate the specific repository wrapper
-	var repo store.UserRepository = store.NewUserRepository(recordStore)
+	var repo store.UserRepository = store.NewUserRepository()
 
 	// Verify it also implements the GenericRepository interface
 	var genRepo fdblayer.GenericRepository[*store.User, string] = repo
 
 	// 1. Create
 	user := &store.User{Id: "gen-1", Name: "Generic User", Email: "gen@example.com"}
-	if err := genRepo.Create(ctx, tr, dir, user); err != nil {
+	if err := genRepo.Create(ctx, tx, user); err != nil {
 		t.Fatalf("generic Create failed: %v", err)
 	}
 
-	typeID := recordStore.Metadata()["User"]
-	pk := tuple.Tuple{typeID, fdblayer.DataNamespace, "gen-1"}.Pack()
+	pk := tuple.Tuple{store.UserTypeID, fdblayer.DataNamespace, "gen-1"}.Pack()
 	if !kv.HasKey(pk) {
 		t.Fatal("generic Create did not write primary key")
 	}
 
 	// 2. Get
-	got, err := genRepo.Get(ctx, tr, dir, "gen-1")
+	got, err := genRepo.Get(ctx, tx, "gen-1")
 	if err != nil {
 		t.Fatalf("generic Get failed: %v", err)
 	}
@@ -654,11 +568,11 @@ func TestGenericRepository_User(t *testing.T) {
 
 	// 3. Set (Update)
 	got.Name = "Updated Generic Name"
-	if err := genRepo.Set(ctx, tr, dir, got); err != nil {
+	if err := genRepo.Set(ctx, tx, got); err != nil {
 		t.Fatalf("generic Set failed: %v", err)
 	}
 
-	updated, err := genRepo.Get(ctx, tr, dir, "gen-1")
+	updated, err := genRepo.Get(ctx, tx, "gen-1")
 	if err != nil {
 		t.Fatalf("generic Get after Set failed: %v", err)
 	}
@@ -667,7 +581,7 @@ func TestGenericRepository_User(t *testing.T) {
 	}
 
 	// 4. Delete
-	if err := genRepo.Delete(ctx, tr, dir, "gen-1"); err != nil {
+	if err := genRepo.Delete(ctx, tx, "gen-1"); err != nil {
 		t.Fatalf("generic Delete failed: %v", err)
 	}
 
@@ -675,7 +589,7 @@ func TestGenericRepository_User(t *testing.T) {
 		t.Fatal("generic Delete did not clear primary key")
 	}
 
-	_, err = genRepo.Get(ctx, tr, dir, "gen-1")
+	_, err = genRepo.Get(ctx, tx, "gen-1")
 	if err == nil {
 		t.Fatal("expected error getting deleted user")
 	}
@@ -683,22 +597,22 @@ func TestGenericRepository_User(t *testing.T) {
 
 func TestSetAndDelete_CorruptedExistingRecordReturnsError(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, kv := tests.SyncAndSetup()
-	repo := store.NewUserRepository(recordStore)
+	tr, dir, kv := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewUserRepository()
 
-	typeID := recordStore.Metadata()["User"]
-	corruptedKey := dir.Pack(tuple.Tuple{typeID, fdblayer.DataNamespace, "corrupted-1"})
+	corruptedKey := dir.Pack(tuple.Tuple{store.UserTypeID, fdblayer.DataNamespace, "corrupted-1"})
 	// Write invalid protobuf wire format bytes (field 0 is invalid in protobuf wire format)
 	tr.Set(corruptedKey, []byte{0x00, 0xff, 0xff})
 
 	// Set must return an unmarshal error rather than silently overwriting and orphaning indexes.
-	err := repo.Set(ctx, tr, dir, &store.User{Id: "corrupted-1", Name: "New", Email: "new@example.com"})
+	err := repo.Set(ctx, tx, &store.User{Id: "corrupted-1", Name: "New", Email: "new@example.com"})
 	if err == nil {
 		t.Fatal("expected Set on corrupted existing record to return an error, got nil")
 	}
 
 	// Delete must return an unmarshal error rather than clearing primary key and orphaning indexes.
-	err = repo.Delete(ctx, tr, dir, "corrupted-1")
+	err = repo.Delete(ctx, tx, "corrupted-1")
 	if err == nil {
 		t.Fatal("expected Delete on corrupted existing record to return an error, got nil")
 	}
@@ -709,19 +623,27 @@ func TestSetAndDelete_CorruptedExistingRecordReturnsError(t *testing.T) {
 
 func TestErrNotFound_SentinelWrapping(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	repo := store.NewUserRepository(recordStore)
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewUserRepository()
 
-	_, err := repo.Get(ctx, tr, dir, "missing-user")
+	_, err := repo.Get(ctx, tx, "missing-user")
 	if !errors.Is(err, fdblayer.ErrNotFound) {
 		t.Fatalf("expected errors.Is(err, fdblayer.ErrNotFound) == true, got err=%v", err)
 	}
 }
 
 func TestUserVersionSequence_OverflowAndReset(t *testing.T) {
-	recordStore := fdblayer.NewRecordStore()
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	if tx.Transaction() != tr {
+		t.Fatal("expected tx.Transaction() to return underlying transaction")
+	}
+	if tx.Dir() != dir {
+		t.Fatal("expected tx.Dir() to return underlying directory subspace")
+	}
 	for i := 0; i < 65536; i++ {
-		uv, err := recordStore.NextUserVersion()
+		uv, err := tx.NextUserVersion()
 		if err != nil {
 			t.Fatalf("unexpected error at iteration %d: %v", i, err)
 		}
@@ -729,13 +651,129 @@ func TestUserVersionSequence_OverflowAndReset(t *testing.T) {
 			t.Fatalf("expected UserVersion=%d, got %d", i, uv)
 		}
 	}
-	if _, err := recordStore.NextUserVersion(); !errors.Is(err, fdblayer.ErrUserVersionOverflow) {
+	if _, err := tx.NextUserVersion(); !errors.Is(err, fdblayer.ErrUserVersionOverflow) {
 		t.Fatalf("expected ErrUserVersionOverflow at 65537th call, got: %v", err)
 	}
-	recordStore.ResetUserVersion()
-	uv, err := recordStore.NextUserVersion()
+	tx.ResetUserVersion()
+	uv, err := tx.NextUserVersion()
 	if err != nil || uv != 0 {
 		t.Fatalf("expected UserVersion=0 after ResetUserVersion, got uv=%d, err=%v", uv, err)
+	}
+}
+
+func TestTx_PerTransactionUserVersionIsolation(t *testing.T) {
+	ctx := context.Background()
+	tr, dir, kv := tests.Setup()
+
+	// Single long-lived Repository instances reused across transactions.
+	taskRepo := store.NewTaskMessageRepository()
+	auditRepo := store.NewAuditLogRepository()
+
+	// 1. Simulate a transaction attempt that exhausts all 65,536 user versions and then retries.
+	exhaustedTx := fdblayer.NewTx(tests.NewMockTransaction(tests.NewMockKV()), dir)
+	for i := 0; i < 65536; i++ {
+		if _, err := exhaustedTx.NextUserVersion(); err != nil {
+			t.Fatalf("unexpected error on exhaustedTx at %d: %v", i, err)
+		}
+	}
+	if err := taskRepo.Enqueue(ctx, exhaustedTx, &store.TaskMessage{
+		QueueName: "q1",
+		ShardId:   1,
+		Payload:   []byte("overflow"),
+	}); !errors.Is(err, fdblayer.ErrUserVersionOverflow) {
+		t.Fatalf("expected ErrUserVersionOverflow on exhaustedTx, got %v", err)
+	}
+
+	// 2. A new transaction (or retry attempt) creates a fresh *fdblayer.Tx against the SAME
+	// Repository and starts cleanly at UserVersion == 0.
+	tx2 := fdblayer.NewTx(tr, dir)
+	if err := taskRepo.Enqueue(ctx, tx2, &store.TaskMessage{
+		QueueName: "q1",
+		ShardId:   1,
+		Payload:   []byte("first-in-tx2"),
+	}); err != nil {
+		t.Fatalf("Enqueue 1 in tx2 failed: %v", err)
+	}
+	if err := taskRepo.Enqueue(ctx, tx2, &store.TaskMessage{
+		QueueName: "q1",
+		ShardId:   1,
+		Payload:   []byte("second-in-tx2"),
+	}); err != nil {
+		t.Fatalf("Enqueue 2 in tx2 failed: %v", err)
+	}
+	if err := auditRepo.Create(ctx, tx2, &store.AuditLog{
+		Actor: "alice",
+	}); err != nil {
+		t.Fatalf("AuditLog Create in tx2 failed: %v", err)
+	}
+
+	// Verify UserVersion 0 and 1 were assigned to the two TaskMessages and UserVersion 2 to AuditLog.
+	vs0 := tuple.Versionstamp{TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, UserVersion: 0}
+	vs1 := tuple.Versionstamp{TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, UserVersion: 1}
+	vs2 := tuple.Versionstamp{TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, UserVersion: 2}
+
+	if !kv.HasKey(dir.Pack(tuple.Tuple{store.TaskMessageTypeID, fdblayer.DataNamespace, "q1", vs0, uint64(1)})) {
+		t.Fatal("expected first TaskMessage in tx2 to have UserVersion=0")
+	}
+	if !kv.HasKey(dir.Pack(tuple.Tuple{store.TaskMessageTypeID, fdblayer.DataNamespace, "q1", vs1, uint64(1)})) {
+		t.Fatal("expected second TaskMessage in tx2 to have UserVersion=1")
+	}
+	if !kv.HasKey(dir.Pack(tuple.Tuple{store.AuditLogTypeID, fdblayer.DataNamespace, vs2})) {
+		t.Fatal("expected AuditLog in tx2 to have UserVersion=2")
+	}
+
+	// 3. Another independent transaction tx3 starts its own sequence at UserVersion == 0.
+	kv3 := tests.NewMockKV()
+	tx3 := fdblayer.NewTx(tests.NewMockTransaction(kv3), dir)
+	if err := auditRepo.Create(ctx, tx3, &store.AuditLog{Actor: "bob"}); err != nil {
+		t.Fatalf("AuditLog Create in tx3 failed: %v", err)
+	}
+	if !kv3.HasKey(dir.Pack(tuple.Tuple{store.AuditLogTypeID, fdblayer.DataNamespace, vs0})) {
+		t.Fatal("expected AuditLog in tx3 to start at UserVersion=0")
+	}
+
+	// 4. Concurrent transactions sharing the same repositories never leak
+	// or collide UserVersions across transactions, and cumulative writes > 65,536 across
+	// transactions succeed without ErrUserVersionOverflow.
+	const numGoroutines = 16
+	const writesPerTx = 5000 // 16 * 5000 = 80,000 > 65,536
+	var wg sync.WaitGroup
+	errCh := make(chan error, numGoroutines)
+	for g := 0; g < numGoroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			localKV := tests.NewMockKV()
+			localTx := fdblayer.NewTx(tests.NewMockTransaction(localKV), dir)
+			for i := 0; i < writesPerTx; i++ {
+				if err := taskRepo.Enqueue(ctx, localTx, &store.TaskMessage{
+					QueueName: "concurrent_q",
+					ShardId:   1,
+					Payload:   []byte("msg"),
+				}); err != nil {
+					errCh <- err
+					return
+				}
+			}
+			// Verify the first and last UserVersion in this transaction are 0 and writesPerTx-1.
+			vsLast := tuple.Versionstamp{
+				TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+				UserVersion:        uint16(writesPerTx - 1),
+			}
+			if !localKV.HasKey(dir.Pack(tuple.Tuple{store.TaskMessageTypeID, fdblayer.DataNamespace, "concurrent_q", vs0, uint64(1)})) {
+				errCh <- errors.New("missing UserVersion 0 in concurrent tx")
+				return
+			}
+			if !localKV.HasKey(dir.Pack(tuple.Tuple{store.TaskMessageTypeID, fdblayer.DataNamespace, "concurrent_q", vsLast, uint64(1)})) {
+				errCh <- errors.New("missing last UserVersion in concurrent tx")
+				return
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent per-Tx userVersion test failed: %v", err)
 	}
 }
 
@@ -753,11 +791,12 @@ func TestNormalizeTupleElement_Int32Uint32Enum(t *testing.T) {
 
 func TestGetProductByCategory_PaginatedAndReverse(t *testing.T) {
 	ctx := context.Background()
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	repo := store.NewProductRepository(recordStore)
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewProductRepository()
 
 	for _, id := range []string{"p1", "p2", "p3", "p4"} {
-		if err := repo.Create(ctx, tr, dir, &store.Product{
+		if err := repo.Create(ctx, tx, &store.Product{
 			Id:       id,
 			Name:     "Tool " + id,
 			Category: "tools",
@@ -768,11 +807,11 @@ func TestGetProductByCategory_PaginatedAndReverse(t *testing.T) {
 	}
 
 	// Forward pagination (2 items per page)
-	p1, err := repo.GetByCategory(ctx, tr, dir, "tools", fdblayer.PaginationOptions{Limit: 2})
+	p1, err := repo.GetByCategory(ctx, tx, "tools", fdblayer.PaginationOptions{Limit: 2})
 	if err != nil || len(p1.Items) != 2 || !p1.HasMore || p1.Items[0].Id != "p1" || p1.Items[1].Id != "p2" {
 		t.Fatalf("unexpected forward page 1: %+v, err=%v", p1, err)
 	}
-	p2, err := repo.GetByCategory(ctx, tr, dir, "tools", fdblayer.PaginationOptions{
+	p2, err := repo.GetByCategory(ctx, tx, "tools", fdblayer.PaginationOptions{
 		Begin: p1.NextKey,
 		Limit: 2,
 	})
@@ -781,14 +820,14 @@ func TestGetProductByCategory_PaginatedAndReverse(t *testing.T) {
 	}
 
 	// Reverse pagination (2 items per page: p4, p3 -> p2, p1)
-	rev1, err := repo.GetByCategory(ctx, tr, dir, "tools", fdblayer.PaginationOptions{
+	rev1, err := repo.GetByCategory(ctx, tx, "tools", fdblayer.PaginationOptions{
 		Limit:   2,
 		Reverse: true,
 	})
 	if err != nil || len(rev1.Items) != 2 || !rev1.HasMore || rev1.Items[0].Id != "p4" || rev1.Items[1].Id != "p3" {
 		t.Fatalf("unexpected reverse page 1: %+v, err=%v", rev1, err)
 	}
-	rev2, err := repo.GetByCategory(ctx, tr, dir, "tools", fdblayer.PaginationOptions{
+	rev2, err := repo.GetByCategory(ctx, tx, "tools", fdblayer.PaginationOptions{
 		Begin:   rev1.NextKey,
 		Limit:   2,
 		Reverse: true,
@@ -798,20 +837,20 @@ func TestGetProductByCategory_PaginatedAndReverse(t *testing.T) {
 	}
 
 	// Strongly-typed BatchGetProduct
-	byPK, err := repo.BatchGet(ctx, tr, dir, []string{"p1", "p4", "nonexistent"})
+	byPK, err := repo.BatchGet(ctx, tx, []string{"p1", "p4", "nonexistent"})
 	if err != nil || len(byPK) != 2 {
 		t.Fatalf("BatchGetProduct failed: got %+v, err=%v", byPK, err)
 	}
 
 	// Out-of-bounds cursors in GetProductByCategory must be clamped without inverted range panic
-	oobForwardAfter, err := repo.GetByCategory(ctx, tr, dir, "tools", fdblayer.PaginationOptions{
+	oobForwardAfter, err := repo.GetByCategory(ctx, tx, "tools", fdblayer.PaginationOptions{
 		Begin: tuple.Tuple{"zzzzz\xff"},
 		Limit: 2,
 	})
 	if err != nil || len(oobForwardAfter.Items) != 0 {
 		t.Fatalf("expected 0 items for forward Begin past end of index range, got %+v, err=%v", oobForwardAfter, err)
 	}
-	oobReverseBefore, err := repo.GetByCategory(ctx, tr, dir, "tools", fdblayer.PaginationOptions{
+	oobReverseBefore, err := repo.GetByCategory(ctx, tx, "tools", fdblayer.PaginationOptions{
 		Begin:   tuple.Tuple{""},
 		Limit:   2,
 		Reverse: true,

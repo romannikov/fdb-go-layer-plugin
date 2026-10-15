@@ -13,42 +13,37 @@ func TestContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel context immediately
 
-	recordStore, tr, dir, _ := tests.SyncAndSetup()
-	userRepo := store.NewUserRepository(recordStore)
-
-	// Test SyncMetadata
-	err := recordStore.SyncMetadata(ctx, tr, dir, []string{"User", "Product", "Post"})
-	if err == nil {
-		t.Fatal("expected error on SyncMetadata with cancelled context")
-	}
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	userRepo := store.NewUserRepository()
 
 	// Test Create
 	user := &store.User{Id: "u_cancel", Name: "Cancel", Email: "cancel@test.com"}
-	err = userRepo.Create(ctx, tr, dir, user)
+	err := userRepo.Create(ctx, tx, user)
 	if err == nil {
 		t.Fatal("expected error on CreateUser with cancelled context")
 	}
 
 	// Test Get
-	_, err = userRepo.Get(ctx, tr, dir, "u_cancel")
+	_, err = userRepo.Get(ctx, tx, "u_cancel")
 	if err == nil {
 		t.Fatal("expected error on GetUser with cancelled context")
 	}
 
 	// Test Set
-	err = userRepo.Set(ctx, tr, dir, user)
+	err = userRepo.Set(ctx, tx, user)
 	if err == nil {
 		t.Fatal("expected error on SetUser with cancelled context")
 	}
 
 	// Test Delete
-	err = userRepo.Delete(ctx, tr, dir, "u_cancel")
+	err = userRepo.Delete(ctx, tx, "u_cancel")
 	if err == nil {
 		t.Fatal("expected error on DeleteUser with cancelled context")
 	}
 
 	// Test List
-	_, err = userRepo.List(ctx, tr, dir, fdblayer.PaginationOptions{Limit: 10})
+	_, err = userRepo.List(ctx, tx, fdblayer.PaginationOptions{Limit: 10})
 	if err == nil {
 		t.Fatal("expected error on ListUser with cancelled context")
 	}

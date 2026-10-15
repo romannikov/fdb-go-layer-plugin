@@ -2,7 +2,6 @@ package tests
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"fmt"
 	"sort"
@@ -13,7 +12,6 @@ import (
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
-	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
 )
 
 // MockKV – in-memory sorted key-value store backing all mock FDB operations.
@@ -309,13 +307,11 @@ func (m *MockDirectorySubspace) FDBRangeKeySelectors() (fdb.Selectable, fdb.Sele
 	return fdb.FirstGreaterOrEqual(begin), fdb.FirstGreaterOrEqual(end)
 }
 
-func SyncAndSetup() (*fdblayer.RecordStore, *MockTransaction, *MockDirectorySubspace, *MockKV) {
+func Setup() (*MockTransaction, *MockDirectorySubspace, *MockKV) {
 	kv := NewMockKV()
 	tr := NewMockTransaction(kv)
 	dir := &MockDirectorySubspace{}
-	recordStore := fdblayer.NewRecordStore()
-	_ = recordStore.SyncMetadata(context.Background(), tr, dir, []string{"User", "Product", "Post", "TaskMessage"})
-	return recordStore, tr, dir, kv
+	return tr, dir, kv
 }
 
 func TestDir(t *testing.T, db fdb.Database) (directory.DirectorySubspace, func()) {

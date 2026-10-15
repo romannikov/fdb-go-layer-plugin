@@ -153,6 +153,7 @@ func RunProtogen(plugin *protogen.Plugin, gen Generator, opts Options) error {
 	}
 
 	processedFiles := make(map[string]bool, len(plugin.Files))
+	var allAnnotated []ir.MessageSpec
 	for _, f := range plugin.Files {
 		if !f.Generate {
 			continue
@@ -168,6 +169,10 @@ func RunProtogen(plugin *protogen.Plugin, gen Generator, opts Options) error {
 
 		fileSpec, err := ir.ParseFile(f)
 		if err != nil {
+			return err
+		}
+		allAnnotated = append(allAnnotated, fileSpec.AnnotatedMessages()...)
+		if err := ir.ValidateUniqueTypeIDs(allAnnotated); err != nil {
 			return err
 		}
 		outputs, err := gen.GenerateFile(fileSpec, opts)

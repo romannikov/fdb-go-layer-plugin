@@ -3,9 +3,7 @@ package fdblayer
 import (
 	"context"
 	"errors"
-	"fmt"
 	"reflect"
-	"sync"
 	"sync/atomic"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -55,14 +53,54 @@ type PaginatedResult[T any] struct {
 	HasMore bool
 }
 
+// Tx bundles a FoundationDB Transaction, its target DirectorySubspace, and the
+// per-transaction userVersionSeq counter for incomplete versionstamps.
+// Create a new Tx inside each db.Transact / TransactContext callback via NewTx(tr, dir).
+type Tx struct {
+	tr             Transaction
+	dir            directory.DirectorySubspace
+	userVersionSeq atomic.Uint32
+}
+
+// NewTx creates a per-transaction context binding tr and dir with a fresh userVersionSeq counter.
+func NewTx(tr Transaction, dir directory.DirectorySubspace) *Tx {
+	return &Tx{tr: tr, dir: dir}
+}
+
+// Transaction returns the underlying FoundationDB Transaction.
+func (tx *Tx) Transaction() Transaction {
+	return tx.tr
+}
+
+// Dir returns the DirectorySubspace associated with this transaction context.
+func (tx *Tx) Dir() directory.DirectorySubspace {
+	return tx.dir
+}
+
+// ResetUserVersion resets the transaction's user version sequence to 0.
+func (tx *Tx) ResetUserVersion() {
+	tx.userVersionSeq.Store(0)
+}
+
+// NextUserVersion returns a monotonically increasing 16-bit user version (0..65535)
+// so that multiple versionstamped keys written within the same transaction receive
+// distinct user versions instead of colliding at 0.
+func (tx *Tx) NextUserVersion() (uint16, error) {
+	v := tx.userVersionSeq.Add(1)
+	if v > 65536 {
+		return 0, ErrUserVersionOverflow
+	}
+	return uint16(v - 1), nil
+}
+
 // GenericRepository is a generic data access interface for entity T with primary key PK.
 type GenericRepository[T any, PK any] interface {
-	Create(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity T) error
-	Get(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pk PK) (T, error)
-	Set(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, entity T) error
-	Delete(ctx context.Context, tr Transaction, dir directory.DirectorySubspace, pk PK) error
-	BatchGet(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, pks []PK) ([]T, error)
-	List(ctx context.Context, tr fdb.ReadTransaction, dir directory.DirectorySubspace, opts PaginationOptions) (*PaginatedResult[T], error)
+	Create(ctx context.Context, tx *Tx, entity T) error
+	Get(ctx context.Context, tx *Tx, pk PK) (T, error)
+	Set(ctx context.Context, tx *Tx, entity T) error
+	Delete(ctx context.Context, tx *Tx, pk PK) error
+	BatchGet(ctx context.Context, tx *Tx, pks []PK) ([]T, error)
+	List(ctx context.Context, tx *Tx, opts PaginationOptions) (*PaginatedResult[T], error)
 }
 
 type rangeSliceReader interface {
@@ -93,127 +131,6 @@ func (rf RangeFuture) GetSliceOrPanic() []fdb.KeyValue {
 		return rf.slice
 	}
 	return rf.rr.GetSliceOrPanic()
-}
-
-// RecordStore holds metadata mapping between message names and their integer type IDs.
-type RecordStore struct {
-	mu             sync.RWMutex
-	metadata       map[string]int64
-	userVersionSeq atomic.Uint32
-}
-
-// NewRecordStore creates a new RecordStore instance.
-func NewRecordStore() *RecordStore {
-	return &RecordStore{}
-}
-
-// ResetUserVersion resets the user version sequence to 0.
-func (s *RecordStore) ResetUserVersion() {
-	s.userVersionSeq.Store(0)
-}
-
-// NextUserVersion returns a monotonically increasing 16-bit user version so
-// that multiple versionstamped keys written within the same transaction receive
-// distinct user versions instead of colliding at 0.
-func (s *RecordStore) NextUserVersion() (uint16, error) {
-	v := s.userVersionSeq.Add(1)
-	if v > 65536 {
-		return 0, ErrUserVersionOverflow
-	}
-	return uint16(v - 1), nil
-}
-
-// GetTypeID retrieves the type ID for a given message name.
-func (s *RecordStore) GetTypeID(name string) (int64, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.metadata == nil {
-		return 0, fmt.Errorf("metadata not initialized (type %s not found in metadata), call SyncMetadata first", name)
-	}
-	typeID, ok := s.metadata[name]
-	if !ok {
-		return 0, fmt.Errorf("type %s not found in metadata", name)
-	}
-	return typeID, nil
-}
-
-// Metadata returns a read-only copy of the metadata mapping.
-func (s *RecordStore) Metadata() map[string]int64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	out := make(map[string]int64, len(s.metadata))
-	for k, v := range s.metadata {
-		out[k] = v
-	}
-	return out
-}
-
-// SyncMetadata reads the existing metadata from FDB and assigns new IDs to any unmapped messages.
-func (s *RecordStore) SyncMetadata(ctx context.Context, tr Transaction, metaDir directory.DirectorySubspace, messages []string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	newMeta := make(map[string]int64, len(messages))
-	kvs := GetRange(tr, metaDir, fdb.RangeOptions{}).GetSliceOrPanic()
-
-	maxID := int64(0)
-	for _, kv := range kvs {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		tpl, err := metaDir.Unpack(kv.Key)
-		if err != nil || len(tpl) != 1 {
-			continue
-		}
-		msgName, ok := tpl[0].(string)
-		if !ok {
-			continue
-		}
-		valTpl, err := tuple.Unpack(kv.Value)
-		if err != nil || len(valTpl) != 1 {
-			continue
-		}
-		id, ok := valTpl[0].(int64)
-		if !ok {
-			continue
-		}
-		newMeta[msgName] = id
-		if id > maxID {
-			maxID = id
-		}
-	}
-
-	for _, msg := range messages {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if _, exists := newMeta[msg]; exists {
-			continue
-		}
-		key := metaDir.Pack(tuple.Tuple{msg})
-		if raw := tr.Get(key).MustGet(); raw != nil {
-			if valTpl, err := tuple.Unpack(raw); err == nil && len(valTpl) == 1 {
-				if id, ok := valTpl[0].(int64); ok {
-					newMeta[msg] = id
-					if id > maxID {
-						maxID = id
-					}
-					continue
-				}
-			}
-		}
-		maxID++
-		newMeta[msg] = maxID
-		val := tuple.Tuple{int64(maxID)}.Pack()
-		tr.Set(key, val)
-	}
-
-	s.mu.Lock()
-	s.metadata = newMeta
-	s.mu.Unlock()
-	return nil
 }
 
 // NormalizeTupleElement widens signed integer/enum types (such as int32 or generated Protobuf
