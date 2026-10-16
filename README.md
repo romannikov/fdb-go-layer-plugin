@@ -1,261 +1,133 @@
-# FoundationDB Go Layer Plugin
-A protoc plugin that generates FoundationDB data access layer code for Proto messages. It simplifies building applications on top of FoundationDB by handling the boilerplate of mapping messages to keys and values.
+# FoundationDB Protobuf Layer (`fdb-layer`)
+
+A `protoc` compiler (`protoc-gen-fdb-go`) and runtime library that generates FoundationDB data access layer code from shared Protobuf annotations (`proto/fdb-layer/annotations.proto`).
+
+The compiler is structured around a **language-neutral Intermediate Representation (`compiler/ir`)** and a **pluggable backend interface (`compiler/backend`)** so new target languages can be added without duplicating schema parsing or validation logic. Currently, the **Go** backend (`compiler/backend/golang`) and runtime (`runtimes/go`) are implemented.
+
+---
+
 ## Supported Features
-- **CRUD Operations**: Full support for Create, Get, Set (Update), and Delete operations on Protobuf messages.
-- **Primary Keys**: Support for custom primary keys, including compound keys composed of multiple fields.
-- **Secondary Indexes**: Support for secondary indexes for efficient lookups, including "fan-out" indexes for repeated fields.
-- **Atomic Operations**: Support for FoundationDB atomic mutations (`ADD`, `MAX`, `MIN`) directly via field annotations.
-- **Time Versionstamps**: Support for FDB versionstamps to order records by commit time.
-- **Queue Support**: Built-in support for FIFO queues ordered by versionstamp.
-- **Unified Store**: Support for both standard data records and queue messages within the same system and subspace.
-## Installation
-```bash
-go install github.com/romannikov/fdb-go-layer-plugin@latest
+
+- **Shared Protobuf Annotations (`proto/fdb-layer/annotations.proto`)**: Single source of truth for compile-time message `type_id`s, primary keys (`PrimaryKey`), secondary/fan-out indexes (`SecondaryIndex`), versionstamped primary keys (`is_versionstamp`), and FIFO queues (`is_queue`). Reserved options (`mutation`, `interleave`, `split_large_records`, `ttl_field`, and `SecondaryIndex` options `unique`, `storing`, `sparse`, `aggregate`, `aggregate_field`) are documented in `annotations.proto` with `// [NOT IMPLEMENTED YET]` and rejected at compile time if specified.
+- **Extensible Compiler Architecture**:
+  - `compiler/ir`: Extracts `FileSpec`, `MessageSpec`, `FieldSpec`, `SecondaryIndexSpec`, and `IndexPrefixSpec` from `protogen.File`, and validates all schema invariants (including mandatory non-zero `type_id` and `secondary_index.id` uniqueness).
+  - `compiler/backend`: Defines the language-agnostic `Generator` interface, `Registry`, `Options`, and `RunProtogen` helper.
+  - `compiler/backend/golang`: Emits strongly-typed, zero-allocation `*.fdb.go` repositories for Go with compile-time `<MsgName>TypeID` constants.
+- **CRUD Operations**: Full support for `Create` (with `ErrAlreadyExists` protection), `Get` (with `ErrNotFound`), `Set` (with minimal-write index delta updates), `Delete`, strongly-typed `BatchGet`, and cursor-paginated `List` (including compound primary key `opts.Prefix` filtering).
+- **Primary Keys**: Single-field and compound primary keys (`option (annotations.primary_key) = { fields: [...] };`) composed of scalar, `bytes`, or `enum` fields.
+- **Secondary & Fan-Out Indexes**:
+  - Single-field and composite secondary indexes with explicit `id` (`> 0`) and automatic maintenance on `Create`, `Set`, and `Delete`.
+  - Automatic generation of **partial-prefix query methods** (`GetBy<Prefix>`) for leading prefixes of composite secondary indexes.
+  - **Fan-out** indexes on `repeated` fields with deduplication and minimal-write delta updates on `Set`.
+- **Versionstamps & FIFO Queues**: Built-in support for `[(annotations.is_versionstamp) = true]` primary keys and `option (annotations.is_queue) = true` FIFO queues (`Enqueue`, `Dequeue`, `DequeueBatch`) with per-transaction user version monotonicity scoped to `*fdblayer.Tx` (`fdblayer.NewTx(tr, dir)`).
+
+---
+
+## Repository Structure
+
+```text
+fdb-layer/
+├── proto/
+│   └── fdb-layer/
+│       └── annotations.proto          # Shared Protobuf options (tags 50000..50008)
+├── compiler/                          # Extensible protoc compiler written in Go
+│   ├── ir/                            # Language-neutral Intermediate Representation (IR)
+│   ├── backend/                       # Common backend Generator interface & Registry
+│   │   └── golang/                    # Go backend emitting *.fdb.go
+│   └── cmd/
+│       └── protoc-gen-fdb-go/         # CLI entrypoint for Go codegen
+├── runtimes/
+│   └── go/                            # Go runtime package (github.com/romannikov/fdb-layer/runtimes/go)
+└── tests/
+    ├── proto/                         # Shared test schemas (store.proto)
+    └── go/                            # Go unit (MockKV) and live FDB integration tests
 ```
-Ensure that your `GOPATH/bin` is in your `PATH` so that `protoc` can find the plugin:
+
+---
+
+## Installation & Code Generation
+
+### Install the `protoc` Plugin
+
+```bash
+go install github.com/romannikov/fdb-layer/compiler/cmd/protoc-gen-fdb-go@latest
+```
+
+Ensure `$(go env GOPATH)/bin` is in your `PATH`:
+
 ```bash
 export PATH="$PATH:$(go env GOPATH)/bin"
 ```
-## Data Storage Layout
-The plugin stores data in FoundationDB using a specific key-value layout. All keys are prefixed by a `directory.DirectorySubspace` assigned to the store.
-### Data Locality
-Using a directory subspace ensures that all data for a specific application or layer is stored in a contiguous key range in FoundationDB. This provides excellent data locality, making range reads very efficient and keeping related data physically close in the cluster.
-### Key Components
-- **Subspace**: The root directory subspace for your application data.
-- **TypeID**: An auto-assigned integer ID for each message type. This minimizes key size in FDB compared to using full message names, saving storage and network bandwidth.
-### Layout Examples
-Assume we have a `User` message with `TypeID = 1` and a `Task` message with `TypeID = 2`.
-#### 1. Metadata Registry
-- **Purpose**: Maps message names to integer TypeIDs.
-- **Key**: `[Meta Subspace] + ("User")`
-- **Value**: `(1)` (packed tuple)
-- *Example*: If the meta subspace is `app_meta`, the key might be `app_meta/"User"` and the value `(1)`.
-#### 2. Standard Data Record
-- **Purpose**: Stores the serialized message.
-- **Key**: `[Data Subspace] + (1, 0, "u123")` (Uses namespace constant `0` for data)
-- **Value**: `[Serialized User Protobuf Blob]`
-- *Example*: A user with ID `u123` is stored at key `app_data/1/0/"u123"`.
-#### 3. Secondary Index
-- **Purpose**: Enables lookup by indexed fields.
-- **Key**: `[Data Subspace] + (1, 1, indexID, "user@example.com", "u123")` (Uses namespace constant `1` for index, and a stable compile-time 32-bit FNV-1a hash indexID)
-- **Value**: `[]` (empty)
-- *Note*: The plugin does NOT store the whole record in the index. It stores a **reference** to the record (the primary key `"u123"`) within the index key itself.
-- *Example*: Searching for `user@example.com` will find this index key, and the trailing `"u123"` tells the plugin which record to fetch.
-#### 4. Queue Message
-- **Purpose**: Stores messages in a FIFO queue ordered by commit versionstamp.
-- **Key**: `[Data Subspace] + (2, 0, queue_name, versionstamp, shard_id)` (Uses namespace constant `0` for data; `versionstamp` is placed immediately after `queue_name` to guarantee global FIFO order)
-- **Value**: `[Serialized Task Protobuf Blob]`
-- *Example*: A task in the `"high-priority"` queue (`queue_name`) with `shard_id = 1` is stored at `app_data/2/0/"high-priority"/versionstamp/1`.
-#### 5. Atomic Field Record
-- **Purpose**: Stores atomic mutation field values.
-- **Key**: `[Data Subspace] + (1, 2, "u123", field_number)` (Uses namespace constant `2` for fields)
-- **Value**: `[8-byte binary representation of the integer value]`
-### How to Make Data User-Local
-If you want to ensure that all data belonging to a specific user is stored together (e.g., for GDPR compliance or efficient cleanup), you can structure your directory subspaces by user ID:
-For instance, instead of a global `app_data` subspace, create a subspace per user:
-`app_state/user_id/type/...`
-In code, you would create the subspace like this:
-```go
-userDir, _ := directory.CreateOrOpen(db, []string{"app_state", "u123"}, nil)
-// Pass userDir to repository methods
+
+### Generate Go Code
+
+```bash
+protoc -I proto -I . \
+  --go_out=. --go_opt=paths=source_relative \
+  --fdb-go_out=. --fdb-go_opt=paths=source_relative \
+  generated/store.proto
 ```
-This ensures all data for `u123` is in a contiguous range.
-## Proto and Code Examples
-Here are examples of how to define your messages and use the generated code for common use cases.
-### 1. Standard Record
-This example shows basic CRUD operations and index lookup for a standard record.
-#### Define Proto
-```protobuf
-syntax = "proto3";
-import "fdb-layer/annotations.proto";
-message User {
-    option (annotations.primary_key) = "id";
-    option (annotations.secondary_index) = {
-        fields: ["email"]
-    };
-    string id = 1;
-    string name = 2;
-    string email = 3;
-}
+
+To regenerate all internal annotations and test schemas in this repository, run:
+```bash
+./update_protos.sh
 ```
-#### Use Generated Code
-```go
-package main
-import (
-	"context"
-	"fmt"
-	"github.com/apple/foundationdb/bindings/go/src/fdb"
-	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
-	fdblayer "github.com/romannikov/fdb-go-layer-plugin/fdb-layer"
-	"your/package/generated"
-)
-func main() {
-	fdb.MustAPIVersion(730)
-	db := fdb.MustOpenDefault()
-	ctx := context.Background()
-	store := fdblayer.NewRecordStore()
-	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
-	metaDir, _ := directory.CreateOrOpen(db, []string{"app_data", "_meta"}, nil)
-	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		err := store.SyncMetadata(ctx, tr, metaDir, []string{"User"})
-		if err != nil {
-			return nil, err
-		}
-		userRepo := generated.NewUserRepository(store)
-		// Create a user
-		user := &generated.User{Id: "u123", Email: "user@example.com", Name: "John"}
-		err = userRepo.Create(ctx, tr, dataDir, user)
-		if err != nil {
-			return nil, err
-		}
-		// Get by PK
-		u, err := userRepo.Get(ctx, tr, dataDir, "u123")
-		if err != nil {
-			return nil, err
-		}
-		fmt.Println("Found user:", u.Name)
-		// Lookup by Secondary Index
-		users, err := userRepo.GetUserByEmail(ctx, tr, dataDir, "user@example.com")
-		if err != nil {
-			return nil, err
-		}
-		fmt.Println("Found users by email:", len(users))
-		return nil, nil
-	})
-	if err != nil {
-		panic(err)
-	}
-}
+
+---
+
+## Binary Data Storage Layout
+
+All keys are packed inside the caller-provided `directory.DirectorySubspace`.
+
+### Subspace Namespaces & Tuple Type Normalization
+
+1. **Namespaces** are packed as signed 64-bit integers (`int64`):
+   - `DataNamespace` = `0`
+   - `IndexNamespace` = `1`
+2. **Integer & Enum Normalization**:
+   - Signed integers (`int32`, `sint32`, `sfixed32`, `int64`, `sint64`, `sfixed64`) and `enum` values are widened to `int64` before tuple packing.
+   - Unsigned integers (`uint32`, `fixed32`, `uint64`, `fixed64`) are widened to `uint64` before tuple packing.
+3. **Byte Strings (`bytes` fields)**:
+   - Protobuf `bytes` fields in primary keys and secondary/fan-out indexes are packed as raw FDB Tuple Byte Strings (`[]byte`).
+
+### Key-Value Layout
+
+Each generated message requires a mandatory non-zero compile-time `TypeID` (`option (annotations.type_id) = <N>;`), and each secondary index requires a mandatory non-zero `id` (`id: <N>`). Values `<= 255` use a compact 2-byte FDB Tuple integer encoding.
+
+Assume `User` has `TypeID = 1` and `TaskMessage` has `TypeID = 4`:
+
+1. **Standard Data Record**:
+   - **Key**: `[Data Subspace] + (1, 0, "u123")` (`TypeID = 1`, `DataNamespace = 0`, primary key `"u123"`)
+   - **Value**: `[Serialized User Protobuf Bytes]`
+2. **Secondary & Fan-Out Index**:
+   - **Key**: `[Data Subspace] + (1, 1, index_id, "user@example.com", "u123")`
+     - `index_id`: Explicit `SecondaryIndex.id` (`> 0`).
+   - **Value**: `[]` (empty byte slice; primary key elements trail the index key elements).
+3. **FIFO Queue Message**:
+   - **Key**: `[Data Subspace] + (4, 0, queue_name, versionstamp, shard_id)`
+     - The compiler automatically orders `versionstamp` immediately after the queue partition key (`queue_name`) and before tie-breaker fields (`shard_id`).
+   - **Value**: `[Serialized TaskMessage Protobuf Bytes]`
+
+---
+
+## Running Tests
+
+### 1. Compiler Unit Tests (IR + Backend Registry + Go Backend)
+```bash
+go test -race -v ./compiler/...
 ```
-### 2. Queue
-This example shows how to create a user and enqueue a "send email" task in the **same transaction**, ensuring atomicity.
-#### Define Proto
-```protobuf
-message Task {
-    option (annotations.is_queue) = true;
-    option (annotations.primary_key) = "queue_name";
-    option (annotations.primary_key) = "versionstamp";
-    option (annotations.primary_key) = "shard_id";
-    string queue_name = 1;
-    uint32 shard_id = 2; // Tie-breaker / producer shard identifier
-    bytes versionstamp = 3 [(annotations.is_versionstamp) = true];
-    bytes payload = 4;
-}
+
+### 2. Go Runtime Unit & Integration Tests
+```bash
+# Unit tests (in-memory MockKV)
+go test -race -v ./runtimes/go/... ./tests/go/...
+
+# Live FoundationDB integration tests
+go test -p 1 -v -tags=integration ./tests/go/...
 ```
-#### Use Generated Code
-```go
-package main
-import (
-	"context"
-	"fmt"
-	"math/rand"
-	"github.com/apple/foundationdb/bindings/go/src/fdb"
-	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
-	fdblayer "github.com/romannikov/fdb-go-layer-plugin/fdb-layer"
-	"your/package/generated"
-)
-func main() {
-	fdb.MustAPIVersion(730)
-	db := fdb.MustOpenDefault()
-	ctx := context.Background()
-	store := fdblayer.NewRecordStore()
-	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
-	metaDir, _ := directory.CreateOrOpen(db, []string{"app_data", "_meta"}, nil)
-	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		err := store.SyncMetadata(ctx, tr, metaDir, []string{"User", "Task"})
-		if err != nil {
-			return nil, err
-		}
-		userRepo := generated.NewUserRepository(store)
-		taskRepo := generated.NewTaskRepository(store)
-		// Create a user
-		user := &generated.User{Id: "u123", Email: "user@example.com", Name: "John"}
-		err = userRepo.Create(ctx, tr, dataDir, user)
-		if err != nil {
-			return nil, err
-		}
-		// Enqueue a task to send a welcome email
-		task := &generated.Task{
-			QueueName: "send-email",
-			// shard_id is stored after the commit versionstamp as a tie-breaker / producer tag.
-			// (To partition a high-throughput queue across independent shards, include the shard
-			// in QueueName, e.g. fmt.Sprintf("send-email-%d", rand.Intn(10))).
-			ShardId:   uint32(rand.Intn(10)),
-			Payload:   []byte("u123"), // Reference the user ID in payload
-		}
-		err = taskRepo.Enqueue(ctx, tr, dataDir, task)
-		if err != nil {
-			return nil, err
-		}
-		return nil, nil
-	})
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("User created and email task enqueued atomically.")
-}
-```
-### 3. Dequeue
-This example shows how to read and process a task from the queue.
-#### Use Generated Code
-```go
-package main
-import (
-	"context"
-	"fmt"
-	"github.com/apple/foundationdb/bindings/go/src/fdb"
-	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
-	fdblayer "github.com/romannikov/fdb-go-layer-plugin/fdb-layer"
-	"your/package/generated"
-)
-func main() {
-	fdb.MustAPIVersion(730)
-	db := fdb.MustOpenDefault()
-	ctx := context.Background()
-	store := fdblayer.NewRecordStore()
-	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
-	metaDir, _ := directory.CreateOrOpen(db, []string{"app_data", "_meta"}, nil)
-	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		err := store.SyncMetadata(ctx, tr, metaDir, []string{"Task"})
-		if err != nil {
-			return nil, err
-		}
-		taskRepo := generated.NewTaskRepository(store)
-		// Dequeue the oldest task
-		task, err := taskRepo.Dequeue(ctx, tr, dataDir, "send-email")
-		if err != nil {
-			return nil, err
-		}
-		
-		if task != nil {
-			userID := string(task.Payload)
-			fmt.Println("Processing: Send welcome email to user", userID)
-			// Actual email sending logic would go here
-		} else {
-			fmt.Println("No tasks in queue.")
-		}
-		return nil, nil
-	})
-	if err != nil {
-		panic(err)
-	}
-}
-```
-## Contributing
-We welcome contributions to improve this plugin! Here is the process:
-1.  **Fork the repository** on GitHub.
-2.  **Clone your fork** locally.
-3.  **Create a new branch** for your feature or bugfix.
-4.  **Make your changes** and ensure code is well-formatted.
-5.  **Run integration tests** (requires a running FoundationDB cluster or simulator):
-    ```bash
-    go test ./...
-    ```
-6.  **Update Protos** if you modified `annotations.proto`:
-    ```bash
-    ./update_protos.sh
-    ```
-7.  **Commit your changes** and push to your fork.
-8.  **Submit a Pull Request** with a clear description of what you did.
+
+---
+
 ## License
+
 MIT

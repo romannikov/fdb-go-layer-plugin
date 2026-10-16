@@ -1,2 +1,5 @@
-protoc-gen-fdb
-fdb-go-layer-plugin
+# Built binaries in repo root
+/protoc-gen-fdb-go
+*.exe
+*.test
+*.out

@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-protoc --go_out=. --go_opt=paths=source_relative fdb-layer/annotations.proto
+mkdir -p tests/go/store
 
-PLUGIN_BIN="$(mktemp)"
-trap 'rm -f "$PLUGIN_BIN"' EXIT
-go build -o "$PLUGIN_BIN" .
+protoc -I proto \
+  --go_out=proto --go_opt=paths=source_relative \
+  proto/fdb-layer/annotations.proto
 
-protoc \
-  --plugin=protoc-gen-fdb="$PLUGIN_BIN" \
-  --go_out=. --go_opt=paths=source_relative \
-  --fdb_out=. --fdb_opt=paths=source_relative \
-  tests/store/store.proto \
-  tests/atomic/atomic.proto
+PLUGIN_GO="$(mktemp)"
+trap 'rm -f "$PLUGIN_GO"' EXIT
+
+go build -o "$PLUGIN_GO" ./compiler/cmd/protoc-gen-fdb-go
+
+protoc -I proto -I tests/proto \
+  --plugin=protoc-gen-fdb-go="$PLUGIN_GO" \
+  --go_out=. --go_opt=module=github.com/romannikov/fdb-layer \
+  --fdb-go_out=. --fdb-go_opt=module=github.com/romannikov/fdb-layer \
+  tests/proto/store.proto
