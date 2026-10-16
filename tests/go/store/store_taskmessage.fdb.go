@@ -4,9 +4,11 @@
 package store
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
+	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
 	"google.golang.org/protobuf/proto"
@@ -20,29 +22,27 @@ type TaskMessageRepository interface {
 	fdblayer.QueueRepository[*TaskMessage]
 }
 
-type taskmessageRepository struct{}
+type taskmessageRepository struct {
+	dir directory.DirectorySubspace
+}
 
 // NewTaskMessageRepository creates a new TaskMessageRepository instance.
-func NewTaskMessageRepository() TaskMessageRepository {
-	return &taskmessageRepository{}
+func NewTaskMessageRepository(dir directory.DirectorySubspace) TaskMessageRepository {
+	return &taskmessageRepository{dir: dir}
 }
 
 // Enqueue adds a TaskMessage to the queue.
-func (r *taskmessageRepository) Enqueue(tx *fdblayer.Tx, entity *TaskMessage) error {
-	if err := tx.Context().Err(); err != nil {
+func (r *taskmessageRepository) Enqueue(ctx context.Context, tr fdblayer.Transaction, entity *TaskMessage, opts ...fdblayer.WriteOption) error {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if entity == nil {
 		return fmt.Errorf("taskmessage entity cannot be nil")
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
-	userVersion, err := tx.NextUserVersion()
-	if err != nil {
-		return err
-	}
-	key, err := dir.PackWithVersionstamp(tuple.Tuple{TaskMessageTypeID, fdblayer.DataNamespace, entity.QueueName, tuple.IncompleteVersionstamp(userVersion), uint64(entity.ShardId)})
+	writeCfg := fdblayer.ApplyWriteOptions(opts)
+	key, err := dir.PackWithVersionstamp(tuple.Tuple{TaskMessageTypeID, fdblayer.DataNamespace, entity.QueueName, tuple.IncompleteVersionstamp(writeCfg.UserVersion), uint64(entity.ShardId)})
 	if err != nil {
 		return err
 	}
@@ -65,15 +65,14 @@ func (r *taskmessageRepository) Enqueue(tx *fdblayer.Tx, entity *TaskMessage) er
 }
 
 // Dequeue reads and removes the single oldest message from the queue.
-func (r *taskmessageRepository) Dequeue(tx *fdblayer.Tx, partitionKey fdblayer.Key) (*TaskMessage, error) {
-	if err := tx.Context().Err(); err != nil {
+func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transaction, partitionKey fdblayer.Key) (*TaskMessage, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if len(partitionKey) != 1 {
 		return nil, fmt.Errorf("%w: expected 1 partition key element for taskmessage, got %d", fdblayer.ErrInvalidKey, len(partitionKey))
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
 	prefixKey, err := fdblayer.PackSubspaceTuple(dir, tuple.Tuple{TaskMessageTypeID, fdblayer.DataNamespace}, partitionKey, []fdblayer.FieldKind{fdblayer.FieldKindString})
 	if err != nil {
@@ -113,15 +112,14 @@ func (r *taskmessageRepository) Dequeue(tx *fdblayer.Tx, partitionKey fdblayer.K
 }
 
 // DequeueBatch reads and removes up to limit oldest messages from the queue in a single range scan.
-func (r *taskmessageRepository) DequeueBatch(tx *fdblayer.Tx, partitionKey fdblayer.Key, limit int) ([]*TaskMessage, error) {
-	if err := tx.Context().Err(); err != nil {
+func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tr fdblayer.Transaction, partitionKey fdblayer.Key, limit int) ([]*TaskMessage, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if len(partitionKey) != 1 {
 		return nil, fmt.Errorf("%w: expected 1 partition key element for taskmessage, got %d", fdblayer.ErrInvalidKey, len(partitionKey))
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
 	prefixKey, err := fdblayer.PackSubspaceTuple(dir, tuple.Tuple{TaskMessageTypeID, fdblayer.DataNamespace}, partitionKey, []fdblayer.FieldKind{fdblayer.FieldKindString})
 	if err != nil {
@@ -142,7 +140,7 @@ func (r *taskmessageRepository) DequeueBatch(tx *fdblayer.Tx, partitionKey fdbla
 
 	items := make([]*TaskMessage, 0, len(rows))
 	for _, row := range rows {
-		if err := tx.Context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		entity := &TaskMessage{}

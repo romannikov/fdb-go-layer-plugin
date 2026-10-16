@@ -14,50 +14,48 @@ func TestContextCancellation(t *testing.T) {
 	cancel() // cancel context immediately
 
 	tr, dir, _ := tests.Setup()
-	tx := fdblayer.NewTx(ctx, tr, dir)
-	userRepo := store.NewUserRepository()
+	userRepo := store.NewUserRepository(dir)
 
 	// Test Insert
 	user := &store.User{Id: "u_cancel", Name: "Cancel", Email: "cancel@test.com"}
-	err := userRepo.Insert(tx, user)
+	err := userRepo.Insert(ctx, tr, user)
 	if err == nil {
 		t.Fatal("expected error on Insert with cancelled context")
 	}
 
 	// Test ReadRow
-	_, err = userRepo.ReadRow(tx, fdblayer.Key{"u_cancel"})
+	_, err = userRepo.ReadRow(ctx, tr, fdblayer.Key{"u_cancel"})
 	if err == nil {
 		t.Fatal("expected error on ReadRow with cancelled context")
 	}
 
+	// Test ReadRows
+	_, err = userRepo.ReadRows(ctx, tr, []fdblayer.Key{{"u_cancel"}})
+	if err == nil {
+		t.Fatal("expected error on ReadRows with cancelled context")
+	}
+
 	// Test Upsert
-	err = userRepo.Upsert(tx, user)
+	err = userRepo.Upsert(ctx, tr, user)
 	if err == nil {
 		t.Fatal("expected error on Upsert with cancelled context")
 	}
 
 	// Test Delete
-	err = userRepo.Delete(tx, fdblayer.Key{"u_cancel"})
+	err = userRepo.Delete(ctx, tr, fdblayer.Key{"u_cancel"})
 	if err == nil {
 		t.Fatal("expected error on Delete with cancelled context")
 	}
 
 	// Test Scan
-	_, err = userRepo.Scan(tx, fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
+	_, err = userRepo.Scan(ctx, tr, fdblayer.AllKeys(), fdblayer.WithLimit(10))
 	if err == nil {
 		t.Fatal("expected error on Scan with cancelled context")
 	}
 
 	// Test ScanIndex
-	_, err = userRepo.ScanIndex(tx, store.UserByEmail, fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
+	_, err = userRepo.ScanIndex(ctx, tr, store.UserByEmail, fdblayer.AllKeys(), fdblayer.WithLimit(10))
 	if err == nil {
 		t.Fatal("expected error on ScanIndex with cancelled context")
-	}
-
-	// Test Transact with cancelled context
-	if err := fdblayer.Transact(ctx, nil, dir, func(tx *fdblayer.Tx) error {
-		return userRepo.Insert(tx, user)
-	}); err == nil {
-		t.Fatal("expected error on Transact with cancelled context")
 	}
 }

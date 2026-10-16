@@ -4,9 +4,11 @@
 package store
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
+	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
 	"google.golang.org/protobuf/proto"
@@ -25,23 +27,24 @@ type PostRepository interface {
 	fdblayer.Repository[*Post]
 }
 
-type postRepository struct{}
+type postRepository struct {
+	dir directory.DirectorySubspace
+}
 
 // NewPostRepository creates a new PostRepository instance.
-func NewPostRepository() PostRepository {
-	return &postRepository{}
+func NewPostRepository(dir directory.DirectorySubspace) PostRepository {
+	return &postRepository{dir: dir}
 }
 
 // Insert creates a new Post entity in the database.
-func (r *postRepository) Insert(tx *fdblayer.Tx, entity *Post) error {
-	if err := tx.Context().Err(); err != nil {
+func (r *postRepository) Insert(ctx context.Context, tr fdblayer.Transaction, entity *Post, opts ...fdblayer.WriteOption) error {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if entity == nil {
 		return fmt.Errorf("post entity cannot be nil")
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
 	key := dir.Pack(tuple.Tuple{PostTypeID, fdblayer.DataNamespace, entity.Id})
 	if existing := tr.Get(key).MustGet(); existing != nil {
@@ -74,15 +77,14 @@ func (r *postRepository) Insert(tx *fdblayer.Tx, entity *Post) error {
 }
 
 // Upsert inserts a new Post entity or updates an existing one in the database.
-func (r *postRepository) Upsert(tx *fdblayer.Tx, entity *Post) error {
-	if err := tx.Context().Err(); err != nil {
+func (r *postRepository) Upsert(ctx context.Context, tr fdblayer.Transaction, entity *Post, opts ...fdblayer.WriteOption) error {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if entity == nil {
 		return fmt.Errorf("post entity cannot be nil")
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
 	var old *Post
 
@@ -150,12 +152,11 @@ func (r *postRepository) Upsert(tx *fdblayer.Tx, entity *Post) error {
 }
 
 // Delete removes a Post entity from the database by its primary key.
-func (r *postRepository) Delete(tx *fdblayer.Tx, key fdblayer.Key) error {
-	if err := tx.Context().Err(); err != nil {
+func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, key fdblayer.Key) error {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
 	pkTuple, dataKey, err := fdblayer.PackPrimaryKey(dir, PostTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
 	if err != nil {
@@ -188,12 +189,11 @@ func (r *postRepository) Delete(tx *fdblayer.Tx, key fdblayer.Key) error {
 }
 
 // ReadRow retrieves a single Post entity by its primary key.
-func (r *postRepository) ReadRow(tx *fdblayer.Tx, key fdblayer.Key) (*Post, error) {
-	if err := tx.Context().Err(); err != nil {
+func (r *postRepository) ReadRow(ctx context.Context, tr fdblayer.Transaction, key fdblayer.Key) (*Post, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
 	_, dataKey, err := fdblayer.PackPrimaryKey(dir, PostTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
 	if err != nil {
@@ -211,18 +211,17 @@ func (r *postRepository) ReadRow(tx *fdblayer.Tx, key fdblayer.Key) (*Post, erro
 }
 
 // ReadRows retrieves multiple Post entities by their primary keys in parallel.
-func (r *postRepository) ReadRows(tx *fdblayer.Tx, keys []fdblayer.Key) ([]*Post, error) {
-	if err := tx.Context().Err(); err != nil {
+func (r *postRepository) ReadRows(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) ([]*Post, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if len(keys) == 0 {
 		return nil, nil
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 	futures := make([]fdb.FutureByteSlice, len(keys))
 	for i, key := range keys {
-		if err := tx.Context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		_, dataKey, err := fdblayer.PackPrimaryKey(dir, PostTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
@@ -233,7 +232,7 @@ func (r *postRepository) ReadRows(tx *fdblayer.Tx, keys []fdblayer.Key) ([]*Post
 	}
 	entities := make([]*Post, 0, len(keys))
 	for i, future := range futures {
-		if err := tx.Context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		value := future.MustGet()
@@ -250,18 +249,17 @@ func (r *postRepository) ReadRows(tx *fdblayer.Tx, keys []fdblayer.Key) ([]*Post
 }
 
 // Scan performs a paginated range or prefix scan over Post primary keys.
-func (r *postRepository) Scan(tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*Post], error) {
-	if err := tx.Context().Err(); err != nil {
+func (r *postRepository) Scan(ctx context.Context, tr fdblayer.Transaction, kr fdblayer.KeyRange, opts ...fdblayer.ScanOption) (*fdblayer.Page[*Post], error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
 	result := &fdblayer.Page[*Post]{
 		Items: make([]*Post, 0),
 	}
 
-	rangeBegin, rangeEnd, err := fdblayer.ResolveScanBounds(dir, tuple.Tuple{PostTypeID, fdblayer.DataNamespace}, kr, opts, []fdblayer.FieldKind{fdblayer.FieldKindString})
+	rangeBegin, rangeEnd, scanCfg, err := fdblayer.ResolveScanBounds(dir, tuple.Tuple{PostTypeID, fdblayer.DataNamespace}, kr, opts, []fdblayer.FieldKind{fdblayer.FieldKindString})
 	if err != nil {
 		return nil, err
 	}
@@ -270,10 +268,10 @@ func (r *postRepository) Scan(tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblay
 	}
 
 	rangeOpts := fdb.RangeOptions{
-		Reverse: opts.Reverse,
+		Reverse: scanCfg.Reverse,
 	}
-	if opts.Limit > 0 {
-		rangeOpts.Limit = opts.Limit + 1
+	if scanCfg.Limit > 0 {
+		rangeOpts.Limit = scanCfg.Limit + 1
 	}
 
 	kvs := fdblayer.GetRange(tr, fdb.KeyRange{
@@ -282,10 +280,10 @@ func (r *postRepository) Scan(tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblay
 	}, rangeOpts).GetSliceOrPanic()
 
 	for i, kv := range kvs {
-		if err := tx.Context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if opts.Limit > 0 && i == opts.Limit {
+		if scanCfg.Limit > 0 && i == scanCfg.Limit {
 			tpl, err := dir.Unpack(kv.Key)
 			if err != nil {
 				return nil, fmt.Errorf("failed to unpack next key: %w", err)
@@ -306,8 +304,8 @@ func (r *postRepository) Scan(tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblay
 }
 
 // ScanIndex performs a paginated range or prefix scan over a secondary index of Post.
-func (r *postRepository) ScanIndex(tx *fdblayer.Tx, index fdblayer.IndexID, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*Post], error) {
-	if err := tx.Context().Err(); err != nil {
+func (r *postRepository) ScanIndex(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, kr fdblayer.KeyRange, opts ...fdblayer.ScanOption) (*fdblayer.Page[*Post], error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	var idxSchema []fdblayer.FieldKind
@@ -318,14 +316,13 @@ func (r *postRepository) ScanIndex(tx *fdblayer.Tx, index fdblayer.IndexID, kr f
 		return nil, fmt.Errorf("post index %d: %w", index, fdblayer.ErrUnknownIndex)
 	}
 
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
 	result := &fdblayer.Page[*Post]{
 		Items: make([]*Post, 0),
 	}
 	baseTpl := tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(index)}
-	rangeBegin, rangeEnd, err := fdblayer.ResolveScanBounds(dir, baseTpl, kr, opts, idxSchema)
+	rangeBegin, rangeEnd, scanCfg, err := fdblayer.ResolveScanBounds(dir, baseTpl, kr, opts, idxSchema)
 	if err != nil {
 		return nil, err
 	}
@@ -333,14 +330,14 @@ func (r *postRepository) ScanIndex(tx *fdblayer.Tx, index fdblayer.IndexID, kr f
 		return result, nil
 	}
 
-	rangeOpts := fdb.RangeOptions{Reverse: opts.Reverse}
-	if opts.Limit > 0 {
-		rangeOpts.Limit = opts.Limit + 1
+	rangeOpts := fdb.RangeOptions{Reverse: scanCfg.Reverse}
+	if scanCfg.Limit > 0 {
+		rangeOpts.Limit = scanCfg.Limit + 1
 	}
 	kvs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: rangeBegin, End: rangeEnd}, rangeOpts).GetSliceOrPanic()
 	pkIndexStart := 3 + len(idxSchema) - 1
-	if opts.Limit > 0 && len(kvs) > opts.Limit {
-		nextTpl, err := dir.Unpack(kvs[opts.Limit].Key)
+	if scanCfg.Limit > 0 && len(kvs) > scanCfg.Limit {
+		nextTpl, err := dir.Unpack(kvs[scanCfg.Limit].Key)
 		if err != nil {
 			return nil, err
 		}
@@ -348,11 +345,11 @@ func (r *postRepository) ScanIndex(tx *fdblayer.Tx, index fdblayer.IndexID, kr f
 			result.HasMore = true
 			result.NextCursor = fdblayer.ExtractCursorKey(nextTpl, 3)
 		}
-		kvs = kvs[:opts.Limit]
+		kvs = kvs[:scanCfg.Limit]
 	}
 	futures := make([]fdb.FutureByteSlice, len(kvs))
 	for i, kv := range kvs {
-		if err := tx.Context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		tpl, err := dir.Unpack(kv.Key)
@@ -370,7 +367,7 @@ func (r *postRepository) ScanIndex(tx *fdblayer.Tx, index fdblayer.IndexID, kr f
 		futures[i] = tr.Get(dir.Pack(keyTpl))
 	}
 	for _, future := range futures {
-		if err := tx.Context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		if future == nil {

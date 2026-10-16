@@ -4,9 +4,11 @@
 package store
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
+	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
 	"google.golang.org/protobuf/proto"
@@ -25,23 +27,24 @@ type ProductRepository interface {
 	fdblayer.Repository[*Product]
 }
 
-type productRepository struct{}
+type productRepository struct {
+	dir directory.DirectorySubspace
+}
 
 // NewProductRepository creates a new ProductRepository instance.
-func NewProductRepository() ProductRepository {
-	return &productRepository{}
+func NewProductRepository(dir directory.DirectorySubspace) ProductRepository {
+	return &productRepository{dir: dir}
 }
 
 // Insert creates a new Product entity in the database.
-func (r *productRepository) Insert(tx *fdblayer.Tx, entity *Product) error {
-	if err := tx.Context().Err(); err != nil {
+func (r *productRepository) Insert(ctx context.Context, tr fdblayer.Transaction, entity *Product, opts ...fdblayer.WriteOption) error {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if entity == nil {
 		return fmt.Errorf("product entity cannot be nil")
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
 	key := dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.DataNamespace, entity.Id})
 	if existing := tr.Get(key).MustGet(); existing != nil {
@@ -62,15 +65,14 @@ func (r *productRepository) Insert(tx *fdblayer.Tx, entity *Product) error {
 }
 
 // Upsert inserts a new Product entity or updates an existing one in the database.
-func (r *productRepository) Upsert(tx *fdblayer.Tx, entity *Product) error {
-	if err := tx.Context().Err(); err != nil {
+func (r *productRepository) Upsert(ctx context.Context, tr fdblayer.Transaction, entity *Product, opts ...fdblayer.WriteOption) error {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if entity == nil {
 		return fmt.Errorf("product entity cannot be nil")
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
 	var old *Product
 
@@ -104,12 +106,11 @@ func (r *productRepository) Upsert(tx *fdblayer.Tx, entity *Product) error {
 }
 
 // Delete removes a Product entity from the database by its primary key.
-func (r *productRepository) Delete(tx *fdblayer.Tx, key fdblayer.Key) error {
-	if err := tx.Context().Err(); err != nil {
+func (r *productRepository) Delete(ctx context.Context, tr fdblayer.Transaction, key fdblayer.Key) error {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
 	pkTuple, dataKey, err := fdblayer.PackPrimaryKey(dir, ProductTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
 	if err != nil {
@@ -130,12 +131,11 @@ func (r *productRepository) Delete(tx *fdblayer.Tx, key fdblayer.Key) error {
 }
 
 // ReadRow retrieves a single Product entity by its primary key.
-func (r *productRepository) ReadRow(tx *fdblayer.Tx, key fdblayer.Key) (*Product, error) {
-	if err := tx.Context().Err(); err != nil {
+func (r *productRepository) ReadRow(ctx context.Context, tr fdblayer.Transaction, key fdblayer.Key) (*Product, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
 	_, dataKey, err := fdblayer.PackPrimaryKey(dir, ProductTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
 	if err != nil {
@@ -153,18 +153,17 @@ func (r *productRepository) ReadRow(tx *fdblayer.Tx, key fdblayer.Key) (*Product
 }
 
 // ReadRows retrieves multiple Product entities by their primary keys in parallel.
-func (r *productRepository) ReadRows(tx *fdblayer.Tx, keys []fdblayer.Key) ([]*Product, error) {
-	if err := tx.Context().Err(); err != nil {
+func (r *productRepository) ReadRows(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) ([]*Product, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if len(keys) == 0 {
 		return nil, nil
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 	futures := make([]fdb.FutureByteSlice, len(keys))
 	for i, key := range keys {
-		if err := tx.Context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		_, dataKey, err := fdblayer.PackPrimaryKey(dir, ProductTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
@@ -175,7 +174,7 @@ func (r *productRepository) ReadRows(tx *fdblayer.Tx, keys []fdblayer.Key) ([]*P
 	}
 	entities := make([]*Product, 0, len(keys))
 	for i, future := range futures {
-		if err := tx.Context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		value := future.MustGet()
@@ -192,18 +191,17 @@ func (r *productRepository) ReadRows(tx *fdblayer.Tx, keys []fdblayer.Key) ([]*P
 }
 
 // Scan performs a paginated range or prefix scan over Product primary keys.
-func (r *productRepository) Scan(tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*Product], error) {
-	if err := tx.Context().Err(); err != nil {
+func (r *productRepository) Scan(ctx context.Context, tr fdblayer.Transaction, kr fdblayer.KeyRange, opts ...fdblayer.ScanOption) (*fdblayer.Page[*Product], error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
 	result := &fdblayer.Page[*Product]{
 		Items: make([]*Product, 0),
 	}
 
-	rangeBegin, rangeEnd, err := fdblayer.ResolveScanBounds(dir, tuple.Tuple{ProductTypeID, fdblayer.DataNamespace}, kr, opts, []fdblayer.FieldKind{fdblayer.FieldKindString})
+	rangeBegin, rangeEnd, scanCfg, err := fdblayer.ResolveScanBounds(dir, tuple.Tuple{ProductTypeID, fdblayer.DataNamespace}, kr, opts, []fdblayer.FieldKind{fdblayer.FieldKindString})
 	if err != nil {
 		return nil, err
 	}
@@ -212,10 +210,10 @@ func (r *productRepository) Scan(tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdb
 	}
 
 	rangeOpts := fdb.RangeOptions{
-		Reverse: opts.Reverse,
+		Reverse: scanCfg.Reverse,
 	}
-	if opts.Limit > 0 {
-		rangeOpts.Limit = opts.Limit + 1
+	if scanCfg.Limit > 0 {
+		rangeOpts.Limit = scanCfg.Limit + 1
 	}
 
 	kvs := fdblayer.GetRange(tr, fdb.KeyRange{
@@ -224,10 +222,10 @@ func (r *productRepository) Scan(tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdb
 	}, rangeOpts).GetSliceOrPanic()
 
 	for i, kv := range kvs {
-		if err := tx.Context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if opts.Limit > 0 && i == opts.Limit {
+		if scanCfg.Limit > 0 && i == scanCfg.Limit {
 			tpl, err := dir.Unpack(kv.Key)
 			if err != nil {
 				return nil, fmt.Errorf("failed to unpack next key: %w", err)
@@ -248,8 +246,8 @@ func (r *productRepository) Scan(tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdb
 }
 
 // ScanIndex performs a paginated range or prefix scan over a secondary index of Product.
-func (r *productRepository) ScanIndex(tx *fdblayer.Tx, index fdblayer.IndexID, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*Product], error) {
-	if err := tx.Context().Err(); err != nil {
+func (r *productRepository) ScanIndex(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, kr fdblayer.KeyRange, opts ...fdblayer.ScanOption) (*fdblayer.Page[*Product], error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	var idxSchema []fdblayer.FieldKind
@@ -260,14 +258,13 @@ func (r *productRepository) ScanIndex(tx *fdblayer.Tx, index fdblayer.IndexID, k
 		return nil, fmt.Errorf("product index %d: %w", index, fdblayer.ErrUnknownIndex)
 	}
 
-	tr := tx.Transaction()
-	dir := tx.Dir()
+	dir := r.dir
 
 	result := &fdblayer.Page[*Product]{
 		Items: make([]*Product, 0),
 	}
 	baseTpl := tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(index)}
-	rangeBegin, rangeEnd, err := fdblayer.ResolveScanBounds(dir, baseTpl, kr, opts, idxSchema)
+	rangeBegin, rangeEnd, scanCfg, err := fdblayer.ResolveScanBounds(dir, baseTpl, kr, opts, idxSchema)
 	if err != nil {
 		return nil, err
 	}
@@ -275,14 +272,14 @@ func (r *productRepository) ScanIndex(tx *fdblayer.Tx, index fdblayer.IndexID, k
 		return result, nil
 	}
 
-	rangeOpts := fdb.RangeOptions{Reverse: opts.Reverse}
-	if opts.Limit > 0 {
-		rangeOpts.Limit = opts.Limit + 1
+	rangeOpts := fdb.RangeOptions{Reverse: scanCfg.Reverse}
+	if scanCfg.Limit > 0 {
+		rangeOpts.Limit = scanCfg.Limit + 1
 	}
 	kvs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: rangeBegin, End: rangeEnd}, rangeOpts).GetSliceOrPanic()
 	pkIndexStart := 3 + len(idxSchema) - 1
-	if opts.Limit > 0 && len(kvs) > opts.Limit {
-		nextTpl, err := dir.Unpack(kvs[opts.Limit].Key)
+	if scanCfg.Limit > 0 && len(kvs) > scanCfg.Limit {
+		nextTpl, err := dir.Unpack(kvs[scanCfg.Limit].Key)
 		if err != nil {
 			return nil, err
 		}
@@ -290,11 +287,11 @@ func (r *productRepository) ScanIndex(tx *fdblayer.Tx, index fdblayer.IndexID, k
 			result.HasMore = true
 			result.NextCursor = fdblayer.ExtractCursorKey(nextTpl, 3)
 		}
-		kvs = kvs[:opts.Limit]
+		kvs = kvs[:scanCfg.Limit]
 	}
 	futures := make([]fdb.FutureByteSlice, len(kvs))
 	for i, kv := range kvs {
-		if err := tx.Context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		tpl, err := dir.Unpack(kv.Key)
@@ -312,7 +309,7 @@ func (r *productRepository) ScanIndex(tx *fdblayer.Tx, index fdblayer.IndexID, k
 		futures[i] = tr.Get(dir.Pack(keyTpl))
 	}
 	for _, future := range futures {
-		if err := tx.Context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		if future == nil {

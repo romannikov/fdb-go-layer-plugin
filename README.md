@@ -8,19 +8,19 @@ The compiler is structured around a **language-neutral Intermediate Representati
 
 ## Supported Features
 
-- **Uniform `Repository[T]` Operations**: Every standard record repository implements `fdblayer.Repository[*Msg]` with 7 methods:
-  - `Insert(tx, entity)`: Inserts a new record, returning `fdblayer.ErrAlreadyExists` if the primary key already exists.
-  - `Upsert(tx, entity)`: Inserts or updates a record in-place with minimal-write index delta maintenance.
-  - `Delete(tx, key)`: Deletes a record by `fdblayer.Key` and clears all secondary/fan-out index entries.
-  - `ReadRow(tx, key)`: Reads a single record by `fdblayer.Key` (`fdblayer.ErrNotFound` if missing).
-  - `ReadRows(tx, keys)`: Pipelined parallel batch fetch by `[]fdblayer.Key` in 1 RTT.
-  - `Scan(tx, rng, opts)`: Cursor-paginated primary key scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)`, or `fdblayer.Range(begin, end)`.
-  - `ScanIndex(tx, index, rng, opts)`: Cursor-paginated secondary/fan-out index scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)` (exact or partial leading prefix), or `fdblayer.Range(begin, end)` using generated `<Msg>By<Fields>` `fdblayer.IndexID` constants.
-- **Ergonomic `fdblayer.Transact` & `fdblayer.TransactVal`**: `fdblayer.Transact(ctx, db, dir, func(tx *fdblayer.Tx) error { ... })` runs a FoundationDB transaction with a fresh `*fdblayer.Tx` (carrying `context.Context` and the per-transaction user-version sequence) on every retry attempt.
+- **Uniform `Repository[T]` Operations**: Every standard record repository is constructed with `New<Msg>Repository(dir)` and implements `fdblayer.Repository[*Msg]` with 7 methods taking `(ctx context.Context, tr fdblayer.Transaction, ...)`:
+  - `Insert(ctx, tr, entity, opts ...fdblayer.WriteOption)`: Inserts a new record, returning `fdblayer.ErrAlreadyExists` if the primary key already exists.
+  - `Upsert(ctx, tr, entity, opts ...fdblayer.WriteOption)`: Inserts or updates a record in-place with minimal-write index delta maintenance.
+  - `Delete(ctx, tr, key)`: Deletes a record by `fdblayer.Key` and clears all secondary/fan-out index entries.
+  - `ReadRow(ctx, tr, key)`: Reads a single record by `fdblayer.Key` (`fdblayer.ErrNotFound` if missing).
+  - `ReadRows(ctx, tr, keys)`: Pipelined parallel batch fetch by `[]fdblayer.Key` in 1 RTT.
+  - `Scan(ctx, tr, rng, opts ...fdblayer.ScanOption)`: Cursor-paginated primary key scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)`, or `fdblayer.Range(begin, end)` with optional `fdblayer.WithLimit(n)`, `fdblayer.WithReverse()`, and `fdblayer.WithCursor(c)`.
+  - `ScanIndex(ctx, tr, index, rng, opts ...fdblayer.ScanOption)`: Cursor-paginated secondary/fan-out index scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)` (exact or partial leading prefix), or `fdblayer.Range(begin, end)` using generated `<Msg>By<Fields>` `fdblayer.IndexID` constants.
+- **Direct `fdb.Transaction` Compatibility**: Repository methods accept `fdblayer.Transaction` directly, which is satisfied out-of-the-box by `fdb.Transaction` inside standard `db.Transact(func(tr fdb.Transaction) (any, error) { ... })` blocks as well as by in-memory `MockKV` for unit tests.
 - **Primary Keys**: Support for custom primary keys (`option (annotations.primary_key) = { fields: [...] };`), including single-field and compound keys composed of scalar, `bytes`, or `enum` fields.
 - **Secondary & Fan-Out Indexes**: Support for single-field and composite secondary indexes with explicit `id` (`> 0`), automatic maintenance on `Insert`, `Upsert`, and `Delete`, exact/prefix/range queries via `ScanIndex`, and **fan-out** indexes on `repeated` fields with deduplication and minimal-write delta updates.
-- **Time Versionstamps**: Support for FDB 12-byte versionstamps (`[(annotations.is_versionstamp) = true]`) to order records by commit time, with per-transaction user version monotonicity scoped to `*fdblayer.Tx`.
-- **Queue Support**: Built-in support for FIFO queues (`option (annotations.is_queue) = true;`) implementing `fdblayer.QueueRepository[*Msg]` (`Enqueue`, `Dequeue`, `DequeueBatch`) ordered by commit versionstamp.
+- **Time Versionstamps**: Support for FDB 12-byte versionstamps (`[(annotations.is_versionstamp) = true]`) to order records by commit time, with optional 16-bit user versions (`fdblayer.WithUserVersion(n)` passed to `Insert`, `Upsert`, or `Enqueue`) to disambiguate multiple writes within the same transaction.
+- **Queue Support**: Built-in support for FIFO queues (`option (annotations.is_queue) = true;`) implementing `fdblayer.QueueRepository[*Msg]` (`Enqueue(ctx, tr, msg, opts ...fdblayer.WriteOption)`, `Dequeue(ctx, tr, partitionKey)`, `DequeueBatch(ctx, tr, partitionKey, limit)`) ordered by commit versionstamp.
 - **Unified Store**: Support for both standard data records and queue messages within the same system and `directory.DirectorySubspace`.
 - **Shared Protobuf Annotations (`proto/fdb-layer/annotations.proto`)**: Single source of truth for compile-time message `type_id`s, primary keys, secondary/fan-out indexes, versionstamped primary keys, and FIFO queues. Reserved options (`mutation`, `interleave`, `split_large_records`, `ttl_field`, and `SecondaryIndex` options `unique`, `storing`, `sparse`, `aggregate`, `aggregate_field`) are documented in `annotations.proto` with `// [NOT IMPLEMENTED YET]` and rejected at compile time if specified.
 
@@ -81,7 +81,7 @@ To regenerate all internal annotations and test schemas in this repository, run:
 
 ## Data Storage Layout
 
-The plugin stores data in FoundationDB using a deterministic key-value layout. All keys are prefixed by a `directory.DirectorySubspace` passed via `fdblayer.NewTx(tr, dir)`.
+The plugin stores data in FoundationDB using a deterministic key-value layout. All keys are prefixed by a `directory.DirectorySubspace` bound to the repository constructor `New<Msg>Repository(dir)`.
 
 ### Data Locality
 
@@ -130,13 +130,14 @@ If you want to ensure that all data belonging to a specific user is stored toget
 
 `app_state/user_id/...`
 
-In code, create the subspace and pass it to `fdblayer.Transact`:
+In code, create the subspace and pass it to the repository constructor:
 
 ```go
 userDir, _ := directory.CreateOrOpen(db, []string{"app_state", "u123"}, nil)
-err := fdblayer.Transact(ctx, db, userDir, func(tx *fdblayer.Tx) error {
-	// Pass tx to repository methods
-	return nil
+userRepo := generated.NewUserRepository(userDir)
+_, err := db.Transact(func(tr fdb.Transaction) (any, error) {
+	// Pass ctx and tr to repository methods
+	return nil, nil
 })
 ```
 
@@ -196,37 +197,38 @@ func main() {
 	ctx := context.Background()
 
 	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
-	userRepo := generated.NewUserRepository()
+	userRepo := generated.NewUserRepository(dataDir)
 
-	err := fdblayer.Transact(ctx, db, dataDir, func(tx *fdblayer.Tx) error {
+	_, err := db.Transact(func(tr fdb.Transaction) (any, error) {
 		// Insert a new user (fails with fdblayer.ErrAlreadyExists if PK exists)
 		user := &generated.User{Id: "u123", Email: "user@example.com", Name: "John"}
-		if err := userRepo.Insert(tx, user); err != nil {
-			return err
+		if err := userRepo.Insert(ctx, tr, user); err != nil {
+			return nil, err
 		}
 
 		// Read a single user by Primary Key
-		u, err := userRepo.ReadRow(tx, fdblayer.Key{"u123"})
+		u, err := userRepo.ReadRow(ctx, tr, fdblayer.Key{"u123"})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		fmt.Println("Found user:", u.Name)
 
 		// Scan by Secondary Index (exact or leading prefix match)
 		page, err := userRepo.ScanIndex(
-			tx,
+			ctx,
+			tr,
 			generated.UserByEmail,
 			fdblayer.Prefix("user@example.com"),
-			fdblayer.ScanOptions{Limit: 10},
+			fdblayer.WithLimit(10),
 		)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		fmt.Println("Found users by email:", len(page.Items))
 
 		// Upsert user (updates record and maintains secondary index deltas)
 		user.Name = "John Doe"
-		return userRepo.Upsert(tx, user)
+		return nil, userRepo.Upsert(ctx, tr, user)
 	})
 	if err != nil {
 		panic(err)
@@ -238,7 +240,7 @@ func main() {
 
 ### 2. Queue
 
-This example shows how to insert a user and enqueue a `"send-email"` task in the **same transaction**, ensuring atomicity. Sharing the same `*fdblayer.Tx` across `Enqueue` calls within a transaction automatically assigns monotonically increasing 16-bit user versions (`0..65535`).
+This example shows how to insert a user and enqueue `"send-email"` tasks in the **same transaction**, ensuring atomicity. When enqueuing multiple messages within the same transaction, pass `fdblayer.WithUserVersion(n)` with a distinct 16-bit user version (`0..65535`).
 
 #### Define Proto
 
@@ -279,18 +281,18 @@ func main() {
 	ctx := context.Background()
 
 	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
-	userRepo := generated.NewUserRepository()
-	taskRepo := generated.NewTaskRepository()
+	userRepo := generated.NewUserRepository(dataDir)
+	taskRepo := generated.NewTaskRepository(dataDir)
 
-	err := fdblayer.Transact(ctx, db, dataDir, func(tx *fdblayer.Tx) error {
+	_, err := db.Transact(func(tr fdb.Transaction) (any, error) {
 		// Insert a user
 		user := &generated.User{Id: "u123", Email: "user@example.com", Name: "John"}
-		if err := userRepo.Insert(tx, user); err != nil {
-			return err
+		if err := userRepo.Insert(ctx, tr, user); err != nil {
+			return nil, err
 		}
 
-		// Enqueue a task to send a welcome email in the same transaction
-		task := &generated.Task{
+		// Enqueue a task to send a welcome email in the same transaction (defaults to userVersion 0)
+		task1 := &generated.Task{
 			QueueName: "send-email",
 			// shard_id is stored after the commit versionstamp as a tie-breaker / producer tag.
 			// (To partition a high-throughput queue across independent shards, include the shard
@@ -298,12 +300,22 @@ func main() {
 			ShardId: uint32(rand.Intn(10)),
 			Payload: []byte("u123"), // Reference the user ID in payload
 		}
-		return taskRepo.Enqueue(tx, task)
+		if err := taskRepo.Enqueue(ctx, tr, task1); err != nil {
+			return nil, err
+		}
+
+		// When enqueuing a second task in the same transaction, pass fdblayer.WithUserVersion(1)
+		task2 := &generated.Task{
+			QueueName: "send-email",
+			ShardId:   uint32(rand.Intn(10)),
+			Payload:   []byte("u123-audit"),
+		}
+		return nil, taskRepo.Enqueue(ctx, tr, task2, fdblayer.WithUserVersion(1))
 	})
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println("User created and email task enqueued atomically.")
+	fmt.Println("User created and email tasks enqueued atomically.")
 }
 ```
 
@@ -334,13 +346,13 @@ func main() {
 	ctx := context.Background()
 
 	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
-	taskRepo := generated.NewTaskRepository()
+	taskRepo := generated.NewTaskRepository(dataDir)
 
-	err := fdblayer.Transact(ctx, db, dataDir, func(tx *fdblayer.Tx) error {
+	_, err := db.Transact(func(tr fdb.Transaction) (any, error) {
 		// Dequeue the oldest task (returns nil, nil if the queue is empty)
-		task, err := taskRepo.Dequeue(tx, fdblayer.Key{"send-email"})
+		task, err := taskRepo.Dequeue(ctx, tr, fdblayer.Key{"send-email"})
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		if task != nil {
@@ -350,7 +362,7 @@ func main() {
 		} else {
 			fmt.Println("No tasks in queue.")
 		}
-		return nil
+		return nil, nil
 	})
 	if err != nil {
 		panic(err)
