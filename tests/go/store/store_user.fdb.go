@@ -16,11 +16,14 @@ import (
 // UserTypeID is the compile-time type prefix for User records in FoundationDB.
 const UserTypeID int64 = 1
 
+// Secondary index IDs for User.
+const (
+	UserByEmail fdblayer.IndexID = 1
+)
+
 // UserRepository defines the repository interface for User.
 type UserRepository interface {
-	fdblayer.GenericRepository[*User, string]
-
-	GetByEmail(ctx context.Context, tx *fdblayer.Tx, Email string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*User], error)
+	fdblayer.Repository[*User]
 }
 
 type userRepository struct{}
@@ -30,8 +33,8 @@ func NewUserRepository() UserRepository {
 	return &userRepository{}
 }
 
-// Create creates a new User entity in the database.
-func (r *userRepository) Create(ctx context.Context, tx *fdblayer.Tx, entity *User) error {
+// Insert creates a new User entity in the database.
+func (r *userRepository) Insert(ctx context.Context, tx *fdblayer.Tx, entity *User) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -54,35 +57,13 @@ func (r *userRepository) Create(ctx context.Context, tx *fdblayer.Tx, entity *Us
 	tr.Set(key, value)
 
 	// Standard index
-	tr.Set(dir.Pack(tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, 1, entity.Email, entity.Id}), []byte{})
+	tr.Set(dir.Pack(tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, int64(UserByEmail), entity.Email, entity.Id}), []byte{})
 
 	return nil
 }
 
-// Get retrieves a User entity by its primary key.
-func (r *userRepository) Get(ctx context.Context, tx *fdblayer.Tx, pk string) (*User, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
-
-	key := dir.Pack(tuple.Tuple{UserTypeID, fdblayer.DataNamespace, pk})
-	valueFuture := tr.Get(key)
-	value := valueFuture.MustGet()
-	if value == nil {
-		return nil, fmt.Errorf("user %w", fdblayer.ErrNotFound)
-	}
-	entity := &User{}
-	if err := proto.Unmarshal(value, entity); err != nil {
-		return nil, err
-	}
-
-	return entity, nil
-}
-
-// Set updates an existing User entity in the database (or inserts it if not present).
-func (r *userRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *User) error {
+// Upsert inserts a new User entity or updates an existing one in the database.
+func (r *userRepository) Upsert(ctx context.Context, tx *fdblayer.Tx, entity *User) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -115,57 +96,85 @@ func (r *userRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *User)
 	// Standard index
 	if old == nil || old.Email != entity.Email {
 		if old != nil {
-			tr.Clear(dir.Pack(tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, 1, old.Email, old.Id}))
+			tr.Clear(dir.Pack(tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, int64(UserByEmail), old.Email, old.Id}))
 		}
-		tr.Set(dir.Pack(tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, 1, entity.Email, entity.Id}), []byte{})
+		tr.Set(dir.Pack(tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, int64(UserByEmail), entity.Email, entity.Id}), []byte{})
 	}
 
 	return nil
 }
 
-// Delete removes a User entity from the database.
-func (r *userRepository) Delete(ctx context.Context, tx *fdblayer.Tx, pk string) error {
+// Delete removes a User entity from the database by its primary key.
+func (r *userRepository) Delete(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	tr := tx.Transaction()
 	dir := tx.Dir()
 
-	key := dir.Pack(tuple.Tuple{UserTypeID, fdblayer.DataNamespace, pk})
-	value := tr.Get(key).MustGet()
+	pkTuple, dataKey, err := fdblayer.PackPrimaryKey(dir, UserTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+	if err != nil {
+		return err
+	}
+	value := tr.Get(dataKey).MustGet()
 	if value != nil {
 		entity := &User{}
 		if err := proto.Unmarshal(value, entity); err != nil {
 			return fmt.Errorf("failed to unmarshal existing user: %w", err)
 		}
-		entity.Id = pk
 		// Standard index
-		tr.Clear(dir.Pack(tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, 1, entity.Email, entity.Id}))
+		tr.Clear(dir.Pack(tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, int64(UserByEmail), entity.Email, pkTuple[0]}))
 	}
-	tr.Clear(key)
+	tr.Clear(dataKey)
 
 	return nil
 }
 
-// BatchGet retrieves multiple User entities by their primary keys.
-func (r *userRepository) BatchGet(ctx context.Context, tx *fdblayer.Tx, pks []string) ([]*User, error) {
+// ReadRow retrieves a single User entity by its primary key.
+func (r *userRepository) ReadRow(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) (*User, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if len(pks) == 0 {
+	tr := tx.Transaction()
+	dir := tx.Dir()
+
+	_, dataKey, err := fdblayer.PackPrimaryKey(dir, UserTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+	if err != nil {
+		return nil, err
+	}
+	value := tr.Get(dataKey).MustGet()
+	if value == nil {
+		return nil, fmt.Errorf("user %w", fdblayer.ErrNotFound)
+	}
+	entity := &User{}
+	if err := proto.Unmarshal(value, entity); err != nil {
+		return nil, err
+	}
+	return entity, nil
+}
+
+// ReadRows retrieves multiple User entities by their primary keys in parallel.
+func (r *userRepository) ReadRows(ctx context.Context, tx *fdblayer.Tx, keys []fdblayer.Key) ([]*User, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
 		return nil, nil
 	}
 	tr := tx.Transaction()
 	dir := tx.Dir()
-	futures := make([]fdb.FutureByteSlice, len(pks))
-	for i, pk := range pks {
+	futures := make([]fdb.FutureByteSlice, len(keys))
+	for i, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		key := dir.Pack(tuple.Tuple{UserTypeID, fdblayer.DataNamespace, pk})
-		futures[i] = tr.Get(key)
+		_, dataKey, err := fdblayer.PackPrimaryKey(dir, UserTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+		if err != nil {
+			return nil, fmt.Errorf("at index %d: %w", i, err)
+		}
+		futures[i] = tr.Get(dataKey)
 	}
-	entities := make([]*User, 0, len(pks))
+	entities := make([]*User, 0, len(keys))
 	for i, future := range futures {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -183,55 +192,23 @@ func (r *userRepository) BatchGet(ctx context.Context, tx *fdblayer.Tx, pks []st
 	return entities, nil
 }
 
-// List retrieves a list of User entities starting from the given key.
-func (r *userRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*User], error) {
+// Scan performs a paginated range or prefix scan over User primary keys.
+func (r *userRepository) Scan(ctx context.Context, tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*User], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	tr := tx.Transaction()
 	dir := tx.Dir()
 
-	result := &fdblayer.PaginatedResult[*User]{
+	result := &fdblayer.Page[*User]{
 		Items: make([]*User, 0),
 	}
 
-	// Compute data prefix range (scoped to opts.Prefix when provided).
-	prefixTpl := make(tuple.Tuple, 2+len(opts.Prefix))
-	prefixTpl[0] = UserTypeID
-	prefixTpl[1] = fdblayer.DataNamespace
-	for j, el := range opts.Prefix {
-		prefixTpl[2+j] = fdblayer.NormalizeTupleElement(el)
-	}
-	dataPrefix := dir.Pack(prefixTpl)
-	dataPrefixRange, err := fdb.PrefixRange(dataPrefix)
+	rangeBegin, rangeEnd, err := fdblayer.ResolveScanBounds(dir, tuple.Tuple{UserTypeID, fdblayer.DataNamespace}, kr, opts, []fdblayer.FieldKind{fdblayer.FieldKindString})
 	if err != nil {
 		return nil, err
 	}
-
-	beginTpl := make(tuple.Tuple, 2+len(opts.Begin))
-	beginTpl[0] = UserTypeID
-	beginTpl[1] = fdblayer.DataNamespace
-	for j, el := range opts.Begin {
-		beginTpl[2+j] = fdblayer.NormalizeTupleElement(el)
-	}
-	begin := dir.Pack(beginTpl)
-
-	rangeBegin := dataPrefixRange.Begin
-	rangeEnd := dataPrefixRange.End
-	if len(opts.Begin) > 0 {
-		if opts.Reverse {
-			beginRange, err := fdb.PrefixRange(begin)
-			if err != nil {
-				return nil, err
-			}
-			if string(beginRange.End.FDBKey()) < string(rangeEnd.FDBKey()) {
-				rangeEnd = beginRange.End
-			}
-		} else if string(begin) > string(rangeBegin.FDBKey()) {
-			rangeBegin = begin
-		}
-	}
-	if string(rangeBegin.FDBKey()) >= string(rangeEnd.FDBKey()) {
+	if string(rangeBegin) >= string(rangeEnd) {
 		return result, nil
 	}
 
@@ -256,15 +233,13 @@ func (r *userRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdblaye
 			if err != nil {
 				return nil, fmt.Errorf("failed to unpack next key: %w", err)
 			}
-			// Remove typeID and DataNamespace to return just the PK tuple
 			result.HasMore = true
-			result.NextKey = tpl[2:]
+			result.NextCursor = fdblayer.ExtractCursorKey(tpl, 2)
 			break
 		}
 
 		entity := &User{}
-		err = proto.Unmarshal(kv.Value, entity)
-		if err != nil {
+		if err := proto.Unmarshal(kv.Value, entity); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)
 		}
 		result.Items = append(result.Items, entity)
@@ -273,62 +248,48 @@ func (r *userRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdblaye
 	return result, nil
 }
 
-// GetByEmail retrieves a paginated page of User entities by their Email index.
-func (r *userRepository) GetByEmail(ctx context.Context, tx *fdblayer.Tx, Email string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*User], error) {
+// ScanIndex performs a paginated range or prefix scan over a secondary index of User.
+func (r *userRepository) ScanIndex(ctx context.Context, tx *fdblayer.Tx, index fdblayer.IndexID, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*User], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	var idxSchema []fdblayer.FieldKind
+	switch index {
+	case UserByEmail:
+		idxSchema = []fdblayer.FieldKind{fdblayer.FieldKindString, fdblayer.FieldKindString}
+	default:
+		return nil, fmt.Errorf("user index %d: %w", index, fdblayer.ErrUnknownIndex)
+	}
+
 	tr := tx.Transaction()
 	dir := tx.Dir()
 
-	result := &fdblayer.PaginatedResult[*User]{
+	result := &fdblayer.Page[*User]{
 		Items: make([]*User, 0),
 	}
-	baseTpl := tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, 1, Email}
-	indexKeyPrefix := dir.Pack(baseTpl)
-	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
+	baseTpl := tuple.Tuple{UserTypeID, fdblayer.IndexNamespace, int64(index)}
+	rangeBegin, rangeEnd, err := fdblayer.ResolveScanBounds(dir, baseTpl, kr, opts, idxSchema)
 	if err != nil {
 		return nil, err
 	}
-	rangeBegin := indexRange.Begin
-	rangeEnd := indexRange.End
-	if len(opts.Begin) > 0 {
-		cursorTpl := make(tuple.Tuple, len(baseTpl)+len(opts.Begin))
-		copy(cursorTpl, baseTpl)
-		for j, el := range opts.Begin {
-			cursorTpl[len(baseTpl)+j] = fdblayer.NormalizeTupleElement(el)
-		}
-		cursorKey := dir.Pack(cursorTpl)
-		if opts.Reverse {
-			cursorRange, err := fdb.PrefixRange(cursorKey)
-			if err != nil {
-				return nil, err
-			}
-			if string(cursorRange.End.FDBKey()) < string(rangeEnd.FDBKey()) {
-				rangeEnd = cursorRange.End
-			}
-		} else if string(cursorKey) > string(rangeBegin.FDBKey()) {
-			rangeBegin = cursorKey
-		}
-	}
-	if string(rangeBegin.FDBKey()) >= string(rangeEnd.FDBKey()) {
+	if string(rangeBegin) >= string(rangeEnd) {
 		return result, nil
 	}
+
 	rangeOpts := fdb.RangeOptions{Reverse: opts.Reverse}
 	if opts.Limit > 0 {
 		rangeOpts.Limit = opts.Limit + 1
 	}
 	kvs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: rangeBegin, End: rangeEnd}, rangeOpts).GetSliceOrPanic()
-	pageLen := len(kvs)
-	pkIndexStart := 3 + 1
-	if opts.Limit > 0 && pageLen > opts.Limit {
+	pkIndexStart := 3 + len(idxSchema) - 1
+	if opts.Limit > 0 && len(kvs) > opts.Limit {
 		nextTpl, err := dir.Unpack(kvs[opts.Limit].Key)
 		if err != nil {
 			return nil, err
 		}
-		if len(nextTpl) > pkIndexStart {
+		if len(nextTpl) > 3 {
 			result.HasMore = true
-			result.NextKey = nextTpl[pkIndexStart:]
+			result.NextCursor = fdblayer.ExtractCursorKey(nextTpl, 3)
 		}
 		kvs = kvs[:opts.Limit]
 	}

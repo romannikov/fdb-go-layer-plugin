@@ -17,34 +17,40 @@ func TestContextCancellation(t *testing.T) {
 	tx := fdblayer.NewTx(tr, dir)
 	userRepo := store.NewUserRepository()
 
-	// Test Create
+	// Test Insert
 	user := &store.User{Id: "u_cancel", Name: "Cancel", Email: "cancel@test.com"}
-	err := userRepo.Create(ctx, tx, user)
+	err := userRepo.Insert(ctx, tx, user)
 	if err == nil {
-		t.Fatal("expected error on CreateUser with cancelled context")
+		t.Fatal("expected error on Insert with cancelled context")
 	}
 
-	// Test Get
-	_, err = userRepo.Get(ctx, tx, "u_cancel")
+	// Test ReadRow
+	_, err = userRepo.ReadRow(ctx, tx, fdblayer.Key{"u_cancel"})
 	if err == nil {
-		t.Fatal("expected error on GetUser with cancelled context")
+		t.Fatal("expected error on ReadRow with cancelled context")
 	}
 
-	// Test Set
-	err = userRepo.Set(ctx, tx, user)
+	// Test Upsert
+	err = userRepo.Upsert(ctx, tx, user)
 	if err == nil {
-		t.Fatal("expected error on SetUser with cancelled context")
+		t.Fatal("expected error on Upsert with cancelled context")
 	}
 
 	// Test Delete
-	err = userRepo.Delete(ctx, tx, "u_cancel")
+	err = userRepo.Delete(ctx, tx, fdblayer.Key{"u_cancel"})
 	if err == nil {
-		t.Fatal("expected error on DeleteUser with cancelled context")
+		t.Fatal("expected error on Delete with cancelled context")
 	}
 
-	// Test List
-	_, err = userRepo.List(ctx, tx, fdblayer.PaginationOptions{Limit: 10})
+	// Test Scan
+	_, err = userRepo.Scan(ctx, tx, fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
 	if err == nil {
-		t.Fatal("expected error on ListUser with cancelled context")
+		t.Fatal("expected error on Scan with cancelled context")
+	}
+
+	// Test ScanIndex
+	_, err = userRepo.ScanIndex(ctx, tx, store.UserByEmail, fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
+	if err == nil {
+		t.Fatal("expected error on ScanIndex with cancelled context")
 	}
 }

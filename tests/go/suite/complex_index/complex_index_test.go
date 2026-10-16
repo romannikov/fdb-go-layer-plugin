@@ -3,6 +3,7 @@ package complex_index_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -30,7 +31,7 @@ func TestFanOutIndex(t *testing.T) {
 		Tags: []string{"tag1", "tag2", "tag3"},
 	}
 
-	err := postRepo.Create(ctx, tx, post)
+	err := postRepo.Insert(ctx, tx, post)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +45,7 @@ func TestFanOutIndex(t *testing.T) {
 	}
 }
 
-func TestFanOutIndex_SetDeltaUpdates(t *testing.T) {
+func TestFanOutIndex_UpsertDeltaUpdates(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, kv := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
@@ -56,7 +57,7 @@ func TestFanOutIndex_SetDeltaUpdates(t *testing.T) {
 		Tags: []string{"tag1", "tag2", "tag3"},
 	}
 
-	if err := postRepo.Create(ctx, tx, post); err != nil {
+	if err := postRepo.Insert(ctx, tx, post); err != nil {
 		t.Fatal(err)
 	}
 
@@ -66,7 +67,7 @@ func TestFanOutIndex_SetDeltaUpdates(t *testing.T) {
 		Id:   "post1",
 		Tags: []string{"tag2", "tag3", "tag4"},
 	}
-	if err := postRepo.Set(ctx, tx, updatedPost); err != nil {
+	if err := postRepo.Upsert(ctx, tx, updatedPost); err != nil {
 		t.Fatal(err)
 	}
 
@@ -141,22 +142,30 @@ func TestVersionstampedPrimaryKey(t *testing.T) {
 		t.Fatalf("Expected second versionstamped key with UserVersion=1 not found in mock store: %v", expectedKey2)
 	}
 
+	// Invalid partition key arity/type must return ErrInvalidKey
+	if _, err := taskRepo.Dequeue(ctx, tx, fdblayer.Key{"email_queue", "extra"}); !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey on Dequeue arity mismatch, got %v", err)
+	}
+	if _, err := taskRepo.DequeueBatch(ctx, tx, fdblayer.Key{123}, 2); !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey on DequeueBatch type mismatch, got %v", err)
+	}
+
 	// Verify Dequeue works in MockTransaction via fdblayer.GetRange
-	d1, err := taskRepo.Dequeue(ctx, tx, "email_queue")
+	d1, err := taskRepo.Dequeue(ctx, tx, fdblayer.Key{"email_queue"})
 	if err != nil {
 		t.Fatalf("Dequeue 1 failed: %v", err)
 	}
 	if d1 == nil || string(d1.Payload) != "send email" || len(d1.Versionstamp) != 12 {
 		t.Fatalf("unexpected Dequeue 1 result: %+v", d1)
 	}
-	d2, err := taskRepo.Dequeue(ctx, tx, "email_queue")
+	d2, err := taskRepo.Dequeue(ctx, tx, fdblayer.Key{"email_queue"})
 	if err != nil {
 		t.Fatalf("Dequeue 2 failed: %v", err)
 	}
 	if d2 == nil || string(d2.Payload) != "send second email" || len(d2.Versionstamp) != 12 {
 		t.Fatalf("unexpected Dequeue 2 result: %+v", d2)
 	}
-	dEmpty, err := taskRepo.Dequeue(ctx, tx, "email_queue")
+	dEmpty, err := taskRepo.Dequeue(ctx, tx, fdblayer.Key{"email_queue"})
 	if err != nil || dEmpty != nil {
 		t.Fatalf("expected empty queue after 2 dequeues, got %+v, err=%v", dEmpty, err)
 	}
@@ -186,8 +195,8 @@ func TestOrder_CompoundPK_CompoundIndex_BytesIndexes_NestedTypes(t *testing.T) {
 		},
 	}
 
-	if err := orderRepo.Create(ctx, tx, order1); err != nil {
-		t.Fatalf("Create order1 failed: %v", err)
+	if err := orderRepo.Insert(ctx, tx, order1); err != nil {
+		t.Fatalf("Insert order1 failed: %v", err)
 	}
 
 	// Verify explicit index ID 1001 in MockKV for compound index (status, created_at)
@@ -204,35 +213,35 @@ func TestOrder_CompoundPK_CompoundIndex_BytesIndexes_NestedTypes(t *testing.T) {
 		t.Fatalf("expected explicit index ID 1001 key in MockKV")
 	}
 
-	// 1. Get by compound primary key
-	pk := store.OrderPrimaryKey{TenantId: "acme", OrderSeq: 101}
-	got, err := orderRepo.Get(ctx, tx, pk)
+	// 1. ReadRow by compound primary key
+	pk := fdblayer.Key{"acme", int32(101)}
+	got, err := orderRepo.ReadRow(ctx, tx, pk)
 	if err != nil {
-		t.Fatalf("Get order1 failed: %v", err)
+		t.Fatalf("ReadRow order1 failed: %v", err)
 	}
 	if got.Priority != store.Order_PRIORITY_HIGH || got.Address.GetCity() != "Zurich" || got.Address.GetCountry() != "Switzerland" || len(got.History) != 1 {
 		t.Fatalf("unexpected nested fields on Order: %+v", got)
 	}
 
 	// 2. Query by compound secondary index (status, created_at)
-	byStatus, err := orderRepo.GetByStatusAndCreatedAt(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000, fdblayer.PaginationOptions{})
+	byStatus, err := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING, int64(1700000000)), fdblayer.ScanOptions{})
 	if err != nil || len(byStatus.Items) != 1 || byStatus.Items[0].OrderSeq != 101 {
-		t.Fatalf("GetOrderByStatusAndCreatedAt failed: got %+v, err=%v", byStatus, err)
+		t.Fatalf("ScanIndex(OrderByStatusCreatedAt) failed: got %+v, err=%v", byStatus, err)
 	}
 
 	// 3. Query by scalar bytes secondary index (receipt_hash)
-	byReceipt, err := orderRepo.GetByReceiptHash(ctx, tx, []byte{0xAA, 0xBB, 0x01}, fdblayer.PaginationOptions{})
+	byReceipt, err := orderRepo.ScanIndex(ctx, tx, store.OrderByReceiptHash, fdblayer.Prefix([]byte{0xAA, 0xBB, 0x01}), fdblayer.ScanOptions{})
 	if err != nil || len(byReceipt.Items) != 1 || byReceipt.Items[0].OrderSeq != 101 {
-		t.Fatalf("GetOrderByReceiptHash failed: got %+v, err=%v", byReceipt, err)
+		t.Fatalf("ScanIndex(OrderByReceiptHash) failed: got %+v, err=%v", byReceipt, err)
 	}
 
 	// 4. Query by fan-out repeated bytes secondary index (attachment_hashes)
-	byAttach, err := orderRepo.GetByAttachmentHashes(ctx, tx, []byte{0x10, 0x20}, fdblayer.PaginationOptions{})
+	byAttach, err := orderRepo.ScanIndex(ctx, tx, store.OrderByAttachmentHashes, fdblayer.Prefix([]byte{0x10, 0x20}), fdblayer.ScanOptions{})
 	if err != nil || len(byAttach.Items) != 1 || byAttach.Items[0].OrderSeq != 101 {
-		t.Fatalf("GetOrderByAttachmentHashes failed: got %+v, err=%v", byAttach, err)
+		t.Fatalf("ScanIndex(OrderByAttachmentHashes) failed: got %+v, err=%v", byAttach, err)
 	}
 
-	// 5. Set: update Status, ReceiptHash, and AttachmentHashes (remove {0x10,0x20}, keep {0x30,0x40}, add {0x50,0x60})
+	// 5. Upsert: update Status, ReceiptHash, and AttachmentHashes (remove {0x10,0x20}, keep {0x30,0x40}, add {0x50,0x60})
 	updatedOrder := &store.Order{
 		TenantId:         "acme",
 		OrderSeq:         101,
@@ -242,45 +251,45 @@ func TestOrder_CompoundPK_CompoundIndex_BytesIndexes_NestedTypes(t *testing.T) {
 		AttachmentHashes: [][]byte{{0x30, 0x40}, {0x50, 0x60}},
 		Priority:         store.Order_PRIORITY_LOW,
 	}
-	if err := orderRepo.Set(ctx, tx, updatedOrder); err != nil {
-		t.Fatalf("Set updatedOrder failed: %v", err)
+	if err := orderRepo.Upsert(ctx, tx, updatedOrder); err != nil {
+		t.Fatalf("Upsert updatedOrder failed: %v", err)
 	}
 
 	// Old compound index, old receipt hash, and removed attachment hash must return 0 results
-	if res, _ := orderRepo.GetByStatusAndCreatedAt(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, 1700000000, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
-		t.Fatalf("stale compound index after Set: %+v", res)
+	if res, _ := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING, int64(1700000000)), fdblayer.ScanOptions{}); len(res.Items) != 0 {
+		t.Fatalf("stale compound index after Upsert: %+v", res)
 	}
-	if res, _ := orderRepo.GetByReceiptHash(ctx, tx, []byte{0xAA, 0xBB, 0x01}, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
-		t.Fatalf("stale receipt_hash index after Set: %+v", res)
+	if res, _ := orderRepo.ScanIndex(ctx, tx, store.OrderByReceiptHash, fdblayer.Prefix([]byte{0xAA, 0xBB, 0x01}), fdblayer.ScanOptions{}); len(res.Items) != 0 {
+		t.Fatalf("stale receipt_hash index after Upsert: %+v", res)
 	}
-	if res, _ := orderRepo.GetByAttachmentHashes(ctx, tx, []byte{0x10, 0x20}, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
-		t.Fatalf("stale attachment_hashes index after Set: %+v", res)
+	if res, _ := orderRepo.ScanIndex(ctx, tx, store.OrderByAttachmentHashes, fdblayer.Prefix([]byte{0x10, 0x20}), fdblayer.ScanOptions{}); len(res.Items) != 0 {
+		t.Fatalf("stale attachment_hashes index after Upsert: %+v", res)
 	}
 
 	// New index entries must resolve
-	if res, _ := orderRepo.GetByStatusAndCreatedAt(ctx, tx, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
-		t.Fatalf("missing updated compound index after Set: %+v", res)
+	if res, _ := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_SHIPPED, int64(1700000000)), fdblayer.ScanOptions{}); len(res.Items) != 1 {
+		t.Fatalf("missing updated compound index after Upsert: %+v", res)
 	}
-	if res, _ := orderRepo.GetByReceiptHash(ctx, tx, []byte{0xCC, 0xDD, 0x02}, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
-		t.Fatalf("missing updated receipt_hash index after Set: %+v", res)
+	if res, _ := orderRepo.ScanIndex(ctx, tx, store.OrderByReceiptHash, fdblayer.Prefix([]byte{0xCC, 0xDD, 0x02}), fdblayer.ScanOptions{}); len(res.Items) != 1 {
+		t.Fatalf("missing updated receipt_hash index after Upsert: %+v", res)
 	}
-	if res, _ := orderRepo.GetByAttachmentHashes(ctx, tx, []byte{0x50, 0x60}, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
-		t.Fatalf("missing new attachment_hashes index after Set: %+v", res)
+	if res, _ := orderRepo.ScanIndex(ctx, tx, store.OrderByAttachmentHashes, fdblayer.Prefix([]byte{0x50, 0x60}), fdblayer.ScanOptions{}); len(res.Items) != 1 {
+		t.Fatalf("missing new attachment_hashes index after Upsert: %+v", res)
 	}
 
-	// 6. BatchGetOrder and Delete with compound primary key
-	batchRes, err := orderRepo.BatchGet(ctx, tx, []store.OrderPrimaryKey{pk})
+	// 6. ReadRows and Delete with compound primary key
+	batchRes, err := orderRepo.ReadRows(ctx, tx, []fdblayer.Key{pk})
 	if err != nil || len(batchRes) != 1 {
-		t.Fatalf("BatchGetOrder failed: got %+v, err=%v", batchRes, err)
+		t.Fatalf("ReadRows failed: got %+v, err=%v", batchRes, err)
 	}
 
 	if err := orderRepo.Delete(ctx, tx, pk); err != nil {
 		t.Fatalf("Delete order1 failed: %v", err)
 	}
-	if res, _ := orderRepo.GetByStatusAndCreatedAt(ctx, tx, store.OrderStatus_ORDER_STATUS_SHIPPED, 1700000000, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
+	if res, _ := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_SHIPPED, int64(1700000000)), fdblayer.ScanOptions{}); len(res.Items) != 0 {
 		t.Fatalf("compound index not cleared after Delete: %+v", res)
 	}
-	if res, _ := orderRepo.GetByAttachmentHashes(ctx, tx, []byte{0x30, 0x40}, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
+	if res, _ := orderRepo.ScanIndex(ctx, tx, store.OrderByAttachmentHashes, fdblayer.Prefix([]byte{0x30, 0x40}), fdblayer.ScanOptions{}); len(res.Items) != 0 {
 		t.Fatalf("fan-out bytes index not cleared after Delete: %+v", res)
 	}
 }
@@ -292,28 +301,28 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 
 	auditRepo := store.NewAuditLogRepository()
 
-	// 1. Create two AuditLog entities in the same transaction with initial atomic Views,
+	// 1. Insert two AuditLog entities in the same transaction with initial Views,
 	// standard index (Actor), and fan-out index (Tags).
-	if err := auditRepo.Create(ctx, tx, &store.AuditLog{
+	if err := auditRepo.Insert(ctx, tx, &store.AuditLog{
 		Actor: "alice",
 		Tags:  []string{"auth", "login"},
 		Views: 10,
 	}); err != nil {
-		t.Fatalf("Create AuditLog 1 failed: %v", err)
+		t.Fatalf("Insert AuditLog 1 failed: %v", err)
 	}
-	if err := auditRepo.Create(ctx, tx, &store.AuditLog{
+	if err := auditRepo.Insert(ctx, tx, &store.AuditLog{
 		Actor: "bob",
 		Tags:  []string{"auth", "logout"},
 		Views: 5,
 	}); err != nil {
-		t.Fatalf("Create AuditLog 2 failed: %v", err)
+		t.Fatalf("Insert AuditLog 2 failed: %v", err)
 	}
 
-	// 2. ListAuditLog must unpack the 12-byte versionstamp from the primary key into LogId
-	// and populate the atomic Views field.
-	listed, err := auditRepo.List(ctx, tx, fdblayer.PaginationOptions{Limit: 10})
+	// 2. Scan must unpack the 12-byte versionstamp from the primary key into LogId
+	// and populate the Views field.
+	listed, err := auditRepo.Scan(ctx, tx, fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
 	if err != nil || len(listed.Items) != 2 {
-		t.Fatalf("ListAuditLog expected 2 items, got %+v, err=%v", listed, err)
+		t.Fatalf("Scan AuditLog expected 2 items, got %+v, err=%v", listed, err)
 	}
 	firstLogID := listed.Items[0].LogId
 	secondLogID := listed.Items[1].LogId
@@ -321,137 +330,144 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 		t.Fatalf("expected two distinct 12-byte LogIds, got %x and %x", firstLogID, secondLogID)
 	}
 	if listed.Items[0].Views != 10 || listed.Items[1].Views != 5 {
-		t.Fatalf("expected Views 10 and 5 from ListAuditLog, got %d and %d", listed.Items[0].Views, listed.Items[1].Views)
+		t.Fatalf("expected Views 10 and 5 from Scan AuditLog, got %d and %d", listed.Items[0].Views, listed.Items[1].Views)
 	}
 
-	// 3. Get by log_id using the unpacked 12-byte versionstamp
-	got, err := auditRepo.Get(ctx, tx, firstLogID)
+	// 3. ReadRow by log_id using the unpacked 12-byte versionstamp
+	got, err := auditRepo.ReadRow(ctx, tx, fdblayer.Key{firstLogID})
 	if err != nil {
-		t.Fatalf("Get AuditLog by versionstamp failed: %v", err)
+		t.Fatalf("ReadRow AuditLog by versionstamp failed: %v", err)
 	}
 	if got.Actor != "alice" || !bytes.Equal(got.LogId, firstLogID) || got.Views != 10 || len(got.Tags) != 2 {
-		t.Fatalf("unexpected AuditLog from Get: %+v", got)
+		t.Fatalf("unexpected AuditLog from ReadRow: %+v", got)
 	}
 
-	// 4. Query by standard secondary index (GetAuditLogByActor)
-	byActor, err := auditRepo.GetByActor(ctx, tx, "alice", fdblayer.PaginationOptions{})
+	// 4. Query by standard secondary index (AuditLogByActor)
+	byActor, err := auditRepo.ScanIndex(ctx, tx, store.AuditLogByActor, fdblayer.Prefix("alice"), fdblayer.ScanOptions{})
 	if err != nil || len(byActor.Items) != 1 {
-		t.Fatalf("GetAuditLogByActor('alice') expected 1 item, got %+v, err=%v", byActor, err)
+		t.Fatalf("ScanIndex(AuditLogByActor, 'alice') expected 1 item, got %+v, err=%v", byActor, err)
 	}
 	if !bytes.Equal(byActor.Items[0].LogId, firstLogID) || byActor.Items[0].Views != 10 {
-		t.Fatalf("GetAuditLogByActor('alice') did not populate LogId/Views: %+v", byActor.Items[0])
+		t.Fatalf("ScanIndex(AuditLogByActor, 'alice') did not populate LogId/Views: %+v", byActor.Items[0])
 	}
 
-	// 5. Query by fan-out secondary index (GetAuditLogByTags)
-	byTagAuth, err := auditRepo.GetByTags(ctx, tx, "auth", fdblayer.PaginationOptions{})
+	// 5. Query by fan-out secondary index (AuditLogByTags)
+	byTagAuth, err := auditRepo.ScanIndex(ctx, tx, store.AuditLogByTags, fdblayer.Prefix("auth"), fdblayer.ScanOptions{})
 	if err != nil || len(byTagAuth.Items) != 2 {
-		t.Fatalf("GetAuditLogByTags('auth') expected 2 items, got %+v, err=%v", byTagAuth, err)
+		t.Fatalf("ScanIndex(AuditLogByTags, 'auth') expected 2 items, got %+v, err=%v", byTagAuth, err)
 	}
 	if !bytes.Equal(byTagAuth.Items[0].LogId, firstLogID) || !bytes.Equal(byTagAuth.Items[1].LogId, secondLogID) {
-		t.Fatalf("GetAuditLogByTags('auth') did not populate LogIds: %+v, %+v", byTagAuth.Items[0], byTagAuth.Items[1])
+		t.Fatalf("ScanIndex(AuditLogByTags, 'auth') did not populate LogIds: %+v, %+v", byTagAuth.Items[0], byTagAuth.Items[1])
 	}
 
-	// 6. BatchGetAuditLog with 12-byte versionstamp primary keys
-	batchRes, err := auditRepo.BatchGet(ctx, tx, [][]byte{firstLogID, secondLogID})
+	// 6. ReadRows with 12-byte versionstamp primary keys
+	batchRes, err := auditRepo.ReadRows(ctx, tx, []fdblayer.Key{{firstLogID}, {secondLogID}})
 	if err != nil || len(batchRes) != 2 {
-		t.Fatalf("BatchGetAuditLog expected 2 items, got %+v, err=%v", batchRes, err)
+		t.Fatalf("ReadRows AuditLog expected 2 items, got %+v, err=%v", batchRes, err)
 	}
 	for _, item := range batchRes {
 		if len(item.LogId) != 12 {
-			t.Fatalf("BatchGetAuditLog did not populate 12-byte LogId: %+v", item)
+			t.Fatalf("ReadRows did not populate 12-byte LogId: %+v", item)
 		}
 		if item.Actor == "alice" && item.Views != 10 {
-			t.Fatalf("BatchGetAuditLog expected Views=10 for alice, got %d", item.Views)
+			t.Fatalf("ReadRows expected Views=10 for alice, got %d", item.Views)
 		}
 	}
 
-	// 7. Set on existing entity updates in-place (preserving LogId) and updates indexes
-	if err := auditRepo.Set(ctx, tx, &store.AuditLog{
+	// 7. Upsert on existing entity updates in-place (preserving LogId) and updates indexes
+	if err := auditRepo.Upsert(ctx, tx, &store.AuditLog{
 		LogId: firstLogID,
 		Actor: "alice_admin",
 		Tags:  []string{"auth", "elevated"},
 		Views: 17,
 	}); err != nil {
-		t.Fatalf("Set existing AuditLog failed: %v", err)
+		t.Fatalf("Upsert existing AuditLog failed: %v", err)
 	}
-	gotAfterSet, err := auditRepo.Get(ctx, tx, firstLogID)
+	gotAfterSet, err := auditRepo.ReadRow(ctx, tx, fdblayer.Key{firstLogID})
 	if err != nil || gotAfterSet.Actor != "alice_admin" || gotAfterSet.Views != 17 {
-		t.Fatalf("expected updated Actor='alice_admin' and Views=17 after Set, got %+v, err=%v", gotAfterSet, err)
+		t.Fatalf("expected updated Actor='alice_admin' and Views=17 after Upsert, got %+v, err=%v", gotAfterSet, err)
 	}
-	if oldIdx, _ := auditRepo.GetByActor(ctx, tx, "alice", fdblayer.PaginationOptions{}); len(oldIdx.Items) != 0 {
-		t.Fatalf("expected old Actor index 'alice' cleared after Set, got %+v", oldIdx)
+	if oldIdx, _ := auditRepo.ScanIndex(ctx, tx, store.AuditLogByActor, fdblayer.Prefix("alice"), fdblayer.ScanOptions{}); len(oldIdx.Items) != 0 {
+		t.Fatalf("expected old Actor index 'alice' cleared after Upsert, got %+v", oldIdx)
 	}
-	if newIdx, _ := auditRepo.GetByActor(ctx, tx, "alice_admin", fdblayer.PaginationOptions{}); len(newIdx.Items) != 1 || !bytes.Equal(newIdx.Items[0].LogId, firstLogID) {
-		t.Fatalf("expected new Actor index 'alice_admin' after Set, got %+v", newIdx)
+	if newIdx, _ := auditRepo.ScanIndex(ctx, tx, store.AuditLogByActor, fdblayer.Prefix("alice_admin"), fdblayer.ScanOptions{}); len(newIdx.Items) != 1 || !bytes.Equal(newIdx.Items[0].LogId, firstLogID) {
+		t.Fatalf("expected new Actor index 'alice_admin' after Upsert, got %+v", newIdx)
 	}
-	if oldTag, _ := auditRepo.GetByTags(ctx, tx, "login", fdblayer.PaginationOptions{}); len(oldTag.Items) != 0 {
-		t.Fatalf("expected removed tag 'login' cleared after Set, got %+v", oldTag)
+	if oldTag, _ := auditRepo.ScanIndex(ctx, tx, store.AuditLogByTags, fdblayer.Prefix("login"), fdblayer.ScanOptions{}); len(oldTag.Items) != 0 {
+		t.Fatalf("expected removed tag 'login' cleared after Upsert, got %+v", oldTag)
 	}
-	if newTag, _ := auditRepo.GetByTags(ctx, tx, "elevated", fdblayer.PaginationOptions{}); len(newTag.Items) != 1 || !bytes.Equal(newTag.Items[0].LogId, firstLogID) {
-		t.Fatalf("expected added tag 'elevated' indexed after Set, got %+v", newTag)
+	if newTag, _ := auditRepo.ScanIndex(ctx, tx, store.AuditLogByTags, fdblayer.Prefix("elevated"), fdblayer.ScanOptions{}); len(newTag.Items) != 1 || !bytes.Equal(newTag.Items[0].LogId, firstLogID) {
+		t.Fatalf("expected added tag 'elevated' indexed after Upsert, got %+v", newTag)
 	}
 
 	// 8. Nil entity and malformed non-12-byte LogId validation checks
-	if err := auditRepo.Create(ctx, tx, nil); err == nil {
-		t.Fatal("expected Create(nil) to return error")
+	if err := auditRepo.Insert(ctx, tx, nil); err == nil {
+		t.Fatal("expected Insert(nil) to return error")
 	}
-	if err := auditRepo.Set(ctx, tx, nil); err == nil {
-		t.Fatal("expected Set(nil) to return error")
+	if err := auditRepo.Upsert(ctx, tx, nil); err == nil {
+		t.Fatal("expected Upsert(nil) to return error")
 	}
-	if _, err := auditRepo.Get(ctx, tx, []byte{1, 2, 3}); err == nil {
-		t.Fatal("expected Get with 3-byte LogId to return error")
+	if _, err := auditRepo.ReadRow(ctx, tx, fdblayer.Key{[]byte{1, 2, 3}}); err == nil {
+		t.Fatal("expected ReadRow with 3-byte LogId to return error")
 	}
-	if err := auditRepo.Delete(ctx, tx, []byte{1, 2, 3}); err == nil {
+	if err := auditRepo.Delete(ctx, tx, fdblayer.Key{[]byte{1, 2, 3}}); err == nil {
 		t.Fatal("expected Delete with 3-byte LogId to return error")
 	}
-	if _, err := auditRepo.BatchGet(ctx, tx, [][]byte{firstLogID, {1, 2, 3}}); err == nil {
-		t.Fatal("expected BatchGet with 3-byte LogId to return error")
+	if _, err := auditRepo.ReadRows(ctx, tx, []fdblayer.Key{{firstLogID}, {[]byte{1, 2, 3}}}); err == nil {
+		t.Fatal("expected ReadRows with 3-byte LogId to return error")
 	}
-	if err := auditRepo.Set(ctx, tx, &store.AuditLog{
+	if err := auditRepo.Upsert(ctx, tx, &store.AuditLog{
 		LogId: []byte{1, 2, 3},
 		Actor: "malformed",
 	}); err == nil {
-		t.Fatalf("expected Set with 3-byte LogId to return error")
+		t.Fatalf("expected Upsert with 3-byte LogId to return error")
 	}
-	if err := auditRepo.Set(ctx, tx, &store.AuditLog{
+	incompleteVS := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x01}
+	if err := auditRepo.Upsert(ctx, tx, &store.AuditLog{
+		LogId: incompleteVS,
+		Actor: "incomplete",
+	}); !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected Upsert with 12-byte incomplete versionstamp to return ErrInvalidKey, got %v", err)
+	}
+	if err := auditRepo.Upsert(ctx, tx, &store.AuditLog{
 		Actor: "charlie",
 		Tags:  []string{"audit"},
 		Views: 3,
 	}); err != nil {
-		t.Fatalf("Set new AuditLog (empty LogId) failed: %v", err)
+		t.Fatalf("Upsert new AuditLog (empty LogId) failed: %v", err)
 	}
-	byCharlie, err := auditRepo.GetByActor(ctx, tx, "charlie", fdblayer.PaginationOptions{})
+	byCharlie, err := auditRepo.ScanIndex(ctx, tx, store.AuditLogByActor, fdblayer.Prefix("charlie"), fdblayer.ScanOptions{})
 	if err != nil || len(byCharlie.Items) != 1 || len(byCharlie.Items[0].LogId) != 12 || byCharlie.Items[0].Views != 3 {
-		t.Fatalf("expected Set with empty LogId to create indexed AuditLog, got %+v, err=%v", byCharlie, err)
+		t.Fatalf("expected Upsert with empty LogId to create indexed AuditLog, got %+v, err=%v", byCharlie, err)
 	}
 
-	// 9. ListAuditLog pagination with Limit=1 and raw []byte Begin cursor
-	page1, err := auditRepo.List(ctx, tx, fdblayer.PaginationOptions{Limit: 1})
+	// 9. Scan pagination with Limit=1 and raw []byte Cursor
+	page1, err := auditRepo.Scan(ctx, tx, fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 1})
 	if err != nil || len(page1.Items) != 1 || !page1.HasMore {
 		t.Fatalf("expected page1 with 1 item and HasMore=true, got %+v, err=%v", page1, err)
 	}
-	page2, err := auditRepo.List(ctx, tx, fdblayer.PaginationOptions{
-		Begin: tuple.Tuple{secondLogID},
-		Limit: 1,
+	page2, err := auditRepo.Scan(ctx, tx, fdblayer.AllKeys(), fdblayer.ScanOptions{
+		Cursor: fdblayer.Key{secondLogID},
+		Limit:  1,
 	})
 	if err != nil || len(page2.Items) != 1 || !bytes.Equal(page2.Items[0].LogId, secondLogID) || !page2.HasMore {
 		t.Fatalf("expected page2 starting at secondLogID ([]byte) with HasMore=true, got %+v, err=%v", page2, err)
 	}
 
 	// 10. Delete by log_id clears primary data, standard index, and fan-out index
-	if err := auditRepo.Delete(ctx, tx, firstLogID); err != nil {
+	if err := auditRepo.Delete(ctx, tx, fdblayer.Key{firstLogID}); err != nil {
 		t.Fatalf("Delete AuditLog by versionstamp failed: %v", err)
 	}
-	if _, err := auditRepo.Get(ctx, tx, firstLogID); err == nil {
-		t.Fatalf("expected Get after Delete to fail")
+	if _, err := auditRepo.ReadRow(ctx, tx, fdblayer.Key{firstLogID}); err == nil {
+		t.Fatalf("expected ReadRow after Delete to fail")
 	}
-	if idxAfterDel, _ := auditRepo.GetByActor(ctx, tx, "alice_admin", fdblayer.PaginationOptions{}); len(idxAfterDel.Items) != 0 {
+	if idxAfterDel, _ := auditRepo.ScanIndex(ctx, tx, store.AuditLogByActor, fdblayer.Prefix("alice_admin"), fdblayer.ScanOptions{}); len(idxAfterDel.Items) != 0 {
 		t.Fatalf("expected Actor index cleared after Delete, got %+v", idxAfterDel)
 	}
-	if tagAfterDel, _ := auditRepo.GetByTags(ctx, tx, "elevated", fdblayer.PaginationOptions{}); len(tagAfterDel.Items) != 0 {
+	if tagAfterDel, _ := auditRepo.ScanIndex(ctx, tx, store.AuditLogByTags, fdblayer.Prefix("elevated"), fdblayer.ScanOptions{}); len(tagAfterDel.Items) != 0 {
 		t.Fatalf("expected fan-out tag 'elevated' cleared after Delete, got %+v", tagAfterDel)
 	}
-	if sharedTagAfterDel, _ := auditRepo.GetByTags(ctx, tx, "auth", fdblayer.PaginationOptions{}); len(sharedTagAfterDel.Items) != 1 || sharedTagAfterDel.Items[0].Actor != "bob" {
+	if sharedTagAfterDel, _ := auditRepo.ScanIndex(ctx, tx, store.AuditLogByTags, fdblayer.Prefix("auth"), fdblayer.ScanOptions{}); len(sharedTagAfterDel.Items) != 1 || sharedTagAfterDel.Items[0].Actor != "bob" {
 		t.Fatalf("expected only bob on 'auth' tag after Delete, got %+v", sharedTagAfterDel)
 	}
 	primaryKey := dir.Pack(tuple.Tuple{store.AuditLogTypeID, fdblayer.DataNamespace, fdblayer.BytesToVersionstamp(firstLogID)})
@@ -460,7 +476,7 @@ func TestAuditLog_NonQueueVersionstampPK(t *testing.T) {
 	}
 }
 
-func TestFanOutIndex_CreateDeduplicatesRepeatedTags(t *testing.T) {
+func TestFanOutIndex_InsertDeduplicatesRepeatedTags(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
@@ -471,10 +487,10 @@ func TestFanOutIndex_CreateDeduplicatesRepeatedTags(t *testing.T) {
 		Id:   "post_dup",
 		Tags: []string{"go", "go", "fdb", "go"},
 	}
-	if err := postRepo.Create(ctx, tx, post); err != nil {
-		t.Fatalf("Create failed: %v", err)
+	if err := postRepo.Insert(ctx, tx, post); err != nil {
+		t.Fatalf("Insert failed: %v", err)
 	}
-	// 1 primary record write + 2 unique tag index writes ("go", "fdb") = 3 SetCalls total (BUG-7)
+	// 1 primary record write + 2 unique tag index writes ("go", "fdb") = 3 SetCalls total
 	if len(tr.SetCalls) != 3 {
 		t.Fatalf("expected 3 Set calls (1 primary + 2 unique tags), got %d", len(tr.SetCalls))
 	}
@@ -484,7 +500,7 @@ func TestQueue_EnqueueZerosVersionstampPayload_AndDequeueBatch(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, kv := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
-	taskRepo := store.NewTaskMessageRepository()
+	var taskRepo fdblayer.QueueRepository[*store.TaskMessage] = store.NewTaskMessageRepository()
 
 	staleVS := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
 	msg1 := &store.TaskMessage{
@@ -501,7 +517,7 @@ func TestQueue_EnqueueZerosVersionstampPayload_AndDequeueBatch(t *testing.T) {
 		t.Fatalf("Enqueue mutated caller's Versionstamp slice: %x", msg1.Versionstamp)
 	}
 
-	// Raw stored protobuf value in FDB must have Versionstamp zeroed (BUG-4)
+	// Raw stored protobuf value in FDB must have Versionstamp zeroed
 	dummyVS := tuple.Versionstamp{
 		TransactionVersion: [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
 		UserVersion:        0,
@@ -516,11 +532,11 @@ func TestQueue_EnqueueZerosVersionstampPayload_AndDequeueBatch(t *testing.T) {
 		t.Fatalf("expected Enqueue to zero Versionstamp in stored protobuf payload, got %x", rawMsg.Versionstamp)
 	}
 
-	// Enqueue 2 more items and test DequeueBatch (PERF-5)
+	// Enqueue 2 more items and test DequeueBatch
 	_ = taskRepo.Enqueue(ctx, tx, &store.TaskMessage{QueueName: "q_batch", ShardId: 2, Payload: []byte("item-2")})
 	_ = taskRepo.Enqueue(ctx, tx, &store.TaskMessage{QueueName: "q_batch", ShardId: 3, Payload: []byte("item-3")})
 
-	batch, err := taskRepo.DequeueBatch(ctx, tx, "q_batch", 2)
+	batch, err := taskRepo.DequeueBatch(ctx, tx, fdblayer.Key{"q_batch"}, 2)
 	if err != nil || len(batch) != 2 {
 		t.Fatalf("DequeueBatch(2) expected 2 items, got %+v, err=%v", batch, err)
 	}
@@ -528,204 +544,219 @@ func TestQueue_EnqueueZerosVersionstampPayload_AndDequeueBatch(t *testing.T) {
 		t.Fatalf("unexpected DequeueBatch(2) items: %+v", batch)
 	}
 
-	rem, err := taskRepo.DequeueBatch(ctx, tx, "q_batch", 5)
+	rem, err := taskRepo.DequeueBatch(ctx, tx, fdblayer.Key{"q_batch"}, 5)
 	if err != nil || len(rem) != 1 || string(rem[0].Payload) != "item-3" {
 		t.Fatalf("DequeueBatch remaining expected 1 item ('item-3'), got %+v, err=%v", rem, err)
 	}
 }
 
-func TestOrder_PrefixList_ReverseList_AndBatchGetNormalization(t *testing.T) {
+func TestOrder_PrefixScan_RangeScan_ReverseScan_AndReadRowsNormalization(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	orderRepo := store.NewOrderRepository()
 
 	for _, seq := range []int32{1, 2, 3} {
-		_ = orderRepo.Create(ctx, tx, &store.Order{
+		_ = orderRepo.Insert(ctx, tx, &store.Order{
 			TenantId: "acme",
 			OrderSeq: seq,
 			Status:   store.OrderStatus_ORDER_STATUS_PENDING,
 		})
 	}
-	_ = orderRepo.Create(ctx, tx, &store.Order{
+	_ = orderRepo.Insert(ctx, tx, &store.Order{
 		TenantId: "other",
 		OrderSeq: 1,
 		Status:   store.OrderStatus_ORDER_STATUS_PENDING,
 	})
 
-	// 1. ListOrder with Prefix={"acme"} and Reverse=true (PERF-1, PERF-3)
-	acmeRev, err := orderRepo.List(ctx, tx, fdblayer.PaginationOptions{
-		Prefix:  tuple.Tuple{"acme"},
+	// 1. Scan with Prefix("acme") and Reverse=true
+	acmeRev, err := orderRepo.Scan(ctx, tx, fdblayer.Prefix("acme"), fdblayer.ScanOptions{
 		Limit:   2,
 		Reverse: true,
 	})
 	if err != nil || len(acmeRev.Items) != 2 || !acmeRev.HasMore {
-		t.Fatalf("unexpected ListOrder(Prefix:acme, Reverse:true) page 1: %+v, err=%v", acmeRev, err)
+		t.Fatalf("unexpected Scan(Prefix:acme, Reverse:true) page 1: %+v, err=%v", acmeRev, err)
 	}
 	if acmeRev.Items[0].OrderSeq != 3 || acmeRev.Items[1].OrderSeq != 2 {
 		t.Fatalf("expected OrderSeq [3, 2], got [%d, %d]", acmeRev.Items[0].OrderSeq, acmeRev.Items[1].OrderSeq)
 	}
 
-	acmeRev2, err := orderRepo.List(ctx, tx, fdblayer.PaginationOptions{
-		Prefix:  tuple.Tuple{"acme"},
-		Begin:   acmeRev.NextKey,
+	acmeRev2, err := orderRepo.Scan(ctx, tx, fdblayer.Prefix("acme"), fdblayer.ScanOptions{
+		Cursor:  acmeRev.NextCursor,
 		Limit:   2,
 		Reverse: true,
 	})
 	if err != nil || len(acmeRev2.Items) != 1 || acmeRev2.HasMore || acmeRev2.Items[0].OrderSeq != 1 {
-		t.Fatalf("unexpected ListOrder(Prefix:acme, Reverse:true) page 2: %+v, err=%v", acmeRev2, err)
+		t.Fatalf("unexpected Scan(Prefix:acme, Reverse:true) page 2: %+v, err=%v", acmeRev2, err)
 	}
 
-	// 2. BatchGetOrder with strongly-typed compound primary key (BUG-5)
-	batchByPK, err := orderRepo.BatchGet(ctx, tx, []store.OrderPrimaryKey{
-		{TenantId: "acme", OrderSeq: 1},
-		{TenantId: "acme", OrderSeq: 3},
+	// 1b. Scan with Range([{"acme", 1}, {"acme", 3})) returns OrderSeq 1 and 2
+	acmeRange, err := orderRepo.Scan(ctx, tx, fdblayer.Range(fdblayer.Key{"acme", int32(1)}, fdblayer.Key{"acme", int32(3)}), fdblayer.ScanOptions{})
+	if err != nil || len(acmeRange.Items) != 2 || acmeRange.Items[0].OrderSeq != 1 || acmeRange.Items[1].OrderSeq != 2 {
+		t.Fatalf("unexpected Scan(Range:[1,3)) result: %+v, err=%v", acmeRange, err)
+	}
+
+	// 2. ReadRows with compound primary key (int32 normalized automatically)
+	batchByPK, err := orderRepo.ReadRows(ctx, tx, []fdblayer.Key{
+		{"acme", int32(1)},
+		{"acme", int32(3)},
 	})
 	if err != nil || len(batchByPK) != 2 {
-		t.Fatalf("BatchGetOrder failed: %+v, err=%v", batchByPK, err)
+		t.Fatalf("ReadRows failed: %+v, err=%v", batchByPK, err)
 	}
 
-	// 3. Out-of-bounds Begin cursor with Prefix={"acme"} must be clamped to prefix range
+	// 3. Out-of-bounds Cursor with Prefix("acme") must be clamped to prefix range
 	// without leaking records from "other" or causing an inverted range.
-	clampedForwardBefore, err := orderRepo.List(ctx, tx, fdblayer.PaginationOptions{
-		Prefix: tuple.Tuple{"acme"},
-		Begin:  tuple.Tuple{"aaa", int64(1)},
+	clampedForwardBefore, err := orderRepo.Scan(ctx, tx, fdblayer.Prefix("acme"), fdblayer.ScanOptions{
+		Cursor: fdblayer.Key{"aaa", int64(1)},
 		Limit:  10,
 	})
 	if err != nil || len(clampedForwardBefore.Items) != 3 {
-		t.Fatalf("expected Begin<'acme' to be clamped to 'acme' start (3 items), got %+v, err=%v", clampedForwardBefore, err)
+		t.Fatalf("expected Cursor<'acme' to be clamped to 'acme' start (3 items), got %+v, err=%v", clampedForwardBefore, err)
 	}
-	clampedForwardAfter, err := orderRepo.List(ctx, tx, fdblayer.PaginationOptions{
-		Prefix: tuple.Tuple{"acme"},
-		Begin:  tuple.Tuple{"zzz", int64(1)},
+	clampedForwardAfter, err := orderRepo.Scan(ctx, tx, fdblayer.Prefix("acme"), fdblayer.ScanOptions{
+		Cursor: fdblayer.Key{"zzz", int64(1)},
 		Limit:  10,
 	})
 	if err != nil || len(clampedForwardAfter.Items) != 0 {
-		t.Fatalf("expected Begin>'acme' to return 0 items without inverted range, got %+v, err=%v", clampedForwardAfter, err)
+		t.Fatalf("expected Cursor>'acme' to return 0 items without inverted range, got %+v, err=%v", clampedForwardAfter, err)
 	}
-	clampedReverseBefore, err := orderRepo.List(ctx, tx, fdblayer.PaginationOptions{
-		Prefix:  tuple.Tuple{"acme"},
-		Begin:   tuple.Tuple{"aaa", int64(1)},
+	clampedReverseBefore, err := orderRepo.Scan(ctx, tx, fdblayer.Prefix("acme"), fdblayer.ScanOptions{
+		Cursor:  fdblayer.Key{"aaa", int64(1)},
 		Limit:   10,
 		Reverse: true,
 	})
 	if err != nil || len(clampedReverseBefore.Items) != 0 {
-		t.Fatalf("expected Reverse=true with Begin<'acme' to return 0 items, got %+v, err=%v", clampedReverseBefore, err)
+		t.Fatalf("expected Reverse=true with Cursor<'acme' to return 0 items, got %+v, err=%v", clampedReverseBefore, err)
 	}
-	clampedReverseAfter, err := orderRepo.List(ctx, tx, fdblayer.PaginationOptions{
-		Prefix:  tuple.Tuple{"acme"},
-		Begin:   tuple.Tuple{"zzz", int64(1)},
+	clampedReverseAfter, err := orderRepo.Scan(ctx, tx, fdblayer.Prefix("acme"), fdblayer.ScanOptions{
+		Cursor:  fdblayer.Key{"zzz", int64(1)},
 		Limit:   10,
 		Reverse: true,
 	})
 	if err != nil || len(clampedReverseAfter.Items) != 3 {
-		t.Fatalf("expected Reverse=true with Begin>'acme' to clamp to 'acme' end (3 items), got %+v, err=%v", clampedReverseAfter, err)
+		t.Fatalf("expected Reverse=true with Cursor>'acme' to clamp to 'acme' end (3 items), got %+v, err=%v", clampedReverseAfter, err)
 	}
 }
 
-func TestOrder_CompositeIndexPrefixQueries(t *testing.T) {
+func TestOrder_CompositeIndexPrefixAndRangeQueries(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	orderRepo := store.NewOrderRepository()
 
-	// Create 3 PENDING orders with distinct CreatedAt timestamps and 1 SHIPPED order
+	// Insert 3 PENDING orders with distinct CreatedAt timestamps and 1 SHIPPED order
 	for i, ts := range []int64{1000, 2000, 3000} {
-		if err := orderRepo.Create(ctx, tx, &store.Order{
+		if err := orderRepo.Insert(ctx, tx, &store.Order{
 			TenantId:  "acme",
 			OrderSeq:  int32(i + 1),
 			Status:    store.OrderStatus_ORDER_STATUS_PENDING,
 			CreatedAt: ts,
 		}); err != nil {
-			t.Fatalf("Create pending order %d failed: %v", i+1, err)
+			t.Fatalf("Insert pending order %d failed: %v", i+1, err)
 		}
 	}
-	if err := orderRepo.Create(ctx, tx, &store.Order{
+	if err := orderRepo.Insert(ctx, tx, &store.Order{
 		TenantId:  "acme",
 		OrderSeq:  99,
 		Status:    store.OrderStatus_ORDER_STATUS_SHIPPED,
 		CreatedAt: 1500,
 	}); err != nil {
-		t.Fatalf("Create shipped order failed: %v", err)
+		t.Fatalf("Insert shipped order failed: %v", err)
 	}
 
-	// 1. GetOrderByStatus (partial prefix of (status, created_at)) returns all 3 PENDING orders ordered by CreatedAt
-	pendingRes, err := orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{})
+	// 1. ScanIndex with partial prefix fdblayer.Prefix(PENDING) returns all 3 PENDING orders ordered by CreatedAt
+	pendingRes, err := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{})
 	if err != nil || len(pendingRes.Items) != 3 {
-		t.Fatalf("GetOrderByStatus(PENDING) expected 3 orders, got %+v, err=%v", pendingRes, err)
+		t.Fatalf("ScanIndex(OrderByStatusCreatedAt, Prefix(PENDING)) expected 3 orders, got %+v, err=%v", pendingRes, err)
 	}
 	pending := pendingRes.Items
 	if pending[0].CreatedAt != 1000 || pending[1].CreatedAt != 2000 || pending[2].CreatedAt != 3000 {
-		t.Fatalf("unexpected CreatedAt order from GetOrderByStatus: [%d, %d, %d]", pending[0].CreatedAt, pending[1].CreatedAt, pending[2].CreatedAt)
+		t.Fatalf("unexpected CreatedAt order: [%d, %d, %d]", pending[0].CreatedAt, pending[1].CreatedAt, pending[2].CreatedAt)
 	}
 
-	// 2. GetOrderByStatus forward pagination (Limit=2) across different CreatedAt values
-	fwd1, err := orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
+	// 1b. ScanIndex with half-open Range([ {PENDING, 1000}, {PENDING, 3000} )) returns CreatedAt 1000 and 2000
+	rangeRes, err := orderRepo.ScanIndex(
+		ctx,
+		tx,
+		store.OrderByStatusCreatedAt,
+		fdblayer.Range(
+			fdblayer.Key{store.OrderStatus_ORDER_STATUS_PENDING, int64(1000)},
+			fdblayer.Key{store.OrderStatus_ORDER_STATUS_PENDING, int64(3000)},
+		),
+		fdblayer.ScanOptions{},
+	)
+	if err != nil || len(rangeRes.Items) != 2 || rangeRes.Items[0].CreatedAt != 1000 || rangeRes.Items[1].CreatedAt != 2000 {
+		t.Fatalf("ScanIndex(OrderByStatusCreatedAt, Range([1000, 3000))) expected 2 orders, got %+v, err=%v", rangeRes, err)
+	}
+
+	// 2. ScanIndex forward pagination (Limit=2) across different CreatedAt values
+	fwd1, err := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{
 		Limit: 2,
 	})
 	if err != nil || len(fwd1.Items) != 2 || !fwd1.HasMore {
-		t.Fatalf("GetOrderByStatus forward page 1 failed: %+v, err=%v", fwd1, err)
+		t.Fatalf("ScanIndex forward page 1 failed: %+v, err=%v", fwd1, err)
 	}
 	if fwd1.Items[0].OrderSeq != 1 || fwd1.Items[1].OrderSeq != 2 {
 		t.Fatalf("expected OrderSeq [1, 2], got [%d, %d]", fwd1.Items[0].OrderSeq, fwd1.Items[1].OrderSeq)
 	}
 
-	fwd2, err := orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
-		Begin: fwd1.NextKey,
-		Limit: 2,
+	fwd2, err := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{
+		Cursor: fwd1.NextCursor,
+		Limit:  2,
 	})
 	if err != nil || len(fwd2.Items) != 1 || fwd2.HasMore || fwd2.Items[0].OrderSeq != 3 {
-		t.Fatalf("GetOrderByStatus forward page 2 failed: %+v, err=%v", fwd2, err)
+		t.Fatalf("ScanIndex forward page 2 failed: %+v, err=%v", fwd2, err)
 	}
 
-	// 3. GetOrderByStatus reverse pagination (Limit=2, Reverse=true)
-	rev1, err := orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
+	// 3. ScanIndex reverse pagination (Limit=2, Reverse=true)
+	rev1, err := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{
 		Limit:   2,
 		Reverse: true,
 	})
 	if err != nil || len(rev1.Items) != 2 || !rev1.HasMore {
-		t.Fatalf("GetOrderByStatus reverse page 1 failed: %+v, err=%v", rev1, err)
+		t.Fatalf("ScanIndex reverse page 1 failed: %+v, err=%v", rev1, err)
 	}
 	if rev1.Items[0].OrderSeq != 3 || rev1.Items[1].OrderSeq != 2 {
 		t.Fatalf("expected reverse OrderSeq [3, 2], got [%d, %d]", rev1.Items[0].OrderSeq, rev1.Items[1].OrderSeq)
 	}
 
-	rev2, err := orderRepo.GetByStatus(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, fdblayer.PaginationOptions{
-		Begin:   rev1.NextKey,
+	rev2, err := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{
+		Cursor:  rev1.NextCursor,
 		Limit:   2,
 		Reverse: true,
 	})
 	if err != nil || len(rev2.Items) != 1 || rev2.HasMore || rev2.Items[0].OrderSeq != 1 {
-		t.Fatalf("GetOrderByStatus reverse page 2 failed: %+v, err=%v", rev2, err)
+		t.Fatalf("ScanIndex reverse page 2 failed: %+v, err=%v", rev2, err)
 	}
 }
 
-func TestFanOutIndex_SetAndDeleteDeduplicateRepeatedTags(t *testing.T) {
+func TestFanOutIndex_UpsertAndDeleteDeduplicateRepeatedTags(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	postRepo := store.NewPostRepository()
 
-	if err := postRepo.Create(ctx, tx, &store.Post{
+	if err := postRepo.Insert(ctx, tx, &store.Post{
 		Id:   "p_dup",
 		Tags: []string{"a", "a", "b"},
 	}); err != nil {
-		t.Fatalf("Create failed: %v", err)
+		t.Fatalf("Insert failed: %v", err)
 	}
 
 	tr.ResetLog()
-	if err := postRepo.Set(ctx, tx, &store.Post{
+	if err := postRepo.Upsert(ctx, tx, &store.Post{
 		Id:   "p_dup",
 		Tags: []string{"b", "c", "c", "c"},
 	}); err != nil {
-		t.Fatalf("Set failed: %v", err)
+		t.Fatalf("Upsert failed: %v", err)
 	}
 	if len(tr.ClearCalls) != 1 || len(tr.SetCalls) != 2 {
-		t.Fatalf("expected 1 ClearCall and 2 SetCalls on Set with duplicate tags, got %d ClearCalls and %d SetCalls", len(tr.ClearCalls), len(tr.SetCalls))
+		t.Fatalf("expected 1 ClearCall and 2 SetCalls on Upsert with duplicate tags, got %d ClearCalls and %d SetCalls", len(tr.ClearCalls), len(tr.SetCalls))
 	}
 
 	tr.ResetLog()
-	if err := postRepo.Delete(ctx, tx, "p_dup"); err != nil {
+	if err := postRepo.Delete(ctx, tx, fdblayer.Key{"p_dup"}); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 	if len(tr.ClearCalls) != 3 {
@@ -746,14 +777,14 @@ func TestQueue_CorruptedPayloadPreservesEntry(t *testing.T) {
 	corruptKey := dir.Pack(tuple.Tuple{store.TaskMessageTypeID, fdblayer.DataNamespace, "corrupt_q", dummyVS, uint64(1)})
 	tr.Set(corruptKey, []byte{0x00, 0xff, 0xff})
 
-	if _, err := taskRepo.Dequeue(ctx, tx, "corrupt_q"); err == nil {
+	if _, err := taskRepo.Dequeue(ctx, tx, fdblayer.Key{"corrupt_q"}); err == nil {
 		t.Fatal("expected unmarshal error from Dequeue on corrupted payload")
 	}
 	if !kv.HasKey(corruptKey) {
 		t.Fatal("expected corrupted queue item to remain in store after Dequeue error")
 	}
 
-	if _, err := taskRepo.DequeueBatch(ctx, tx, "corrupt_q", 5); err == nil {
+	if _, err := taskRepo.DequeueBatch(ctx, tx, fdblayer.Key{"corrupt_q"}, 5); err == nil {
 		t.Fatal("expected unmarshal error from DequeueBatch on corrupted payload")
 	}
 	if !kv.HasKey(corruptKey) {
@@ -761,7 +792,7 @@ func TestQueue_CorruptedPayloadPreservesEntry(t *testing.T) {
 	}
 }
 
-func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
+func TestSecondaryAndFanOutIndexKeysNeverMissed_InsertUpsertDelete(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
@@ -779,92 +810,92 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 	hashB := []byte{0x0B}
 	hashC := []byte{0x0C}
 	hashD := []byte{0x0D}
-	pk := store.OrderPrimaryKey{TenantId: "t1", OrderSeq: 7}
+	pk := fdblayer.Key{"t1", int32(7)}
 
-	// 1. Create with 2 attachment hashes:
+	// 1. Insert with 2 attachment hashes:
 	//    - 1 key for (status, created_at) [id=1001]
-	//    - 1 key for (receipt_hash)
-	//    - 2 keys for fan-out (attachment_hashes)
-	//    - 2 keys for composite fan-out (status, attachment_hashes)
+	//    - 1 key for (receipt_hash) [id=1002]
+	//    - 2 keys for fan-out (attachment_hashes) [id=1003]
+	//    - 2 keys for composite fan-out (status, attachment_hashes) [id=1004]
 	//    Total = 6 index keys.
-	if err := orderRepo.Create(ctx, tx, &store.Order{
-		TenantId:         pk.TenantId,
-		OrderSeq:         pk.OrderSeq,
+	if err := orderRepo.Insert(ctx, tx, &store.Order{
+		TenantId:         "t1",
+		OrderSeq:         7,
 		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
 		CreatedAt:        100,
 		ReceiptHash:      []byte{0x01},
 		AttachmentHashes: [][]byte{hashA, hashB, hashA}, // duplicate hashA must be deduplicated
 	}); err != nil {
-		t.Fatalf("Create failed: %v", err)
+		t.Fatalf("Insert failed: %v", err)
 	}
 	if got := countOrderIndexKeys(); got != 6 {
-		t.Fatalf("expected 6 index keys after Create, got %d", got)
+		t.Fatalf("expected 6 index keys after Insert, got %d", got)
 	}
-	if res, err := orderRepo.GetByStatusAndAttachmentHashes(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, hashA, fdblayer.PaginationOptions{}); err != nil || len(res.Items) != 1 {
+	if res, err := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusAttachmentHashes, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING, hashA), fdblayer.ScanOptions{}); err != nil || len(res.Items) != 1 {
 		t.Fatalf("expected 1 order for (PENDING, hashA), got %+v, err=%v", res, err)
 	}
-	if res, err := orderRepo.GetByStatusAndAttachmentHashes(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, hashB, fdblayer.PaginationOptions{}); err != nil || len(res.Items) != 1 {
+	if res, err := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusAttachmentHashes, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING, hashB), fdblayer.ScanOptions{}); err != nil || len(res.Items) != 1 {
 		t.Fatalf("expected 1 order for (PENDING, hashB), got %+v, err=%v", res, err)
 	}
 
-	// 2. Set with UNCHANGED Status (PENDING) and updated AttachmentHashes ({hashB, hashC}):
+	// 2. Upsert with UNCHANGED Status (PENDING) and updated AttachmentHashes ({hashB, hashC}):
 	//    Delta path must remove hashA, keep hashB, and add hashC on both fan-out indexes.
-	if err := orderRepo.Set(ctx, tx, &store.Order{
-		TenantId:         pk.TenantId,
-		OrderSeq:         pk.OrderSeq,
+	if err := orderRepo.Upsert(ctx, tx, &store.Order{
+		TenantId:         "t1",
+		OrderSeq:         7,
 		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
 		CreatedAt:        100,
 		ReceiptHash:      []byte{0x01},
 		AttachmentHashes: [][]byte{hashB, hashC},
 	}); err != nil {
-		t.Fatalf("Set (same status) failed: %v", err)
+		t.Fatalf("Upsert (same status) failed: %v", err)
 	}
 	if got := countOrderIndexKeys(); got != 6 {
-		t.Fatalf("expected 6 index keys after Set (same status), got %d", got)
+		t.Fatalf("expected 6 index keys after Upsert (same status), got %d", got)
 	}
-	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, hashA, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
-		t.Fatalf("expected (PENDING, hashA) cleared after Set, got %+v", res)
+	if res, _ := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusAttachmentHashes, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING, hashA), fdblayer.ScanOptions{}); len(res.Items) != 0 {
+		t.Fatalf("expected (PENDING, hashA) cleared after Upsert, got %+v", res)
 	}
-	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, hashC, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
-		t.Fatalf("expected (PENDING, hashC) added after Set, got %+v", res)
+	if res, _ := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusAttachmentHashes, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING, hashC), fdblayer.ScanOptions{}); len(res.Items) != 1 {
+		t.Fatalf("expected (PENDING, hashC) added after Upsert, got %+v", res)
 	}
 
-	// 3. Set with CHANGED Status (PENDING -> SHIPPED) and overlapping AttachmentHashes ({hashC, hashD}):
+	// 3. Upsert with CHANGED Status (PENDING -> SHIPPED) and overlapping AttachmentHashes ({hashC, hashD}):
 	//    Non-repeated field changed in composite fan-out index (status, attachment_hashes),
 	//    so ALL old (PENDING, hashB) and (PENDING, hashC) keys must be cleared, and (SHIPPED, hashC) + (SHIPPED, hashD) written!
-	if err := orderRepo.Set(ctx, tx, &store.Order{
-		TenantId:         pk.TenantId,
-		OrderSeq:         pk.OrderSeq,
+	if err := orderRepo.Upsert(ctx, tx, &store.Order{
+		TenantId:         "t1",
+		OrderSeq:         7,
 		Status:           store.OrderStatus_ORDER_STATUS_SHIPPED,
 		CreatedAt:        200,
 		ReceiptHash:      []byte{0x02},
 		AttachmentHashes: [][]byte{hashC, hashD},
 	}); err != nil {
-		t.Fatalf("Set (changed status) failed: %v", err)
+		t.Fatalf("Upsert (changed status) failed: %v", err)
 	}
 	if got := countOrderIndexKeys(); got != 6 {
-		t.Fatalf("expected 6 index keys after Set (changed status), got %d", got)
+		t.Fatalf("expected 6 index keys after Upsert (changed status), got %d", got)
 	}
-	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tx, store.OrderStatus_ORDER_STATUS_PENDING, hashC, fdblayer.PaginationOptions{}); len(res.Items) != 0 {
+	if res, _ := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusAttachmentHashes, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING, hashC), fdblayer.ScanOptions{}); len(res.Items) != 0 {
 		t.Fatalf("stale composite fan-out key (PENDING, hashC) was not cleared when status changed: %+v", res)
 	}
-	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tx, store.OrderStatus_ORDER_STATUS_SHIPPED, hashC, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
+	if res, _ := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusAttachmentHashes, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_SHIPPED, hashC), fdblayer.ScanOptions{}); len(res.Items) != 1 {
 		t.Fatalf("missing composite fan-out key (SHIPPED, hashC) after status change: %+v", res)
 	}
-	if res, _ := orderRepo.GetByStatusAndAttachmentHashes(ctx, tx, store.OrderStatus_ORDER_STATUS_SHIPPED, hashD, fdblayer.PaginationOptions{}); len(res.Items) != 1 {
+	if res, _ := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusAttachmentHashes, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_SHIPPED, hashD), fdblayer.ScanOptions{}); len(res.Items) != 1 {
 		t.Fatalf("missing composite fan-out key (SHIPPED, hashD) after status change: %+v", res)
 	}
 
-	// 4. Set with empty AttachmentHashes (nil): all fan-out keys must be cleared, leaving only the 2 standard index keys.
-	if err := orderRepo.Set(ctx, tx, &store.Order{
-		TenantId:         pk.TenantId,
-		OrderSeq:         pk.OrderSeq,
+	// 4. Upsert with empty AttachmentHashes (nil): all fan-out keys must be cleared, leaving only the 2 standard index keys.
+	if err := orderRepo.Upsert(ctx, tx, &store.Order{
+		TenantId:         "t1",
+		OrderSeq:         7,
 		Status:           store.OrderStatus_ORDER_STATUS_SHIPPED,
 		CreatedAt:        200,
 		ReceiptHash:      []byte{0x02},
 		AttachmentHashes: nil,
 	}); err != nil {
-		t.Fatalf("Set (empty fan-out) failed: %v", err)
+		t.Fatalf("Upsert (empty fan-out) failed: %v", err)
 	}
 	if got := countOrderIndexKeys(); got != 2 {
 		t.Fatalf("expected 2 standard index keys after clearing fan-out slice, got %d", got)
@@ -878,26 +909,26 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 		t.Fatalf("expected 0 index keys after Delete, got %d", got)
 	}
 
-	// 6. Upsert via Set on a non-existent record must write all standard and fan-out index keys,
+	// 6. Upsert on a non-existent record must write all standard and fan-out index keys,
 	//    and Delete must still clear all index keys even if primary key fields inside the stored
 	//    protobuf value were omitted.
-	pk2 := store.OrderPrimaryKey{TenantId: "t2", OrderSeq: 9}
-	if err := orderRepo.Set(ctx, tx, &store.Order{
-		TenantId:         pk2.TenantId,
-		OrderSeq:         pk2.OrderSeq,
+	pk2 := fdblayer.Key{"t2", int32(9)}
+	if err := orderRepo.Upsert(ctx, tx, &store.Order{
+		TenantId:         "t2",
+		OrderSeq:         9,
 		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
 		CreatedAt:        300,
 		ReceiptHash:      []byte{0x09},
 		AttachmentHashes: [][]byte{hashA, hashB},
 	}); err != nil {
-		t.Fatalf("Upsert via Set failed: %v", err)
+		t.Fatalf("Upsert failed: %v", err)
 	}
 	if got := countOrderIndexKeys(); got != 6 {
-		t.Fatalf("expected 6 index keys after Upsert via Set, got %d", got)
+		t.Fatalf("expected 6 index keys after Upsert, got %d", got)
 	}
 
 	// Simulate a stored protobuf value whose PK fields were omitted from the serialized body.
-	rawDataKey := dir.Pack(tuple.Tuple{store.OrderTypeID, fdblayer.DataNamespace, pk2.TenantId, int64(pk2.OrderSeq)})
+	rawDataKey := dir.Pack(tuple.Tuple{store.OrderTypeID, fdblayer.DataNamespace, "t2", int64(9)})
 	strippedBytes, err := proto.Marshal(&store.Order{
 		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
 		CreatedAt:        300,
@@ -916,5 +947,3 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_CreateSetDelete(t *testing.T) {
 		t.Fatalf("expected 0 index keys after Delete of PK-stripped payload, got %d", got)
 	}
 }
-
-

@@ -18,9 +18,7 @@ const TaskMessageTypeID int64 = 4
 
 // TaskMessageRepository defines the repository interface for the TaskMessage queue.
 type TaskMessageRepository interface {
-	Enqueue(ctx context.Context, tx *fdblayer.Tx, msg *TaskMessage) error
-	Dequeue(ctx context.Context, tx *fdblayer.Tx, queuename string) (*TaskMessage, error)
-	DequeueBatch(ctx context.Context, tx *fdblayer.Tx, queuename string, limit int) ([]*TaskMessage, error)
+	fdblayer.QueueRepository[*TaskMessage]
 }
 
 type taskmessageRepository struct{}
@@ -68,22 +66,26 @@ func (r *taskmessageRepository) Enqueue(ctx context.Context, tx *fdblayer.Tx, en
 }
 
 // Dequeue reads and removes the single oldest message from the queue.
-func (r *taskmessageRepository) Dequeue(ctx context.Context, tx *fdblayer.Tx, queuename string) (*TaskMessage, error) {
+func (r *taskmessageRepository) Dequeue(ctx context.Context, tx *fdblayer.Tx, partitionKey fdblayer.Key) (*TaskMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if len(partitionKey) != 1 {
+		return nil, fmt.Errorf("%w: expected 1 partition key element for taskmessage, got %d", fdblayer.ErrInvalidKey, len(partitionKey))
 	}
 	tr := tx.Transaction()
 	dir := tx.Dir()
 
-	prefixTuple := tuple.Tuple{TaskMessageTypeID, fdblayer.DataNamespace, queuename}
-	prefixRange, err := fdb.PrefixRange(dir.Pack(prefixTuple))
+	prefixKey, err := fdblayer.PackSubspaceTuple(dir, tuple.Tuple{TaskMessageTypeID, fdblayer.DataNamespace}, partitionKey, []fdblayer.FieldKind{fdblayer.FieldKindString})
 	if err != nil {
 		return nil, err
 	}
+	prefixRange := fdb.KeyRange{
+		Begin: fdb.Key(append(append([]byte(nil), prefixKey...), 0x00)),
+		End:   fdb.Key(append(append([]byte(nil), prefixKey...), 0xFF)),
+	}
 
-	options := fdb.RangeOptions{Limit: 1}
-	rows := fdblayer.GetRange(tr, prefixRange, options).GetSliceOrPanic()
-
+	rows := fdblayer.GetRange(tr, prefixRange, fdb.RangeOptions{Limit: 1}).GetSliceOrPanic()
 	if len(rows) == 0 {
 		return nil, nil
 	}
@@ -93,8 +95,7 @@ func (r *taskmessageRepository) Dequeue(ctx context.Context, tx *fdblayer.Tx, qu
 	payload := firstItem.Value
 
 	entity := &TaskMessage{}
-	err = proto.Unmarshal(payload, entity)
-	if err != nil {
+	if err := proto.Unmarshal(payload, entity); err != nil {
 		return nil, err
 	}
 
@@ -113,20 +114,26 @@ func (r *taskmessageRepository) Dequeue(ctx context.Context, tx *fdblayer.Tx, qu
 }
 
 // DequeueBatch reads and removes up to limit oldest messages from the queue in a single range scan.
-func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tx *fdblayer.Tx, queuename string, limit int) ([]*TaskMessage, error) {
+func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tx *fdblayer.Tx, partitionKey fdblayer.Key, limit int) ([]*TaskMessage, error) {
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(partitionKey) != 1 {
+		return nil, fmt.Errorf("%w: expected 1 partition key element for taskmessage, got %d", fdblayer.ErrInvalidKey, len(partitionKey))
+	}
+	tr := tx.Transaction()
+	dir := tx.Dir()
+
+	prefixKey, err := fdblayer.PackSubspaceTuple(dir, tuple.Tuple{TaskMessageTypeID, fdblayer.DataNamespace}, partitionKey, []fdblayer.FieldKind{fdblayer.FieldKindString})
+	if err != nil {
 		return nil, err
 	}
 	if limit <= 0 {
 		return nil, nil
 	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
-
-	prefixTuple := tuple.Tuple{TaskMessageTypeID, fdblayer.DataNamespace, queuename}
-	prefixRange, err := fdb.PrefixRange(dir.Pack(prefixTuple))
-	if err != nil {
-		return nil, err
+	prefixRange := fdb.KeyRange{
+		Begin: fdb.Key(append(append([]byte(nil), prefixKey...), 0x00)),
+		End:   fdb.Key(append(append([]byte(nil), prefixKey...), 0xFF)),
 	}
 
 	rows := fdblayer.GetRange(tr, prefixRange, fdb.RangeOptions{Limit: limit}).GetSliceOrPanic()

@@ -16,11 +16,14 @@ import (
 // PostTypeID is the compile-time type prefix for Post records in FoundationDB.
 const PostTypeID int64 = 3
 
+// Secondary index IDs for Post.
+const (
+	PostByTags fdblayer.IndexID = 1
+)
+
 // PostRepository defines the repository interface for Post.
 type PostRepository interface {
-	fdblayer.GenericRepository[*Post, string]
-
-	GetByTags(ctx context.Context, tx *fdblayer.Tx, Tags string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Post], error)
+	fdblayer.Repository[*Post]
 }
 
 type postRepository struct{}
@@ -30,8 +33,8 @@ func NewPostRepository() PostRepository {
 	return &postRepository{}
 }
 
-// Create creates a new Post entity in the database.
-func (r *postRepository) Create(ctx context.Context, tx *fdblayer.Tx, entity *Post) error {
+// Insert creates a new Post entity in the database.
+func (r *postRepository) Insert(ctx context.Context, tx *fdblayer.Tx, entity *Post) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -61,7 +64,7 @@ func (r *postRepository) Create(ctx context.Context, tx *fdblayer.Tx, entity *Po
 				continue
 			}
 			seen[item] = struct{}{}
-			tr.Set(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, 1,
+			tr.Set(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostByTags),
 				item,
 				entity.Id,
 			}), []byte{})
@@ -71,30 +74,8 @@ func (r *postRepository) Create(ctx context.Context, tx *fdblayer.Tx, entity *Po
 	return nil
 }
 
-// Get retrieves a Post entity by its primary key.
-func (r *postRepository) Get(ctx context.Context, tx *fdblayer.Tx, pk string) (*Post, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
-
-	key := dir.Pack(tuple.Tuple{PostTypeID, fdblayer.DataNamespace, pk})
-	valueFuture := tr.Get(key)
-	value := valueFuture.MustGet()
-	if value == nil {
-		return nil, fmt.Errorf("post %w", fdblayer.ErrNotFound)
-	}
-	entity := &Post{}
-	if err := proto.Unmarshal(value, entity); err != nil {
-		return nil, err
-	}
-
-	return entity, nil
-}
-
-// Set updates an existing Post entity in the database (or inserts it if not present).
-func (r *postRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *Post) error {
+// Upsert inserts a new Post entity or updates an existing one in the database.
+func (r *postRepository) Upsert(ctx context.Context, tx *fdblayer.Tx, entity *Post) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -137,7 +118,7 @@ func (r *postRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *Post)
 		for _, item := range old.Tags {
 			if _, keep := newSet[item]; !keep {
 				newSet[item] = struct{}{}
-				tr.Clear(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, 1,
+				tr.Clear(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostByTags),
 					item,
 					old.Id,
 				}))
@@ -146,7 +127,7 @@ func (r *postRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *Post)
 		for _, item := range entity.Tags {
 			if _, existed := oldSet[item]; !existed {
 				oldSet[item] = struct{}{}
-				tr.Set(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, 1,
+				tr.Set(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostByTags),
 					item,
 					entity.Id,
 				}), []byte{})
@@ -159,7 +140,7 @@ func (r *postRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *Post)
 				continue
 			}
 			seen[item] = struct{}{}
-			tr.Set(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, 1,
+			tr.Set(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostByTags),
 				item,
 				entity.Id,
 			}), []byte{})
@@ -169,22 +150,24 @@ func (r *postRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *Post)
 	return nil
 }
 
-// Delete removes a Post entity from the database.
-func (r *postRepository) Delete(ctx context.Context, tx *fdblayer.Tx, pk string) error {
+// Delete removes a Post entity from the database by its primary key.
+func (r *postRepository) Delete(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	tr := tx.Transaction()
 	dir := tx.Dir()
 
-	key := dir.Pack(tuple.Tuple{PostTypeID, fdblayer.DataNamespace, pk})
-	value := tr.Get(key).MustGet()
+	pkTuple, dataKey, err := fdblayer.PackPrimaryKey(dir, PostTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+	if err != nil {
+		return err
+	}
+	value := tr.Get(dataKey).MustGet()
 	if value != nil {
 		entity := &Post{}
 		if err := proto.Unmarshal(value, entity); err != nil {
 			return fmt.Errorf("failed to unmarshal existing post: %w", err)
 		}
-		entity.Id = pk
 		// Fan-out index
 		{
 			seen := make(map[string]struct{}, len(entity.Tags))
@@ -193,37 +176,63 @@ func (r *postRepository) Delete(ctx context.Context, tx *fdblayer.Tx, pk string)
 					continue
 				}
 				seen[item] = struct{}{}
-				tr.Clear(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, 1,
+				tr.Clear(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostByTags),
 					item,
-					entity.Id,
+					pkTuple[0],
 				}))
 			}
 		}
 	}
-	tr.Clear(key)
+	tr.Clear(dataKey)
 
 	return nil
 }
 
-// BatchGet retrieves multiple Post entities by their primary keys.
-func (r *postRepository) BatchGet(ctx context.Context, tx *fdblayer.Tx, pks []string) ([]*Post, error) {
+// ReadRow retrieves a single Post entity by its primary key.
+func (r *postRepository) ReadRow(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) (*Post, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if len(pks) == 0 {
+	tr := tx.Transaction()
+	dir := tx.Dir()
+
+	_, dataKey, err := fdblayer.PackPrimaryKey(dir, PostTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+	if err != nil {
+		return nil, err
+	}
+	value := tr.Get(dataKey).MustGet()
+	if value == nil {
+		return nil, fmt.Errorf("post %w", fdblayer.ErrNotFound)
+	}
+	entity := &Post{}
+	if err := proto.Unmarshal(value, entity); err != nil {
+		return nil, err
+	}
+	return entity, nil
+}
+
+// ReadRows retrieves multiple Post entities by their primary keys in parallel.
+func (r *postRepository) ReadRows(ctx context.Context, tx *fdblayer.Tx, keys []fdblayer.Key) ([]*Post, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
 		return nil, nil
 	}
 	tr := tx.Transaction()
 	dir := tx.Dir()
-	futures := make([]fdb.FutureByteSlice, len(pks))
-	for i, pk := range pks {
+	futures := make([]fdb.FutureByteSlice, len(keys))
+	for i, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		key := dir.Pack(tuple.Tuple{PostTypeID, fdblayer.DataNamespace, pk})
-		futures[i] = tr.Get(key)
+		_, dataKey, err := fdblayer.PackPrimaryKey(dir, PostTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+		if err != nil {
+			return nil, fmt.Errorf("at index %d: %w", i, err)
+		}
+		futures[i] = tr.Get(dataKey)
 	}
-	entities := make([]*Post, 0, len(pks))
+	entities := make([]*Post, 0, len(keys))
 	for i, future := range futures {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -241,55 +250,23 @@ func (r *postRepository) BatchGet(ctx context.Context, tx *fdblayer.Tx, pks []st
 	return entities, nil
 }
 
-// List retrieves a list of Post entities starting from the given key.
-func (r *postRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Post], error) {
+// Scan performs a paginated range or prefix scan over Post primary keys.
+func (r *postRepository) Scan(ctx context.Context, tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*Post], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	tr := tx.Transaction()
 	dir := tx.Dir()
 
-	result := &fdblayer.PaginatedResult[*Post]{
+	result := &fdblayer.Page[*Post]{
 		Items: make([]*Post, 0),
 	}
 
-	// Compute data prefix range (scoped to opts.Prefix when provided).
-	prefixTpl := make(tuple.Tuple, 2+len(opts.Prefix))
-	prefixTpl[0] = PostTypeID
-	prefixTpl[1] = fdblayer.DataNamespace
-	for j, el := range opts.Prefix {
-		prefixTpl[2+j] = fdblayer.NormalizeTupleElement(el)
-	}
-	dataPrefix := dir.Pack(prefixTpl)
-	dataPrefixRange, err := fdb.PrefixRange(dataPrefix)
+	rangeBegin, rangeEnd, err := fdblayer.ResolveScanBounds(dir, tuple.Tuple{PostTypeID, fdblayer.DataNamespace}, kr, opts, []fdblayer.FieldKind{fdblayer.FieldKindString})
 	if err != nil {
 		return nil, err
 	}
-
-	beginTpl := make(tuple.Tuple, 2+len(opts.Begin))
-	beginTpl[0] = PostTypeID
-	beginTpl[1] = fdblayer.DataNamespace
-	for j, el := range opts.Begin {
-		beginTpl[2+j] = fdblayer.NormalizeTupleElement(el)
-	}
-	begin := dir.Pack(beginTpl)
-
-	rangeBegin := dataPrefixRange.Begin
-	rangeEnd := dataPrefixRange.End
-	if len(opts.Begin) > 0 {
-		if opts.Reverse {
-			beginRange, err := fdb.PrefixRange(begin)
-			if err != nil {
-				return nil, err
-			}
-			if string(beginRange.End.FDBKey()) < string(rangeEnd.FDBKey()) {
-				rangeEnd = beginRange.End
-			}
-		} else if string(begin) > string(rangeBegin.FDBKey()) {
-			rangeBegin = begin
-		}
-	}
-	if string(rangeBegin.FDBKey()) >= string(rangeEnd.FDBKey()) {
+	if string(rangeBegin) >= string(rangeEnd) {
 		return result, nil
 	}
 
@@ -314,15 +291,13 @@ func (r *postRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdblaye
 			if err != nil {
 				return nil, fmt.Errorf("failed to unpack next key: %w", err)
 			}
-			// Remove typeID and DataNamespace to return just the PK tuple
 			result.HasMore = true
-			result.NextKey = tpl[2:]
+			result.NextCursor = fdblayer.ExtractCursorKey(tpl, 2)
 			break
 		}
 
 		entity := &Post{}
-		err = proto.Unmarshal(kv.Value, entity)
-		if err != nil {
+		if err := proto.Unmarshal(kv.Value, entity); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)
 		}
 		result.Items = append(result.Items, entity)
@@ -331,62 +306,48 @@ func (r *postRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdblaye
 	return result, nil
 }
 
-// GetByTags retrieves a paginated page of Post entities by their Tags index.
-func (r *postRepository) GetByTags(ctx context.Context, tx *fdblayer.Tx, Tags string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Post], error) {
+// ScanIndex performs a paginated range or prefix scan over a secondary index of Post.
+func (r *postRepository) ScanIndex(ctx context.Context, tx *fdblayer.Tx, index fdblayer.IndexID, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*Post], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	var idxSchema []fdblayer.FieldKind
+	switch index {
+	case PostByTags:
+		idxSchema = []fdblayer.FieldKind{fdblayer.FieldKindString, fdblayer.FieldKindString}
+	default:
+		return nil, fmt.Errorf("post index %d: %w", index, fdblayer.ErrUnknownIndex)
+	}
+
 	tr := tx.Transaction()
 	dir := tx.Dir()
 
-	result := &fdblayer.PaginatedResult[*Post]{
+	result := &fdblayer.Page[*Post]{
 		Items: make([]*Post, 0),
 	}
-	baseTpl := tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, 1, Tags}
-	indexKeyPrefix := dir.Pack(baseTpl)
-	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
+	baseTpl := tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(index)}
+	rangeBegin, rangeEnd, err := fdblayer.ResolveScanBounds(dir, baseTpl, kr, opts, idxSchema)
 	if err != nil {
 		return nil, err
 	}
-	rangeBegin := indexRange.Begin
-	rangeEnd := indexRange.End
-	if len(opts.Begin) > 0 {
-		cursorTpl := make(tuple.Tuple, len(baseTpl)+len(opts.Begin))
-		copy(cursorTpl, baseTpl)
-		for j, el := range opts.Begin {
-			cursorTpl[len(baseTpl)+j] = fdblayer.NormalizeTupleElement(el)
-		}
-		cursorKey := dir.Pack(cursorTpl)
-		if opts.Reverse {
-			cursorRange, err := fdb.PrefixRange(cursorKey)
-			if err != nil {
-				return nil, err
-			}
-			if string(cursorRange.End.FDBKey()) < string(rangeEnd.FDBKey()) {
-				rangeEnd = cursorRange.End
-			}
-		} else if string(cursorKey) > string(rangeBegin.FDBKey()) {
-			rangeBegin = cursorKey
-		}
-	}
-	if string(rangeBegin.FDBKey()) >= string(rangeEnd.FDBKey()) {
+	if string(rangeBegin) >= string(rangeEnd) {
 		return result, nil
 	}
+
 	rangeOpts := fdb.RangeOptions{Reverse: opts.Reverse}
 	if opts.Limit > 0 {
 		rangeOpts.Limit = opts.Limit + 1
 	}
 	kvs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: rangeBegin, End: rangeEnd}, rangeOpts).GetSliceOrPanic()
-	pageLen := len(kvs)
-	pkIndexStart := 3 + 1
-	if opts.Limit > 0 && pageLen > opts.Limit {
+	pkIndexStart := 3 + len(idxSchema) - 1
+	if opts.Limit > 0 && len(kvs) > opts.Limit {
 		nextTpl, err := dir.Unpack(kvs[opts.Limit].Key)
 		if err != nil {
 			return nil, err
 		}
-		if len(nextTpl) > pkIndexStart {
+		if len(nextTpl) > 3 {
 			result.HasMore = true
-			result.NextKey = nextTpl[pkIndexStart:]
+			result.NextCursor = fdblayer.ExtractCursorKey(nextTpl, 3)
 		}
 		kvs = kvs[:opts.Limit]
 	}

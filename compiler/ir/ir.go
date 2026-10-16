@@ -98,18 +98,12 @@ type FieldSpec struct {
 	Mutation       MutationType
 }
 
-// IndexPrefixSpec describes a non-colliding leading prefix of a composite secondary index.
-type IndexPrefixSpec struct {
-	Fields []FieldSpec
-}
-
 // SecondaryIndexSpec describes a secondary index on a message.
 type SecondaryIndexSpec struct {
 	Fields      []FieldSpec
 	IsFanOut    bool
 	FanOutField FieldSpec
 	IndexID     int64
-	Prefixes    []IndexPrefixSpec
 }
 
 // MessageSpec describes an FDB-persisted Protobuf message, FIFO queue, or helper message.
@@ -512,15 +506,20 @@ func buildMessageSpecInternal(
 	}
 
 	usedHashes := make(map[int64]string)
+	seenSignatures := make(map[string]int64)
 	secondaryIndexes := make([]SecondaryIndexSpec, 0, len(rawIndexes))
 	for _, idx := range rawIndexes {
 		si, err := BuildSecondaryIndex(idx, fieldMap, usedHashes, msgName)
 		if err != nil {
 			return nil, err
 		}
+		sig := fieldsSignature(si.Fields)
+		if prevID, dup := seenSignatures[sig]; dup {
+			return nil, fmt.Errorf("duplicate secondary index on [%s] in message %s (IDs %d and %d)", sig, msgName, prevID, si.IndexID)
+		}
+		seenSignatures[sig] = si.IndexID
 		secondaryIndexes = append(secondaryIndexes, si)
 	}
-	secondaryIndexes = PopulateIndexPrefixes(secondaryIndexes)
 
 	if !allowUnannotated && len(primaryKeyFields) == 0 && !isQueue {
 		return nil, nil
@@ -734,63 +733,6 @@ func BuildSecondaryIndex(
 		FanOutField: fanOutField,
 		IndexID:     indexID,
 	}, nil
-}
-
-// PopulateIndexPrefixes populates non-colliding leading prefix specs (1 <= k < len(Fields))
-// for each composite non-fan-out secondary index on a message.
-func PopulateIndexPrefixes(indexes []SecondaryIndexSpec) []SecondaryIndexSpec {
-	if len(indexes) == 0 {
-		return indexes
-	}
-	out := make([]SecondaryIndexSpec, len(indexes))
-	copy(out, indexes)
-	for i := range out {
-		out[i].Prefixes = EffectiveIndexPrefixes(out, i)
-	}
-	return out
-}
-
-// EffectiveIndexPrefixes returns the non-colliding leading prefixes for indexes[idxPos].
-// If a prefix matches another full index on the same message or an earlier composite index's
-// prefix, it is skipped to prevent duplicate method generation.
-func EffectiveIndexPrefixes(indexes []SecondaryIndexSpec, idxPos int) []IndexPrefixSpec {
-	if idxPos < 0 || idxPos >= len(indexes) {
-		return nil
-	}
-	target := indexes[idxPos]
-	if target.IsFanOut || len(target.Fields) <= 1 {
-		return nil
-	}
-	if len(target.Prefixes) > 0 {
-		return target.Prefixes
-	}
-
-	claimed := make(map[string]bool, len(indexes)*2)
-	for _, idx := range indexes {
-		claimed[fieldsSignature(idx.Fields)] = true
-	}
-
-	var prefixes []IndexPrefixSpec
-	for i := 0; i <= idxPos; i++ {
-		idx := indexes[i]
-		if idx.IsFanOut || len(idx.Fields) <= 1 {
-			continue
-		}
-		for k := 1; k < len(idx.Fields); k++ {
-			prefixFields := idx.Fields[:k]
-			sig := fieldsSignature(prefixFields)
-			if claimed[sig] {
-				continue
-			}
-			claimed[sig] = true
-			if i == idxPos {
-				copied := make([]FieldSpec, k)
-				copy(copied, prefixFields)
-				prefixes = append(prefixes, IndexPrefixSpec{Fields: copied})
-			}
-		}
-	}
-	return prefixes
 }
 
 // ReorderQueuePrimaryKeyFields reorders queue primary keys to:

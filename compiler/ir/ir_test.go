@@ -373,40 +373,24 @@ func TestBuildMessageSpec_ValidationErrors(t *testing.T) {
 	}
 }
 
-func TestEffectiveIndexPrefixes(t *testing.T) {
-	status := FieldSpec{ProtoName: "status", GoName: "Status", Kind: KindString}
-	createdAt := FieldSpec{ProtoName: "created_at", GoName: "CreatedAt", Kind: KindInt64}
-	region := FieldSpec{ProtoName: "region", GoName: "Region", Kind: KindString}
-
-	indexes := []SecondaryIndexSpec{
-		{
-			Fields: []FieldSpec{status, createdAt, region},
-		},
-		{
-			// Exact match with the 1-field prefix of index 0; should prevent index 0 from emitting a duplicate "Status" prefix.
-			Fields: []FieldSpec{status},
-		},
-		{
-			// Shares the 2-field prefix "StatusCreatedAt" with index 0; only index 0 should emit "StatusCreatedAt".
-			Fields: []FieldSpec{status, createdAt, status},
-		},
+func TestBuildMessageSpec_DuplicateSecondaryIndexFieldsRejected(t *testing.T) {
+	fields := []FieldSpec{
+		{ProtoName: "id", GoName: "Id", Kind: KindString},
+		{ProtoName: "status", GoName: "Status", Kind: KindString},
+		{ProtoName: "created_at", GoName: "CreatedAt", Kind: KindInt64},
+	}
+	fieldMap := map[string]FieldSpec{
+		"id":         fields[0],
+		"status":     fields[1],
+		"created_at": fields[2],
 	}
 
-	indexes = PopulateIndexPrefixes(indexes)
-
-	if len(indexes[0].Prefixes) != 1 {
-		t.Fatalf("expected 1 prefix on indexes[0], got %d: %+v", len(indexes[0].Prefixes), indexes[0].Prefixes)
-	}
-	if len(indexes[0].Prefixes[0].Fields) != 2 || indexes[0].Prefixes[0].Fields[0].GoName != "Status" || indexes[0].Prefixes[0].Fields[1].GoName != "CreatedAt" {
-		t.Fatalf("unexpected prefix on indexes[0]: %+v", indexes[0].Prefixes[0])
-	}
-
-	if len(indexes[1].Prefixes) != 0 {
-		t.Fatalf("expected 0 prefixes on indexes[1], got %d", len(indexes[1].Prefixes))
-	}
-
-	if len(indexes[2].Prefixes) != 0 {
-		t.Fatalf("expected 0 prefixes on indexes[2], got %d", len(indexes[2].Prefixes))
+	_, err := BuildMessageSpecWithTypeID("Order", fields, fieldMap, []string{"id"}, []*annotationspb.SecondaryIndex{
+		{Id: 1, Fields: []string{"status", "created_at"}},
+		{Id: 2, Fields: []string{"status", "created_at"}},
+	}, false, 100)
+	if err == nil || !strings.Contains(err.Error(), "duplicate secondary index") {
+		t.Fatalf("expected duplicate secondary index error, got %v", err)
 	}
 }
 

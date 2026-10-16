@@ -156,19 +156,28 @@ func TestGenerateMessage_EntityAndQueue(t *testing.T) {
 
 	for _, expectedSnippet := range []string{
 		"const OrderTypeID int64 = 100",
+		"OrderByStatusOrderSeq fdblayer.IndexID = 1001",
+		"OrderByHashes fdblayer.IndexID = 2002",
 		"func NewOrderRepository() OrderRepository {",
-		"type OrderPrimaryKey struct {",
-		"func (r *orderRepository) Get(ctx context.Context, tx *fdblayer.Tx, pk OrderPrimaryKey)",
-		"func (r *orderRepository) GetByStatusAndOrderSeq(ctx context.Context, tx *fdblayer.Tx, Status OrderStatus, OrderSeq uint64, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)",
-		"func (r *orderRepository) GetByStatus(ctx context.Context, tx *fdblayer.Tx, Status OrderStatus, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)",
-		"func (r *orderRepository) GetByHashes(ctx context.Context, tx *fdblayer.Tx, Hashes []byte, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)",
-		"func (r *orderRepository) BatchGet(ctx context.Context, tx *fdblayer.Tx, pks []OrderPrimaryKey) ([]*Order, error)",
-		"func (r *orderRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Order], error)",
+		"func (r *orderRepository) Insert(ctx context.Context, tx *fdblayer.Tx, entity *Order) error",
+		"func (r *orderRepository) Upsert(ctx context.Context, tx *fdblayer.Tx, entity *Order) error",
+		"func (r *orderRepository) Delete(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) error",
+		"func (r *orderRepository) ReadRow(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) (*Order, error)",
+		"func (r *orderRepository) ReadRows(ctx context.Context, tx *fdblayer.Tx, keys []fdblayer.Key) ([]*Order, error)",
+		"func (r *orderRepository) Scan(ctx context.Context, tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*Order], error)",
+		"func (r *orderRepository) ScanIndex(ctx context.Context, tx *fdblayer.Tx, index fdblayer.IndexID, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*Order], error)",
 		"fdblayer.ErrNotFound",
 		"oldSet := make(map[string]struct{}, len(old.Hashes))",
 	} {
 		if !strings.Contains(out, expectedSnippet) {
 			t.Errorf("expected generated Go code to contain %q, got:\n%s", expectedSnippet, out)
+		}
+	}
+
+	// Verify no GetBy* or OrderPrimaryKey types are generated
+	for _, forbidden := range []string{"OrderPrimaryKey", "GetBy"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("expected generated Go code NOT to contain %q, got:\n%s", forbidden, out)
 		}
 	}
 
@@ -193,8 +202,8 @@ func TestGenerateMessage_EntityAndQueue(t *testing.T) {
 		"const TaskMessageTypeID int64 = 42",
 		"func NewTaskMessageRepository() TaskMessageRepository {",
 		"func (r *taskmessageRepository) Enqueue(ctx context.Context, tx *fdblayer.Tx, entity *TaskMessage)",
-		"func (r *taskmessageRepository) Dequeue(ctx context.Context, tx *fdblayer.Tx, queuename string)",
-		"func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tx *fdblayer.Tx, queuename string, limit int)",
+		"func (r *taskmessageRepository) Dequeue(ctx context.Context, tx *fdblayer.Tx, partitionKey fdblayer.Key)",
+		"func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tx *fdblayer.Tx, partitionKey fdblayer.Key, limit int)",
 		"userVersion, err := tx.NextUserVersion()",
 		"tr.SetVersionstampedKey(key, value)",
 		"tuple.IncompleteVersionstamp(userVersion)",
@@ -247,7 +256,7 @@ func TestGenerateMessage_NonQueueVersionstampWithIndexes(t *testing.T) {
 	}
 	for _, decl := range parsed.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "Create" {
+		if !ok || fn.Name.Name != "Insert" {
 			continue
 		}
 		declared := map[string]bool{}
@@ -264,25 +273,26 @@ func TestGenerateMessage_NonQueueVersionstampWithIndexes(t *testing.T) {
 				}
 			}
 			if newVars == 0 {
-				t.Errorf("Create has duplicate short variable declaration at top-level function scope")
+				t.Errorf("Insert has duplicate short variable declaration at top-level function scope")
 			}
 		}
 	}
 
 	for _, expectedSnippet := range []string{
 		"const AuditLogTypeID int64 = 5",
+		"AuditLogByActor fdblayer.IndexID = 1001",
+		"AuditLogByTags fdblayer.IndexID = 1002",
+		"AuditLogByAction fdblayer.IndexID = 1003",
 		"userVersion, err := tx.NextUserVersion()",
 		"tuple.IncompleteVersionstamp(userVersion)",
-		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 1001, entity.Actor, tuple.IncompleteVersionstamp(userVersion)})",
-		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 1002,",
-		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 1003, entity.Action, tuple.IncompleteVersionstamp(userVersion)})",
-		"entity.LogId = fdblayer.BytesToVersionstamp(pk).Bytes()",
+		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, int64(AuditLogByActor), entity.Actor, tuple.IncompleteVersionstamp(userVersion)})",
+		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, int64(AuditLogByTags),",
+		"idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, int64(AuditLogByAction), entity.Action, tuple.IncompleteVersionstamp(userVersion)})",
 		"if len(entity.LogId) != 0 && len(entity.LogId) != 12 {",
-		"if !hasOldVS {",
-		"return r.Create(ctx, tx, entity)",
+		"if len(entity.LogId) == 0 {",
+		"return r.Insert(ctx, tx, entity)",
+		"if _, err := fdblayer.PackVersionstampElement(entity.LogId); err != nil {",
 		"unmarshaled.LogId = entity.LogId",
-		"entity.LogId = pk",
-		"beginTpl[2+0] = fdblayer.BytesToVersionstamp(rawVS)",
 		"pkTuples := make([]tuple.Tuple, len(kvs))",
 		"if vs, ok := pkTuples[i][0].(tuple.Versionstamp); ok {",
 	} {
@@ -292,43 +302,26 @@ func TestGenerateMessage_NonQueueVersionstampWithIndexes(t *testing.T) {
 	}
 }
 
-func TestGenerateGoRepository_KeywordQueueParam(t *testing.T) {
-	vs := ir.FieldSpec{ProtoName: "vs", GoName: "Vs", Number: 2, Kind: ir.KindBytes, IsVersionstamp: true}
-	for _, reserved := range []struct {
-		protoName string
-		goName    string
-	}{
-		{"type", "Type"},
-		{"limit", "Limit"},
-		{"items", "Items"},
-		{"row", "Row"},
-		{"tuple", "Tuple"},
-		{"len", "Len"},
-		{"string", "String"},
-		{"tx", "Tx"},
-	} {
-		qField := ir.FieldSpec{ProtoName: reserved.protoName, GoName: reserved.goName, Number: 1, Kind: ir.KindString}
-		spec := ir.MessageSpec{
-			Name:             "JobQueue",
-			TypeID:           10,
-			GoPackageName:    "testspb",
-			IsQueue:          true,
-			Fields:           []ir.FieldSpec{vs, qField},
-			PrimaryKeyFields: []ir.FieldSpec{vs, qField}, // versionstamp first to verify GenerateMessage reorders PK
-		}
+func TestGenerateMessage_EntityWithoutSecondaryIndexes(t *testing.T) {
+	idField := ir.FieldSpec{ProtoName: "id", GoName: "Id", Number: 1, Kind: ir.KindString}
+	spec := ir.MessageSpec{
+		Name:             "SimpleItem",
+		TypeID:           10,
+		GoPackageName:    "testspb",
+		Fields:           []ir.FieldSpec{idField},
+		PrimaryKeyFields: []ir.FieldSpec{idField},
+	}
 
-		var p bufferPrinter
-		GenerateMessage(&p, spec)
-		out := p.sb.String()
+	var p bufferPrinter
+	GenerateMessage(&p, spec)
+	out := p.sb.String()
 
-		fset := token.NewFileSet()
-		if _, err := parser.ParseFile(fset, "jobqueue.fdb.go", out, parser.AllErrors); err != nil {
-			t.Fatalf("generated Go queue code with %q partition key failed to parse: %v\n%s", reserved.protoName, err, out)
-		}
-		expectedParam := reserved.protoName + "Param string"
-		if !strings.Contains(out, expectedParam) {
-			t.Errorf("expected %q in Dequeue/DequeueBatch signature, got:\n%s", expectedParam, out)
-		}
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "simpleitem.fdb.go", out, parser.AllErrors); err != nil {
+		t.Fatalf("generated Go code without secondary indexes failed to parse: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "fdblayer.ErrUnknownIndex") {
+		t.Errorf("expected ScanIndex to return ErrUnknownIndex when message has no secondary indexes, got:\n%s", out)
 	}
 }
 

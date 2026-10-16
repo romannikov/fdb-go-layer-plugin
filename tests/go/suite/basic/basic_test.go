@@ -20,7 +20,7 @@ func init() {
 	fdb.MustAPIVersion(710)
 }
 
-// Compile-Time TypeID Tests
+// Compile-Time TypeID & IndexID Tests
 
 func TestCompileTimeTypeIDs_DistinctAndDeterministic(t *testing.T) {
 	ids := map[string]int64{
@@ -44,20 +44,24 @@ func TestCompileTimeTypeIDs_DistinctAndDeterministic(t *testing.T) {
 	if store.OrderTypeID != 100 {
 		t.Fatalf("expected explicit OrderTypeID = 100, got %d", store.OrderTypeID)
 	}
+	if store.UserByEmail != 1 || store.ProductByCategory != 1 || store.OrderByStatusCreatedAt != 1001 {
+		t.Fatalf("unexpected generated IndexID constants: UserByEmail=%d, ProductByCategory=%d, OrderByStatusCreatedAt=%d",
+			store.UserByEmail, store.ProductByCategory, store.OrderByStatusCreatedAt)
+	}
 }
 
 // CRUD Tests
 
-// Create
-func TestCreateUser_Success(t *testing.T) {
+// Insert
+func TestInsertUser_Success(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, kv := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	user := &store.User{Id: "u1", Name: "Alice", Email: "alice@example.com"}
 
 	repo := store.NewUserRepository()
-	if err := repo.Create(ctx, tx, user); err != nil {
-		t.Fatalf("CreateUser failed: %v", err)
+	if err := repo.Insert(ctx, tx, user); err != nil {
+		t.Fatalf("Insert failed: %v", err)
 	}
 
 	// Primary key
@@ -81,15 +85,15 @@ func TestCreateUser_Success(t *testing.T) {
 	}
 }
 
-func TestCreateProduct_Success(t *testing.T) {
+func TestInsertProduct_Success(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, kv := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	p := &store.Product{Id: "p1", Name: "Widget", Category: "tools", Price: 42}
 
 	repo := store.NewProductRepository()
-	if err := repo.Create(ctx, tx, p); err != nil {
-		t.Fatalf("CreateProduct failed: %v", err)
+	if err := repo.Insert(ctx, tx, p); err != nil {
+		t.Fatalf("Insert failed: %v", err)
 	}
 
 	pk := tuple.Tuple{store.ProductTypeID, fdblayer.DataNamespace, "p1"}.Pack()
@@ -110,65 +114,65 @@ func TestCreateProduct_Success(t *testing.T) {
 	}
 }
 
-func TestCreateUser_AlreadyExists(t *testing.T) {
+func TestInsertUser_AlreadyExists(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, kv := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	repo := store.NewUserRepository()
 
 	first := &store.User{Id: "u1", Name: "Alice", Email: "alice@example.com"}
-	if err := repo.Create(ctx, tx, first); err != nil {
-		t.Fatalf("initial Create failed: %v", err)
+	if err := repo.Insert(ctx, tx, first); err != nil {
+		t.Fatalf("initial Insert failed: %v", err)
 	}
 
-	// Attempting to Create a second time with the same PK and a different email
+	// Attempting to Insert a second time with the same PK and a different email
 	// must fail with fdblayer.ErrAlreadyExists and leave both the primary record
 	// and secondary index untouched.
 	duplicate := &store.User{Id: "u1", Name: "Bob", Email: "bob@example.com"}
-	err := repo.Create(ctx, tx, duplicate)
+	err := repo.Insert(ctx, tx, duplicate)
 	if !errors.Is(err, fdblayer.ErrAlreadyExists) {
-		t.Fatalf("expected ErrAlreadyExists on duplicate Create, got: %v", err)
+		t.Fatalf("expected ErrAlreadyExists on duplicate Insert, got: %v", err)
 	}
 
-	got, err := repo.Get(ctx, tx, "u1")
+	got, err := repo.ReadRow(ctx, tx, fdblayer.Key{"u1"})
 	if err != nil {
-		t.Fatalf("Get after rejected Create failed: %v", err)
+		t.Fatalf("ReadRow after rejected Insert failed: %v", err)
 	}
 	if got.Name != "Alice" || got.Email != "alice@example.com" {
-		t.Fatalf("existing record was overwritten by duplicate Create: %+v", got)
+		t.Fatalf("existing record was overwritten by duplicate Insert: %+v", got)
 	}
 
 	bobIdx := tuple.Tuple{store.UserTypeID, fdblayer.IndexNamespace, int64(1), "bob@example.com", "u1"}.Pack()
 	if kv.HasKey(bobIdx) {
-		t.Fatal("duplicate Create must not write secondary index entry")
+		t.Fatal("duplicate Insert must not write secondary index entry")
 	}
 }
 
-// Get
-func TestGetUser_Success(t *testing.T) {
+// ReadRow
+func TestReadRowUser_Success(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	user := &store.User{Id: "u1", Name: "Alice", Email: "alice@example.com"}
 	repo := store.NewUserRepository()
-	_ = repo.Create(ctx, tx, user)
+	_ = repo.Insert(ctx, tx, user)
 
-	got, err := repo.Get(ctx, tx, "u1")
+	got, err := repo.ReadRow(ctx, tx, fdblayer.Key{"u1"})
 	if err != nil {
-		t.Fatalf("GetUser failed: %v", err)
+		t.Fatalf("ReadRow failed: %v", err)
 	}
 	if got.Name != "Alice" || got.Email != "alice@example.com" {
 		t.Fatalf("unexpected user: %+v", got)
 	}
 }
 
-func TestGetUser_NotFound(t *testing.T) {
+func TestReadRowUser_NotFound(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 
 	repo := store.NewUserRepository()
-	_, err := repo.Get(ctx, tx, "nonexistent")
+	_, err := repo.ReadRow(ctx, tx, fdblayer.Key{"nonexistent"})
 	if err == nil {
 		t.Fatal("expected not found error")
 	}
@@ -177,55 +181,55 @@ func TestGetUser_NotFound(t *testing.T) {
 	}
 }
 
-func TestGetProduct_Success(t *testing.T) {
+func TestReadRowProduct_Success(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	repo := store.NewProductRepository()
-	_ = repo.Create(ctx, tx, &store.Product{Id: "p1", Name: "Gizmo", Category: "tech", Price: 99})
+	_ = repo.Insert(ctx, tx, &store.Product{Id: "p1", Name: "Gizmo", Category: "tech", Price: 99})
 
-	got, err := repo.Get(ctx, tx, "p1")
+	got, err := repo.ReadRow(ctx, tx, fdblayer.Key{"p1"})
 	if err != nil {
-		t.Fatalf("GetProduct failed: %v", err)
+		t.Fatalf("ReadRow failed: %v", err)
 	}
 	if got.Name != "Gizmo" || got.Price != 99 {
 		t.Fatalf("unexpected product: %+v", got)
 	}
 }
 
-// Set (Update)
-func TestSetUser_UpdateFields(t *testing.T) {
+// Upsert (Update)
+func TestUpsertUser_UpdateFields(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	repo := store.NewUserRepository()
-	_ = repo.Create(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
+	_ = repo.Insert(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
 
 	updated := &store.User{Id: "u1", Name: "Bob", Email: "b@test.com"}
-	if err := repo.Set(ctx, tx, updated); err != nil {
-		t.Fatalf("SetUser failed: %v", err)
+	if err := repo.Upsert(ctx, tx, updated); err != nil {
+		t.Fatalf("Upsert failed: %v", err)
 	}
 
-	got, _ := repo.Get(ctx, tx, "u1")
+	got, _ := repo.ReadRow(ctx, tx, fdblayer.Key{"u1"})
 	if got.Name != "Bob" || got.Email != "b@test.com" {
 		t.Fatalf("update not applied: %+v", got)
 	}
 }
 
-func TestSetUser_IndexUpdated(t *testing.T) {
+func TestUpsertUser_IndexUpdated(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, kv := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 
 	repo := store.NewUserRepository()
-	_ = repo.Create(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "old@test.com"})
+	_ = repo.Insert(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "old@test.com"})
 	oldIdx := tuple.Tuple{store.UserTypeID, fdblayer.IndexNamespace, int64(1), "old@test.com", "u1"}.Pack()
 	if !kv.HasKey(oldIdx) {
-		t.Fatal("old index should exist after create")
+		t.Fatal("old index should exist after insert")
 	}
 
 	// Update email
-	_ = repo.Set(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "new@test.com"})
+	_ = repo.Upsert(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "new@test.com"})
 
 	// Old index should be cleared
 	if kv.HasKey(oldIdx) {
@@ -238,20 +242,20 @@ func TestSetUser_IndexUpdated(t *testing.T) {
 	}
 }
 
-func TestSetUser_UnchangedIndexSkipsIndexWrite(t *testing.T) {
+func TestUpsertUser_UnchangedIndexSkipsIndexWrite(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, kv := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 
 	repo := store.NewUserRepository()
-	if err := repo.Create(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "same@test.com"}); err != nil {
-		t.Fatalf("Create failed: %v", err)
+	if err := repo.Insert(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "same@test.com"}); err != nil {
+		t.Fatalf("Insert failed: %v", err)
 	}
 
 	tr.ResetLog()
 	// Update Name only while keeping Email unchanged
-	if err := repo.Set(ctx, tx, &store.User{Id: "u1", Name: "Alice Updated", Email: "same@test.com"}); err != nil {
-		t.Fatalf("Set failed: %v", err)
+	if err := repo.Upsert(ctx, tx, &store.User{Id: "u1", Name: "Alice Updated", Email: "same@test.com"}); err != nil {
+		t.Fatalf("Upsert failed: %v", err)
 	}
 
 	if len(tr.ClearCalls) != 0 {
@@ -266,33 +270,33 @@ func TestSetUser_UnchangedIndexSkipsIndexWrite(t *testing.T) {
 	}
 }
 
-func TestSetProduct_UpdatePrice(t *testing.T) {
+func TestUpsertProduct_UpdatePrice(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	repo := store.NewProductRepository()
-	_ = repo.Create(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "a", Price: 10})
+	_ = repo.Insert(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "a", Price: 10})
 
-	_ = repo.Set(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "a", Price: 50})
-	got, _ := repo.Get(ctx, tx, "p1")
+	_ = repo.Upsert(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "a", Price: 50})
+	got, _ := repo.ReadRow(ctx, tx, fdblayer.Key{"p1"})
 	if got.Price != 50 {
 		t.Fatalf("expected price 50, got %d", got.Price)
 	}
 }
 
-func TestSetProduct_IndexUpdated(t *testing.T) {
+func TestUpsertProduct_IndexUpdated(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, kv := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 
 	repo := store.NewProductRepository()
-	_ = repo.Create(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "old_cat", Price: 1})
+	_ = repo.Insert(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "old_cat", Price: 1})
 	oldIdx := tuple.Tuple{store.ProductTypeID, fdblayer.IndexNamespace, int64(1), "old_cat", "p1"}.Pack()
 	if !kv.HasKey(oldIdx) {
-		t.Fatal("old index should exist after create")
+		t.Fatal("old index should exist after insert")
 	}
 
-	_ = repo.Set(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "new_cat", Price: 1})
+	_ = repo.Upsert(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "new_cat", Price: 1})
 	if kv.HasKey(oldIdx) {
 		t.Fatal("stale old index was NOT cleared")
 	}
@@ -308,10 +312,10 @@ func TestDeleteUser_Success(t *testing.T) {
 	tr, dir, kv := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	repo := store.NewUserRepository()
-	_ = repo.Create(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
+	_ = repo.Insert(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
 
-	if err := repo.Delete(ctx, tx, "u1"); err != nil {
-		t.Fatalf("DeleteUser failed: %v", err)
+	if err := repo.Delete(ctx, tx, fdblayer.Key{"u1"}); err != nil {
+		t.Fatalf("Delete failed: %v", err)
 	}
 
 	pk := tuple.Tuple{store.UserTypeID, fdblayer.DataNamespace, "u1"}.Pack()
@@ -322,8 +326,8 @@ func TestDeleteUser_Success(t *testing.T) {
 	if kv.HasKey(ik) {
 		t.Fatal("index key not cleared")
 	}
-	// Get should fail
-	_, err := repo.Get(ctx, tx, "u1")
+	// ReadRow should fail
+	_, err := repo.ReadRow(ctx, tx, fdblayer.Key{"u1"})
 	if err == nil {
 		t.Fatal("expected not found after delete")
 	}
@@ -335,7 +339,7 @@ func TestDeleteUser_NonExistent(t *testing.T) {
 	tx := fdblayer.NewTx(tr, dir)
 	repo := store.NewUserRepository()
 	// Should not error or panic
-	if err := repo.Delete(ctx, tx, "ghost"); err != nil {
+	if err := repo.Delete(ctx, tx, fdblayer.Key{"ghost"}); err != nil {
 		t.Fatalf("delete of non-existent should not error, got: %v", err)
 	}
 }
@@ -345,9 +349,9 @@ func TestDeleteProduct_ClearsIndex(t *testing.T) {
 	tr, dir, kv := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	repo := store.NewProductRepository()
-	_ = repo.Create(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "cat1", Price: 5})
+	_ = repo.Insert(ctx, tx, &store.Product{Id: "p1", Name: "X", Category: "cat1", Price: 5})
 
-	_ = repo.Delete(ctx, tx, "p1")
+	_ = repo.Delete(ctx, tx, fdblayer.Key{"p1"})
 	pk := tuple.Tuple{store.ProductTypeID, fdblayer.DataNamespace, "p1"}.Pack()
 	ik := tuple.Tuple{store.ProductTypeID, fdblayer.IndexNamespace, int64(1), "cat1", "p1"}.Pack()
 	if kv.HasKey(pk) {
@@ -360,14 +364,13 @@ func TestDeleteProduct_ClearsIndex(t *testing.T) {
 
 // Secondary Index Tests (empty range results)
 
-func TestGetUserByEmail_NoResults(t *testing.T) {
+func TestScanIndexUserByEmail_NoResults(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 
 	repo := store.NewUserRepository()
-	// GetRange returns empty → no results
-	results, err := repo.GetByEmail(ctx, tx, "nobody@test.com", fdblayer.PaginationOptions{})
+	results, err := repo.ScanIndex(ctx, tx, store.UserByEmail, fdblayer.Prefix("nobody@test.com"), fdblayer.ScanOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -376,18 +379,51 @@ func TestGetUserByEmail_NoResults(t *testing.T) {
 	}
 }
 
-func TestGetProductByCategory_NoResults(t *testing.T) {
+func TestScanIndexProductByCategory_NoResults(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 
 	repo := store.NewProductRepository()
-	results, err := repo.GetByCategory(ctx, tx, "nonexistent", fdblayer.PaginationOptions{})
+	results, err := repo.ScanIndex(ctx, tx, store.ProductByCategory, fdblayer.Prefix("nonexistent"), fdblayer.ScanOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(results.Items) != 0 {
 		t.Fatalf("expected empty, got %d", len(results.Items))
+	}
+}
+
+func TestScanIndex_ErrUnknownIndex_And_ErrInvalidKey(t *testing.T) {
+	ctx := context.Background()
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewUserRepository()
+
+	// Unknown index ID must return ErrUnknownIndex
+	if _, err := repo.ScanIndex(ctx, tx, fdblayer.IndexID(999), fdblayer.AllKeys(), fdblayer.ScanOptions{}); !errors.Is(err, fdblayer.ErrUnknownIndex) {
+		t.Fatalf("expected ErrUnknownIndex, got %v", err)
+	}
+
+	// Wrong PK arity in ReadRow / Delete / ReadRows must return ErrInvalidKey
+	if _, err := repo.ReadRow(ctx, tx, fdblayer.Key{"u1", "extra"}); !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey on ReadRow arity mismatch, got %v", err)
+	}
+	if _, err := repo.ReadRow(ctx, tx, fdblayer.Key{123}); !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey on ReadRow type mismatch, got %v", err)
+	}
+	if err := repo.Delete(ctx, tx, fdblayer.Key{}); !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey on Delete arity mismatch, got %v", err)
+	}
+	if _, err := repo.ReadRows(ctx, tx, []fdblayer.Key{{"u1"}, {"u2", "extra"}}); !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey on ReadRows arity mismatch, got %v", err)
+	}
+	// Exceeding key arity in Scan / ScanIndex must return ErrInvalidKey
+	if _, err := repo.Scan(ctx, tx, fdblayer.Prefix("u1", "extra"), fdblayer.ScanOptions{}); !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey on Scan prefix arity overflow, got %v", err)
+	}
+	if _, err := repo.ScanIndex(ctx, tx, store.UserByEmail, fdblayer.Prefix("a@b.com", "u1", "extra"), fdblayer.ScanOptions{}); !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey on ScanIndex prefix arity overflow, got %v", err)
 	}
 }
 
@@ -398,54 +434,53 @@ func TestIndex_CrossTypeIsolation(t *testing.T) {
 	}
 }
 
-// Batch & Pagination Tests
+// ReadRows & Scan Tests
 
-// BatchGet
-func TestBatchGetUser_AllFound(t *testing.T) {
+func TestReadRowsUser_AllFound(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	repo := store.NewUserRepository()
 	for _, id := range []string{"u1", "u2", "u3"} {
-		_ = repo.Create(ctx, tx, &store.User{Id: id, Name: "Name" + id, Email: id + "@test.com"})
+		_ = repo.Insert(ctx, tx, &store.User{Id: id, Name: "Name" + id, Email: id + "@test.com"})
 	}
 
-	ids := []string{"u1", "u2", "u3"}
-	result, err := repo.BatchGet(ctx, tx, ids)
+	keys := []fdblayer.Key{{"u1"}, {"u2"}, {"u3"}}
+	result, err := repo.ReadRows(ctx, tx, keys)
 	if err != nil {
-		t.Fatalf("BatchGetUser failed: %v", err)
+		t.Fatalf("ReadRows failed: %v", err)
 	}
 	if len(result) != 3 {
 		t.Fatalf("expected 3, got %d", len(result))
 	}
 }
 
-func TestBatchGetUser_PartialFound(t *testing.T) {
+func TestReadRowsUser_PartialFound(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	repo := store.NewUserRepository()
-	_ = repo.Create(ctx, tx, &store.User{Id: "u1", Name: "A", Email: "a@t.com"})
-	_ = repo.Create(ctx, tx, &store.User{Id: "u2", Name: "B", Email: "b@t.com"})
+	_ = repo.Insert(ctx, tx, &store.User{Id: "u1", Name: "A", Email: "a@t.com"})
+	_ = repo.Insert(ctx, tx, &store.User{Id: "u2", Name: "B", Email: "b@t.com"})
 
-	ids := []string{"u1", "u2", "u3"} // u3 doesn't exist
-	result, err := repo.BatchGet(ctx, tx, ids)
+	keys := []fdblayer.Key{{"u1"}, {"u2"}, {"u3"}} // u3 doesn't exist
+	result, err := repo.ReadRows(ctx, tx, keys)
 	if err != nil {
-		t.Fatalf("BatchGetUser failed: %v", err)
+		t.Fatalf("ReadRows failed: %v", err)
 	}
 	if len(result) != 2 {
 		t.Fatalf("expected 2, got %d", len(result))
 	}
 }
 
-func TestBatchGetUser_NoneFound(t *testing.T) {
+func TestReadRowsUser_NoneFound(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 
 	repo := store.NewUserRepository()
-	ids := []string{"x1", "x2"}
-	result, err := repo.BatchGet(ctx, tx, ids)
+	keys := []fdblayer.Key{{"x1"}, {"x2"}}
+	result, err := repo.ReadRows(ctx, tx, keys)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -454,13 +489,13 @@ func TestBatchGetUser_NoneFound(t *testing.T) {
 	}
 }
 
-func TestBatchGetUser_EmptyInput(t *testing.T) {
+func TestReadRowsUser_EmptyInput(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 
 	repo := store.NewUserRepository()
-	result, err := repo.BatchGet(ctx, tx, []string{})
+	result, err := repo.ReadRows(ctx, tx, []fdblayer.Key{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -469,34 +504,32 @@ func TestBatchGetUser_EmptyInput(t *testing.T) {
 	}
 }
 
-func TestBatchGetProduct_Success(t *testing.T) {
+func TestReadRowsProduct_Success(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	repo := store.NewProductRepository()
-	_ = repo.Create(ctx, tx, &store.Product{Id: "p1", Name: "A", Category: "c", Price: 1})
-	_ = repo.Create(ctx, tx, &store.Product{Id: "p2", Name: "B", Category: "c", Price: 2})
+	_ = repo.Insert(ctx, tx, &store.Product{Id: "p1", Name: "A", Category: "c", Price: 1})
+	_ = repo.Insert(ctx, tx, &store.Product{Id: "p2", Name: "B", Category: "c", Price: 2})
 
-	ids := []string{"p1", "p2"}
-	result, err := repo.BatchGet(ctx, tx, ids)
+	keys := []fdblayer.Key{{"p1"}, {"p2"}}
+	result, err := repo.ReadRows(ctx, tx, keys)
 	if err != nil {
-		t.Fatalf("BatchGetProduct failed: %v", err)
+		t.Fatalf("ReadRows failed: %v", err)
 	}
 	if len(result) != 2 {
 		t.Fatalf("expected 2, got %d", len(result))
 	}
 }
 
-// ==========================================================================
 // Verify correct key structure via GetRangeSlice helper
-// ==========================================================================
 
-func TestCreateUser_IndexKeyStructure(t *testing.T) {
+func TestInsertUser_IndexKeyStructure(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	repo := store.NewUserRepository()
-	_ = repo.Create(ctx, tx, &store.User{Id: "u1", Name: "A", Email: "a@t.com"})
+	_ = repo.Insert(ctx, tx, &store.User{Id: "u1", Name: "A", Email: "a@t.com"})
 
 	// Use the mock helper to scan for index keys
 	prefix := tuple.Tuple{store.UserTypeID, fdblayer.IndexNamespace, int64(1), "a@t.com"}.Pack()
@@ -519,13 +552,13 @@ func TestCreateUser_IndexKeyStructure(t *testing.T) {
 	}
 }
 
-func TestCreateProduct_MultipleInSameCategory(t *testing.T) {
+func TestInsertProduct_MultipleInSameCategory(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	repo := store.NewProductRepository()
-	_ = repo.Create(ctx, tx, &store.Product{Id: "p1", Name: "A", Category: "tools", Price: 1})
-	_ = repo.Create(ctx, tx, &store.Product{Id: "p2", Name: "B", Category: "tools", Price: 2})
+	_ = repo.Insert(ctx, tx, &store.Product{Id: "p1", Name: "A", Category: "tools", Price: 1})
+	_ = repo.Insert(ctx, tx, &store.Product{Id: "p2", Name: "B", Category: "tools", Price: 2})
 
 	prefix := tuple.Tuple{store.ProductTypeID, fdblayer.IndexNamespace, int64(1), "tools"}.Pack()
 	kr, _ := fdb.PrefixRange(prefix)
@@ -535,67 +568,64 @@ func TestCreateProduct_MultipleInSameCategory(t *testing.T) {
 	}
 }
 
-func TestGenericRepository_User(t *testing.T) {
+func TestRepositoryInterface_User(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, kv := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 
-	// Instantiate the specific repository wrapper
-	var repo store.UserRepository = store.NewUserRepository()
+	// Instantiate the uniform Repository[*store.User]
+	var repo fdblayer.Repository[*store.User] = store.NewUserRepository()
 
-	// Verify it also implements the GenericRepository interface
-	var genRepo fdblayer.GenericRepository[*store.User, string] = repo
-
-	// 1. Create
+	// 1. Insert
 	user := &store.User{Id: "gen-1", Name: "Generic User", Email: "gen@example.com"}
-	if err := genRepo.Create(ctx, tx, user); err != nil {
-		t.Fatalf("generic Create failed: %v", err)
+	if err := repo.Insert(ctx, tx, user); err != nil {
+		t.Fatalf("Insert failed: %v", err)
 	}
 
 	pk := tuple.Tuple{store.UserTypeID, fdblayer.DataNamespace, "gen-1"}.Pack()
 	if !kv.HasKey(pk) {
-		t.Fatal("generic Create did not write primary key")
+		t.Fatal("Insert did not write primary key")
 	}
 
-	// 2. Get
-	got, err := genRepo.Get(ctx, tx, "gen-1")
+	// 2. ReadRow
+	got, err := repo.ReadRow(ctx, tx, fdblayer.Key{"gen-1"})
 	if err != nil {
-		t.Fatalf("generic Get failed: %v", err)
+		t.Fatalf("ReadRow failed: %v", err)
 	}
 	if got.Name != "Generic User" || got.Email != "gen@example.com" {
-		t.Fatalf("generic Get returned unexpected user: %+v", got)
+		t.Fatalf("ReadRow returned unexpected user: %+v", got)
 	}
 
-	// 3. Set (Update)
+	// 3. Upsert (Update)
 	got.Name = "Updated Generic Name"
-	if err := genRepo.Set(ctx, tx, got); err != nil {
-		t.Fatalf("generic Set failed: %v", err)
+	if err := repo.Upsert(ctx, tx, got); err != nil {
+		t.Fatalf("Upsert failed: %v", err)
 	}
 
-	updated, err := genRepo.Get(ctx, tx, "gen-1")
+	updated, err := repo.ReadRow(ctx, tx, fdblayer.Key{"gen-1"})
 	if err != nil {
-		t.Fatalf("generic Get after Set failed: %v", err)
+		t.Fatalf("ReadRow after Upsert failed: %v", err)
 	}
 	if updated.Name != "Updated Generic Name" {
-		t.Fatalf("generic Set did not update name: %s", updated.Name)
+		t.Fatalf("Upsert did not update name: %s", updated.Name)
 	}
 
 	// 4. Delete
-	if err := genRepo.Delete(ctx, tx, "gen-1"); err != nil {
-		t.Fatalf("generic Delete failed: %v", err)
+	if err := repo.Delete(ctx, tx, fdblayer.Key{"gen-1"}); err != nil {
+		t.Fatalf("Delete failed: %v", err)
 	}
 
 	if kv.HasKey(pk) {
-		t.Fatal("generic Delete did not clear primary key")
+		t.Fatal("Delete did not clear primary key")
 	}
 
-	_, err = genRepo.Get(ctx, tx, "gen-1")
+	_, err = repo.ReadRow(ctx, tx, fdblayer.Key{"gen-1"})
 	if err == nil {
 		t.Fatal("expected error getting deleted user")
 	}
 }
 
-func TestSetAndDelete_CorruptedExistingRecordReturnsError(t *testing.T) {
+func TestUpsertAndDelete_CorruptedExistingRecordReturnsError(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, kv := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
@@ -605,14 +635,14 @@ func TestSetAndDelete_CorruptedExistingRecordReturnsError(t *testing.T) {
 	// Write invalid protobuf wire format bytes (field 0 is invalid in protobuf wire format)
 	tr.Set(corruptedKey, []byte{0x00, 0xff, 0xff})
 
-	// Set must return an unmarshal error rather than silently overwriting and orphaning indexes.
-	err := repo.Set(ctx, tx, &store.User{Id: "corrupted-1", Name: "New", Email: "new@example.com"})
+	// Upsert must return an unmarshal error rather than silently overwriting and orphaning indexes.
+	err := repo.Upsert(ctx, tx, &store.User{Id: "corrupted-1", Name: "New", Email: "new@example.com"})
 	if err == nil {
-		t.Fatal("expected Set on corrupted existing record to return an error, got nil")
+		t.Fatal("expected Upsert on corrupted existing record to return an error, got nil")
 	}
 
 	// Delete must return an unmarshal error rather than clearing primary key and orphaning indexes.
-	err = repo.Delete(ctx, tx, "corrupted-1")
+	err = repo.Delete(ctx, tx, fdblayer.Key{"corrupted-1"})
 	if err == nil {
 		t.Fatal("expected Delete on corrupted existing record to return an error, got nil")
 	}
@@ -627,7 +657,7 @@ func TestErrNotFound_SentinelWrapping(t *testing.T) {
 	tx := fdblayer.NewTx(tr, dir)
 	repo := store.NewUserRepository()
 
-	_, err := repo.Get(ctx, tx, "missing-user")
+	_, err := repo.ReadRow(ctx, tx, fdblayer.Key{"missing-user"})
 	if !errors.Is(err, fdblayer.ErrNotFound) {
 		t.Fatalf("expected errors.Is(err, fdblayer.ErrNotFound) == true, got err=%v", err)
 	}
@@ -701,10 +731,10 @@ func TestTx_PerTransactionUserVersionIsolation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Enqueue 2 in tx2 failed: %v", err)
 	}
-	if err := auditRepo.Create(ctx, tx2, &store.AuditLog{
+	if err := auditRepo.Insert(ctx, tx2, &store.AuditLog{
 		Actor: "alice",
 	}); err != nil {
-		t.Fatalf("AuditLog Create in tx2 failed: %v", err)
+		t.Fatalf("AuditLog Insert in tx2 failed: %v", err)
 	}
 
 	// Verify UserVersion 0 and 1 were assigned to the two TaskMessages and UserVersion 2 to AuditLog.
@@ -725,8 +755,8 @@ func TestTx_PerTransactionUserVersionIsolation(t *testing.T) {
 	// 3. Another independent transaction tx3 starts its own sequence at UserVersion == 0.
 	kv3 := tests.NewMockKV()
 	tx3 := fdblayer.NewTx(tests.NewMockTransaction(kv3), dir)
-	if err := auditRepo.Create(ctx, tx3, &store.AuditLog{Actor: "bob"}); err != nil {
-		t.Fatalf("AuditLog Create in tx3 failed: %v", err)
+	if err := auditRepo.Insert(ctx, tx3, &store.AuditLog{Actor: "bob"}); err != nil {
+		t.Fatalf("AuditLog Insert in tx3 failed: %v", err)
 	}
 	if !kv3.HasKey(dir.Pack(tuple.Tuple{store.AuditLogTypeID, fdblayer.DataNamespace, vs0})) {
 		t.Fatal("expected AuditLog in tx3 to start at UserVersion=0")
@@ -789,46 +819,46 @@ func TestNormalizeTupleElement_Int32Uint32Enum(t *testing.T) {
 	}
 }
 
-func TestGetProductByCategory_PaginatedAndReverse(t *testing.T) {
+func TestScanIndexProductByCategory_PaginatedAndReverse(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	tx := fdblayer.NewTx(tr, dir)
 	repo := store.NewProductRepository()
 
 	for _, id := range []string{"p1", "p2", "p3", "p4"} {
-		if err := repo.Create(ctx, tx, &store.Product{
+		if err := repo.Insert(ctx, tx, &store.Product{
 			Id:       id,
 			Name:     "Tool " + id,
 			Category: "tools",
 			Price:    10,
 		}); err != nil {
-			t.Fatalf("Create %s failed: %v", id, err)
+			t.Fatalf("Insert %s failed: %v", id, err)
 		}
 	}
 
 	// Forward pagination (2 items per page)
-	p1, err := repo.GetByCategory(ctx, tx, "tools", fdblayer.PaginationOptions{Limit: 2})
+	p1, err := repo.ScanIndex(ctx, tx, store.ProductByCategory, fdblayer.Prefix("tools"), fdblayer.ScanOptions{Limit: 2})
 	if err != nil || len(p1.Items) != 2 || !p1.HasMore || p1.Items[0].Id != "p1" || p1.Items[1].Id != "p2" {
 		t.Fatalf("unexpected forward page 1: %+v, err=%v", p1, err)
 	}
-	p2, err := repo.GetByCategory(ctx, tx, "tools", fdblayer.PaginationOptions{
-		Begin: p1.NextKey,
-		Limit: 2,
+	p2, err := repo.ScanIndex(ctx, tx, store.ProductByCategory, fdblayer.Prefix("tools"), fdblayer.ScanOptions{
+		Cursor: p1.NextCursor,
+		Limit:  2,
 	})
 	if err != nil || len(p2.Items) != 2 || p2.HasMore || p2.Items[0].Id != "p3" || p2.Items[1].Id != "p4" {
 		t.Fatalf("unexpected forward page 2: %+v, err=%v", p2, err)
 	}
 
 	// Reverse pagination (2 items per page: p4, p3 -> p2, p1)
-	rev1, err := repo.GetByCategory(ctx, tx, "tools", fdblayer.PaginationOptions{
+	rev1, err := repo.ScanIndex(ctx, tx, store.ProductByCategory, fdblayer.Prefix("tools"), fdblayer.ScanOptions{
 		Limit:   2,
 		Reverse: true,
 	})
 	if err != nil || len(rev1.Items) != 2 || !rev1.HasMore || rev1.Items[0].Id != "p4" || rev1.Items[1].Id != "p3" {
 		t.Fatalf("unexpected reverse page 1: %+v, err=%v", rev1, err)
 	}
-	rev2, err := repo.GetByCategory(ctx, tx, "tools", fdblayer.PaginationOptions{
-		Begin:   rev1.NextKey,
+	rev2, err := repo.ScanIndex(ctx, tx, store.ProductByCategory, fdblayer.Prefix("tools"), fdblayer.ScanOptions{
+		Cursor:  rev1.NextCursor,
 		Limit:   2,
 		Reverse: true,
 	})
@@ -836,31 +866,72 @@ func TestGetProductByCategory_PaginatedAndReverse(t *testing.T) {
 		t.Fatalf("unexpected reverse page 2: %+v, err=%v", rev2, err)
 	}
 
-	// Strongly-typed BatchGetProduct
-	byPK, err := repo.BatchGet(ctx, tx, []string{"p1", "p4", "nonexistent"})
+	// ReadRows
+	byPK, err := repo.ReadRows(ctx, tx, []fdblayer.Key{{"p1"}, {"p4"}, {"nonexistent"}})
 	if err != nil || len(byPK) != 2 {
-		t.Fatalf("BatchGetProduct failed: got %+v, err=%v", byPK, err)
+		t.Fatalf("ReadRows failed: got %+v, err=%v", byPK, err)
 	}
 
-	// Out-of-bounds cursors in GetProductByCategory must be clamped without inverted range panic
-	oobForwardAfter, err := repo.GetByCategory(ctx, tx, "tools", fdblayer.PaginationOptions{
-		Begin: tuple.Tuple{"zzzzz\xff"},
-		Limit: 2,
+	// Out-of-bounds cursors in ScanIndex must be clamped without inverted range panic
+	oobForwardAfter, err := repo.ScanIndex(ctx, tx, store.ProductByCategory, fdblayer.Prefix("tools"), fdblayer.ScanOptions{
+		Cursor: fdblayer.Key{"tools", "zzzzz\xff"},
+		Limit:  2,
 	})
 	if err != nil || len(oobForwardAfter.Items) != 0 {
-		t.Fatalf("expected 0 items for forward Begin past end of index range, got %+v, err=%v", oobForwardAfter, err)
+		t.Fatalf("expected 0 items for forward Cursor past end of index range, got %+v, err=%v", oobForwardAfter, err)
 	}
-	oobReverseBefore, err := repo.GetByCategory(ctx, tx, "tools", fdblayer.PaginationOptions{
-		Begin:   tuple.Tuple{""},
+	oobReverseBefore, err := repo.ScanIndex(ctx, tx, store.ProductByCategory, fdblayer.Prefix("tools"), fdblayer.ScanOptions{
+		Cursor:  fdblayer.Key{"tools", ""},
 		Limit:   2,
 		Reverse: true,
 	})
 	if err != nil {
-		t.Fatalf("unexpected error for reverse Begin at start of index range: %v", err)
+		t.Fatalf("unexpected error for reverse Cursor at start of index range: %v", err)
 	}
 	_ = oobReverseBefore
 }
 
+func TestReversePagination_EmbeddedNulBytesInKeys(t *testing.T) {
+	ctx := context.Background()
+	tr, dir, _ := tests.Setup()
+	tx := fdblayer.NewTx(tr, dir)
+	repo := store.NewProductRepository()
 
+	for _, id := range []string{"a", "a\x00", "b"} {
+		if err := repo.Insert(ctx, tx, &store.Product{
+			Id:       id,
+			Name:     "item-" + id,
+			Category: "cat",
+		}); err != nil {
+			t.Fatalf("Insert(%q) failed: %v", id, err)
+		}
+	}
 
+	// Verify reverse Scan pagination does not re-include "a\x00" when Cursor is {"a"}.
+	listP1, err := repo.Scan(ctx, tx, fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 1, Reverse: true})
+	if err != nil || len(listP1.Items) != 1 || listP1.Items[0].Id != "b" || !listP1.HasMore {
+		t.Fatalf("unexpected reverse Scan page 1: %+v, err=%v", listP1, err)
+	}
+	listP2, err := repo.Scan(ctx, tx, fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 1, Reverse: true, Cursor: listP1.NextCursor})
+	if err != nil || len(listP2.Items) != 1 || listP2.Items[0].Id != "a\x00" || !listP2.HasMore {
+		t.Fatalf("unexpected reverse Scan page 2: %+v, err=%v", listP2, err)
+	}
+	listP3, err := repo.Scan(ctx, tx, fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 1, Reverse: true, Cursor: listP2.NextCursor})
+	if err != nil || len(listP3.Items) != 1 || listP3.Items[0].Id != "a" || listP3.HasMore {
+		t.Fatalf("unexpected reverse Scan page 3: %+v, err=%v", listP3, err)
+	}
 
+	// Verify reverse ScanIndex pagination does not re-include "a\x00" when Cursor is {"cat", "a"}.
+	idxP1, err := repo.ScanIndex(ctx, tx, store.ProductByCategory, fdblayer.Prefix("cat"), fdblayer.ScanOptions{Limit: 1, Reverse: true})
+	if err != nil || len(idxP1.Items) != 1 || idxP1.Items[0].Id != "b" || !idxP1.HasMore {
+		t.Fatalf("unexpected reverse ScanIndex page 1: %+v, err=%v", idxP1, err)
+	}
+	idxP2, err := repo.ScanIndex(ctx, tx, store.ProductByCategory, fdblayer.Prefix("cat"), fdblayer.ScanOptions{Limit: 1, Reverse: true, Cursor: idxP1.NextCursor})
+	if err != nil || len(idxP2.Items) != 1 || idxP2.Items[0].Id != "a\x00" || !idxP2.HasMore {
+		t.Fatalf("unexpected reverse ScanIndex page 2: %+v, err=%v", idxP2, err)
+	}
+	idxP3, err := repo.ScanIndex(ctx, tx, store.ProductByCategory, fdblayer.Prefix("cat"), fdblayer.ScanOptions{Limit: 1, Reverse: true, Cursor: idxP2.NextCursor})
+	if err != nil || len(idxP3.Items) != 1 || idxP3.Items[0].Id != "a" || idxP3.HasMore {
+		t.Fatalf("unexpected reverse ScanIndex page 3: %+v, err=%v", idxP3, err)
+	}
+}

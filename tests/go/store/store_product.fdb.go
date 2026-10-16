@@ -16,11 +16,14 @@ import (
 // ProductTypeID is the compile-time type prefix for Product records in FoundationDB.
 const ProductTypeID int64 = 2
 
+// Secondary index IDs for Product.
+const (
+	ProductByCategory fdblayer.IndexID = 1
+)
+
 // ProductRepository defines the repository interface for Product.
 type ProductRepository interface {
-	fdblayer.GenericRepository[*Product, string]
-
-	GetByCategory(ctx context.Context, tx *fdblayer.Tx, Category string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Product], error)
+	fdblayer.Repository[*Product]
 }
 
 type productRepository struct{}
@@ -30,8 +33,8 @@ func NewProductRepository() ProductRepository {
 	return &productRepository{}
 }
 
-// Create creates a new Product entity in the database.
-func (r *productRepository) Create(ctx context.Context, tx *fdblayer.Tx, entity *Product) error {
+// Insert creates a new Product entity in the database.
+func (r *productRepository) Insert(ctx context.Context, tx *fdblayer.Tx, entity *Product) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -54,35 +57,13 @@ func (r *productRepository) Create(ctx context.Context, tx *fdblayer.Tx, entity 
 	tr.Set(key, value)
 
 	// Standard index
-	tr.Set(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, 1, entity.Category, entity.Id}), []byte{})
+	tr.Set(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductByCategory), entity.Category, entity.Id}), []byte{})
 
 	return nil
 }
 
-// Get retrieves a Product entity by its primary key.
-func (r *productRepository) Get(ctx context.Context, tx *fdblayer.Tx, pk string) (*Product, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
-
-	key := dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.DataNamespace, pk})
-	valueFuture := tr.Get(key)
-	value := valueFuture.MustGet()
-	if value == nil {
-		return nil, fmt.Errorf("product %w", fdblayer.ErrNotFound)
-	}
-	entity := &Product{}
-	if err := proto.Unmarshal(value, entity); err != nil {
-		return nil, err
-	}
-
-	return entity, nil
-}
-
-// Set updates an existing Product entity in the database (or inserts it if not present).
-func (r *productRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *Product) error {
+// Upsert inserts a new Product entity or updates an existing one in the database.
+func (r *productRepository) Upsert(ctx context.Context, tx *fdblayer.Tx, entity *Product) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -115,57 +96,85 @@ func (r *productRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *Pr
 	// Standard index
 	if old == nil || old.Category != entity.Category {
 		if old != nil {
-			tr.Clear(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, 1, old.Category, old.Id}))
+			tr.Clear(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductByCategory), old.Category, old.Id}))
 		}
-		tr.Set(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, 1, entity.Category, entity.Id}), []byte{})
+		tr.Set(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductByCategory), entity.Category, entity.Id}), []byte{})
 	}
 
 	return nil
 }
 
-// Delete removes a Product entity from the database.
-func (r *productRepository) Delete(ctx context.Context, tx *fdblayer.Tx, pk string) error {
+// Delete removes a Product entity from the database by its primary key.
+func (r *productRepository) Delete(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	tr := tx.Transaction()
 	dir := tx.Dir()
 
-	key := dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.DataNamespace, pk})
-	value := tr.Get(key).MustGet()
+	pkTuple, dataKey, err := fdblayer.PackPrimaryKey(dir, ProductTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+	if err != nil {
+		return err
+	}
+	value := tr.Get(dataKey).MustGet()
 	if value != nil {
 		entity := &Product{}
 		if err := proto.Unmarshal(value, entity); err != nil {
 			return fmt.Errorf("failed to unmarshal existing product: %w", err)
 		}
-		entity.Id = pk
 		// Standard index
-		tr.Clear(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, 1, entity.Category, entity.Id}))
+		tr.Clear(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductByCategory), entity.Category, pkTuple[0]}))
 	}
-	tr.Clear(key)
+	tr.Clear(dataKey)
 
 	return nil
 }
 
-// BatchGet retrieves multiple Product entities by their primary keys.
-func (r *productRepository) BatchGet(ctx context.Context, tx *fdblayer.Tx, pks []string) ([]*Product, error) {
+// ReadRow retrieves a single Product entity by its primary key.
+func (r *productRepository) ReadRow(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) (*Product, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if len(pks) == 0 {
+	tr := tx.Transaction()
+	dir := tx.Dir()
+
+	_, dataKey, err := fdblayer.PackPrimaryKey(dir, ProductTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+	if err != nil {
+		return nil, err
+	}
+	value := tr.Get(dataKey).MustGet()
+	if value == nil {
+		return nil, fmt.Errorf("product %w", fdblayer.ErrNotFound)
+	}
+	entity := &Product{}
+	if err := proto.Unmarshal(value, entity); err != nil {
+		return nil, err
+	}
+	return entity, nil
+}
+
+// ReadRows retrieves multiple Product entities by their primary keys in parallel.
+func (r *productRepository) ReadRows(ctx context.Context, tx *fdblayer.Tx, keys []fdblayer.Key) ([]*Product, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
 		return nil, nil
 	}
 	tr := tx.Transaction()
 	dir := tx.Dir()
-	futures := make([]fdb.FutureByteSlice, len(pks))
-	for i, pk := range pks {
+	futures := make([]fdb.FutureByteSlice, len(keys))
+	for i, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		key := dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.DataNamespace, pk})
-		futures[i] = tr.Get(key)
+		_, dataKey, err := fdblayer.PackPrimaryKey(dir, ProductTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+		if err != nil {
+			return nil, fmt.Errorf("at index %d: %w", i, err)
+		}
+		futures[i] = tr.Get(dataKey)
 	}
-	entities := make([]*Product, 0, len(pks))
+	entities := make([]*Product, 0, len(keys))
 	for i, future := range futures {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -183,55 +192,23 @@ func (r *productRepository) BatchGet(ctx context.Context, tx *fdblayer.Tx, pks [
 	return entities, nil
 }
 
-// List retrieves a list of Product entities starting from the given key.
-func (r *productRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Product], error) {
+// Scan performs a paginated range or prefix scan over Product primary keys.
+func (r *productRepository) Scan(ctx context.Context, tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*Product], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	tr := tx.Transaction()
 	dir := tx.Dir()
 
-	result := &fdblayer.PaginatedResult[*Product]{
+	result := &fdblayer.Page[*Product]{
 		Items: make([]*Product, 0),
 	}
 
-	// Compute data prefix range (scoped to opts.Prefix when provided).
-	prefixTpl := make(tuple.Tuple, 2+len(opts.Prefix))
-	prefixTpl[0] = ProductTypeID
-	prefixTpl[1] = fdblayer.DataNamespace
-	for j, el := range opts.Prefix {
-		prefixTpl[2+j] = fdblayer.NormalizeTupleElement(el)
-	}
-	dataPrefix := dir.Pack(prefixTpl)
-	dataPrefixRange, err := fdb.PrefixRange(dataPrefix)
+	rangeBegin, rangeEnd, err := fdblayer.ResolveScanBounds(dir, tuple.Tuple{ProductTypeID, fdblayer.DataNamespace}, kr, opts, []fdblayer.FieldKind{fdblayer.FieldKindString})
 	if err != nil {
 		return nil, err
 	}
-
-	beginTpl := make(tuple.Tuple, 2+len(opts.Begin))
-	beginTpl[0] = ProductTypeID
-	beginTpl[1] = fdblayer.DataNamespace
-	for j, el := range opts.Begin {
-		beginTpl[2+j] = fdblayer.NormalizeTupleElement(el)
-	}
-	begin := dir.Pack(beginTpl)
-
-	rangeBegin := dataPrefixRange.Begin
-	rangeEnd := dataPrefixRange.End
-	if len(opts.Begin) > 0 {
-		if opts.Reverse {
-			beginRange, err := fdb.PrefixRange(begin)
-			if err != nil {
-				return nil, err
-			}
-			if string(beginRange.End.FDBKey()) < string(rangeEnd.FDBKey()) {
-				rangeEnd = beginRange.End
-			}
-		} else if string(begin) > string(rangeBegin.FDBKey()) {
-			rangeBegin = begin
-		}
-	}
-	if string(rangeBegin.FDBKey()) >= string(rangeEnd.FDBKey()) {
+	if string(rangeBegin) >= string(rangeEnd) {
 		return result, nil
 	}
 
@@ -256,15 +233,13 @@ func (r *productRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdbl
 			if err != nil {
 				return nil, fmt.Errorf("failed to unpack next key: %w", err)
 			}
-			// Remove typeID and DataNamespace to return just the PK tuple
 			result.HasMore = true
-			result.NextKey = tpl[2:]
+			result.NextCursor = fdblayer.ExtractCursorKey(tpl, 2)
 			break
 		}
 
 		entity := &Product{}
-		err = proto.Unmarshal(kv.Value, entity)
-		if err != nil {
+		if err := proto.Unmarshal(kv.Value, entity); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)
 		}
 		result.Items = append(result.Items, entity)
@@ -273,62 +248,48 @@ func (r *productRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdbl
 	return result, nil
 }
 
-// GetByCategory retrieves a paginated page of Product entities by their Category index.
-func (r *productRepository) GetByCategory(ctx context.Context, tx *fdblayer.Tx, Category string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*Product], error) {
+// ScanIndex performs a paginated range or prefix scan over a secondary index of Product.
+func (r *productRepository) ScanIndex(ctx context.Context, tx *fdblayer.Tx, index fdblayer.IndexID, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*Product], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	var idxSchema []fdblayer.FieldKind
+	switch index {
+	case ProductByCategory:
+		idxSchema = []fdblayer.FieldKind{fdblayer.FieldKindString, fdblayer.FieldKindString}
+	default:
+		return nil, fmt.Errorf("product index %d: %w", index, fdblayer.ErrUnknownIndex)
+	}
+
 	tr := tx.Transaction()
 	dir := tx.Dir()
 
-	result := &fdblayer.PaginatedResult[*Product]{
+	result := &fdblayer.Page[*Product]{
 		Items: make([]*Product, 0),
 	}
-	baseTpl := tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, 1, Category}
-	indexKeyPrefix := dir.Pack(baseTpl)
-	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
+	baseTpl := tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(index)}
+	rangeBegin, rangeEnd, err := fdblayer.ResolveScanBounds(dir, baseTpl, kr, opts, idxSchema)
 	if err != nil {
 		return nil, err
 	}
-	rangeBegin := indexRange.Begin
-	rangeEnd := indexRange.End
-	if len(opts.Begin) > 0 {
-		cursorTpl := make(tuple.Tuple, len(baseTpl)+len(opts.Begin))
-		copy(cursorTpl, baseTpl)
-		for j, el := range opts.Begin {
-			cursorTpl[len(baseTpl)+j] = fdblayer.NormalizeTupleElement(el)
-		}
-		cursorKey := dir.Pack(cursorTpl)
-		if opts.Reverse {
-			cursorRange, err := fdb.PrefixRange(cursorKey)
-			if err != nil {
-				return nil, err
-			}
-			if string(cursorRange.End.FDBKey()) < string(rangeEnd.FDBKey()) {
-				rangeEnd = cursorRange.End
-			}
-		} else if string(cursorKey) > string(rangeBegin.FDBKey()) {
-			rangeBegin = cursorKey
-		}
-	}
-	if string(rangeBegin.FDBKey()) >= string(rangeEnd.FDBKey()) {
+	if string(rangeBegin) >= string(rangeEnd) {
 		return result, nil
 	}
+
 	rangeOpts := fdb.RangeOptions{Reverse: opts.Reverse}
 	if opts.Limit > 0 {
 		rangeOpts.Limit = opts.Limit + 1
 	}
 	kvs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: rangeBegin, End: rangeEnd}, rangeOpts).GetSliceOrPanic()
-	pageLen := len(kvs)
-	pkIndexStart := 3 + 1
-	if opts.Limit > 0 && pageLen > opts.Limit {
+	pkIndexStart := 3 + len(idxSchema) - 1
+	if opts.Limit > 0 && len(kvs) > opts.Limit {
 		nextTpl, err := dir.Unpack(kvs[opts.Limit].Key)
 		if err != nil {
 			return nil, err
 		}
-		if len(nextTpl) > pkIndexStart {
+		if len(nextTpl) > 3 {
 			result.HasMore = true
-			result.NextKey = nextTpl[pkIndexStart:]
+			result.NextCursor = fdblayer.ExtractCursorKey(nextTpl, 3)
 		}
 		kvs = kvs[:opts.Limit]
 	}

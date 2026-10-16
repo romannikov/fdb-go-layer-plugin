@@ -10,16 +10,22 @@ The compiler is structured around a **language-neutral Intermediate Representati
 
 - **Shared Protobuf Annotations (`proto/fdb-layer/annotations.proto`)**: Single source of truth for compile-time message `type_id`s, primary keys (`PrimaryKey`), secondary/fan-out indexes (`SecondaryIndex`), versionstamped primary keys (`is_versionstamp`), and FIFO queues (`is_queue`). Reserved options (`mutation`, `interleave`, `split_large_records`, `ttl_field`, and `SecondaryIndex` options `unique`, `storing`, `sparse`, `aggregate`, `aggregate_field`) are documented in `annotations.proto` with `// [NOT IMPLEMENTED YET]` and rejected at compile time if specified.
 - **Extensible Compiler Architecture**:
-  - `compiler/ir`: Extracts `FileSpec`, `MessageSpec`, `FieldSpec`, `SecondaryIndexSpec`, and `IndexPrefixSpec` from `protogen.File`, and validates all schema invariants (including mandatory non-zero `type_id` and `secondary_index.id` uniqueness).
+  - `compiler/ir`: Extracts `FileSpec`, `MessageSpec`, `FieldSpec`, and `SecondaryIndexSpec` from `protogen.File`, and validates all schema invariants (including mandatory non-zero `type_id`, `secondary_index.id` uniqueness, and duplicate field-sequence rejection).
   - `compiler/backend`: Defines the language-agnostic `Generator` interface, `Registry`, `Options`, and `RunProtogen` helper.
-  - `compiler/backend/golang`: Emits strongly-typed, zero-allocation `*.fdb.go` repositories for Go with compile-time `<MsgName>TypeID` constants.
-- **CRUD Operations**: Full support for `Create` (with `ErrAlreadyExists` protection), `Get` (with `ErrNotFound`), `Set` (with minimal-write index delta updates), `Delete`, strongly-typed `BatchGet`, and cursor-paginated `List` (including compound primary key `opts.Prefix` filtering).
+  - `compiler/backend/golang`: Emits zero-allocation `*.fdb.go` repositories for Go implementing the uniform `fdblayer.Repository[*Msg]` (or `fdblayer.QueueRepository[*Msg]`) interface, along with compile-time `<MsgName>TypeID` and `<MsgName>By<Fields>` index constants.
+- **Uniform `Repository[T]` Operations**:
+  - `Insert(ctx, tx, entity)`: Inserts a new record, returning `fdblayer.ErrAlreadyExists` if the primary key already exists.
+  - `Upsert(ctx, tx, entity)`: Inserts or updates a record in-place with minimal-write index delta maintenance.
+  - `Delete(ctx, tx, key)`: Deletes a record by `fdblayer.Key` and clears all secondary/fan-out index entries.
+  - `ReadRow(ctx, tx, key)`: Reads a single record by `fdblayer.Key` (`fdblayer.ErrNotFound` if missing).
+  - `ReadRows(ctx, tx, keys)`: Pipelined parallel batch fetch by `[]fdblayer.Key` in 1 RTT.
+  - `Scan(ctx, tx, rng, opts)`: Cursor-paginated primary key scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)`, or `fdblayer.Range(begin, end)`.
+  - `ScanIndex(ctx, tx, index, rng, opts)`: Cursor-paginated secondary/fan-out index scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)` (exact or partial leading prefix), or `fdblayer.Range(begin, end)` using generated `<Msg>By<Fields>` constants.
 - **Primary Keys**: Single-field and compound primary keys (`option (annotations.primary_key) = { fields: [...] };`) composed of scalar, `bytes`, or `enum` fields.
 - **Secondary & Fan-Out Indexes**:
-  - Single-field and composite secondary indexes with explicit `id` (`> 0`) and automatic maintenance on `Create`, `Set`, and `Delete`.
-  - Automatic generation of **partial-prefix query methods** (`GetBy<Prefix>`) for leading prefixes of composite secondary indexes.
-  - **Fan-out** indexes on `repeated` fields with deduplication and minimal-write delta updates on `Set`.
-- **Versionstamps & FIFO Queues**: Built-in support for `[(annotations.is_versionstamp) = true]` primary keys and `option (annotations.is_queue) = true` FIFO queues (`Enqueue`, `Dequeue`, `DequeueBatch`) with per-transaction user version monotonicity scoped to `*fdblayer.Tx` (`fdblayer.NewTx(tr, dir)`).
+  - Single-field and composite secondary indexes with explicit `id` (`> 0`) and automatic maintenance on `Insert`, `Upsert`, and `Delete`.
+  - **Fan-out** indexes on `repeated` fields with deduplication and minimal-write delta updates on `Upsert`.
+- **Versionstamps & FIFO Queues**: Built-in support for `[(annotations.is_versionstamp) = true]` primary keys and `option (annotations.is_queue) = true` FIFO queues (`Enqueue`, `Dequeue`, `DequeueBatch` via `fdblayer.QueueRepository[T]`) with per-transaction user version monotonicity scoped to `*fdblayer.Tx` (`fdblayer.NewTx(tr, dir)`).
 
 ---
 

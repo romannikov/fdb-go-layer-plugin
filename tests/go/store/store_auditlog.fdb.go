@@ -16,12 +16,15 @@ import (
 // AuditLogTypeID is the compile-time type prefix for AuditLog records in FoundationDB.
 const AuditLogTypeID int64 = 5
 
+// Secondary index IDs for AuditLog.
+const (
+	AuditLogByActor fdblayer.IndexID = 1
+	AuditLogByTags  fdblayer.IndexID = 2
+)
+
 // AuditLogRepository defines the repository interface for AuditLog.
 type AuditLogRepository interface {
-	fdblayer.GenericRepository[*AuditLog, []byte]
-
-	GetByActor(ctx context.Context, tx *fdblayer.Tx, Actor string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*AuditLog], error)
-	GetByTags(ctx context.Context, tx *fdblayer.Tx, Tags string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*AuditLog], error)
+	fdblayer.Repository[*AuditLog]
 }
 
 type auditlogRepository struct{}
@@ -31,8 +34,8 @@ func NewAuditLogRepository() AuditLogRepository {
 	return &auditlogRepository{}
 }
 
-// Create creates a new AuditLog entity in the database.
-func (r *auditlogRepository) Create(ctx context.Context, tx *fdblayer.Tx, entity *AuditLog) error {
+// Insert creates a new AuditLog entity in the database.
+func (r *auditlogRepository) Insert(ctx context.Context, tx *fdblayer.Tx, entity *AuditLog) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -67,7 +70,7 @@ func (r *auditlogRepository) Create(ctx context.Context, tx *fdblayer.Tx, entity
 
 	// Standard index
 	{
-		idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 1, entity.Actor, tuple.IncompleteVersionstamp(userVersion)})
+		idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, int64(AuditLogByActor), entity.Actor, tuple.IncompleteVersionstamp(userVersion)})
 		if err != nil {
 			return err
 		}
@@ -82,7 +85,7 @@ func (r *auditlogRepository) Create(ctx context.Context, tx *fdblayer.Tx, entity
 				continue
 			}
 			seen[item] = struct{}{}
-			idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 2,
+			idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, int64(AuditLogByTags),
 				item,
 				tuple.IncompleteVersionstamp(userVersion),
 			})
@@ -96,34 +99,8 @@ func (r *auditlogRepository) Create(ctx context.Context, tx *fdblayer.Tx, entity
 	return nil
 }
 
-// Get retrieves a AuditLog entity by its primary key.
-func (r *auditlogRepository) Get(ctx context.Context, tx *fdblayer.Tx, pk []byte) (*AuditLog, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if len(pk) != 12 {
-		return nil, fmt.Errorf("invalid versionstamp length %d for LogId: must be 12 bytes", len(pk))
-	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
-
-	key := dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.DataNamespace, fdblayer.BytesToVersionstamp(pk)})
-	valueFuture := tr.Get(key)
-	value := valueFuture.MustGet()
-	if value == nil {
-		return nil, fmt.Errorf("auditlog %w", fdblayer.ErrNotFound)
-	}
-	entity := &AuditLog{}
-	if err := proto.Unmarshal(value, entity); err != nil {
-		return nil, err
-	}
-
-	entity.LogId = fdblayer.BytesToVersionstamp(pk).Bytes()
-	return entity, nil
-}
-
-// Set updates an existing AuditLog entity in the database (or inserts it if not present).
-func (r *auditlogRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *AuditLog) error {
+// Upsert inserts a new AuditLog entity or updates an existing one in the database.
+func (r *auditlogRepository) Upsert(ctx context.Context, tx *fdblayer.Tx, entity *AuditLog) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -131,11 +108,13 @@ func (r *auditlogRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *A
 		return fmt.Errorf("auditlog entity cannot be nil")
 	}
 	if len(entity.LogId) != 0 && len(entity.LogId) != 12 {
-		return fmt.Errorf("invalid versionstamp length %d for LogId: must be 0 or 12 bytes", len(entity.LogId))
+		return fmt.Errorf("%w: invalid versionstamp length %d for LogId: must be 0 or 12 bytes", fdblayer.ErrInvalidKey, len(entity.LogId))
 	}
-	hasOldVS := len(entity.LogId) == 12
-	if !hasOldVS {
-		return r.Create(ctx, tx, entity)
+	if len(entity.LogId) == 0 {
+		return r.Insert(ctx, tx, entity)
+	}
+	if _, err := fdblayer.PackVersionstampElement(entity.LogId); err != nil {
+		return err
 	}
 
 	tr := tx.Transaction()
@@ -171,9 +150,9 @@ func (r *auditlogRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *A
 	// Standard index
 	if old == nil || old.Actor != entity.Actor {
 		if old != nil {
-			tr.Clear(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 1, old.Actor, fdblayer.BytesToVersionstamp(old.LogId)}))
+			tr.Clear(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, int64(AuditLogByActor), old.Actor, fdblayer.BytesToVersionstamp(old.LogId)}))
 		}
-		tr.Set(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 1, entity.Actor, fdblayer.BytesToVersionstamp(entity.LogId)}), []byte{})
+		tr.Set(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, int64(AuditLogByActor), entity.Actor, fdblayer.BytesToVersionstamp(entity.LogId)}), []byte{})
 	}
 
 	// Fan-out index
@@ -189,7 +168,7 @@ func (r *auditlogRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *A
 		for _, item := range old.Tags {
 			if _, keep := newSet[item]; !keep {
 				newSet[item] = struct{}{}
-				tr.Clear(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 2,
+				tr.Clear(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, int64(AuditLogByTags),
 					item,
 					fdblayer.BytesToVersionstamp(old.LogId),
 				}))
@@ -198,7 +177,7 @@ func (r *auditlogRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *A
 		for _, item := range entity.Tags {
 			if _, existed := oldSet[item]; !existed {
 				oldSet[item] = struct{}{}
-				tr.Set(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 2,
+				tr.Set(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, int64(AuditLogByTags),
 					item,
 					fdblayer.BytesToVersionstamp(entity.LogId),
 				}), []byte{})
@@ -211,7 +190,7 @@ func (r *auditlogRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *A
 				continue
 			}
 			seen[item] = struct{}{}
-			tr.Set(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 2,
+			tr.Set(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, int64(AuditLogByTags),
 				item,
 				fdblayer.BytesToVersionstamp(entity.LogId),
 			}), []byte{})
@@ -221,27 +200,26 @@ func (r *auditlogRepository) Set(ctx context.Context, tx *fdblayer.Tx, entity *A
 	return nil
 }
 
-// Delete removes a AuditLog entity from the database.
-func (r *auditlogRepository) Delete(ctx context.Context, tx *fdblayer.Tx, pk []byte) error {
+// Delete removes a AuditLog entity from the database by its primary key.
+func (r *auditlogRepository) Delete(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) error {
 	if err := ctx.Err(); err != nil {
 		return err
-	}
-	if len(pk) != 12 {
-		return fmt.Errorf("invalid versionstamp length %d for LogId: must be 12 bytes", len(pk))
 	}
 	tr := tx.Transaction()
 	dir := tx.Dir()
 
-	key := dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.DataNamespace, fdblayer.BytesToVersionstamp(pk)})
-	value := tr.Get(key).MustGet()
+	pkTuple, dataKey, err := fdblayer.PackPrimaryKey(dir, AuditLogTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindVersionstamp})
+	if err != nil {
+		return err
+	}
+	value := tr.Get(dataKey).MustGet()
 	if value != nil {
 		entity := &AuditLog{}
 		if err := proto.Unmarshal(value, entity); err != nil {
 			return fmt.Errorf("failed to unmarshal existing auditlog: %w", err)
 		}
-		entity.LogId = pk
 		// Standard index
-		tr.Clear(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 1, entity.Actor, fdblayer.BytesToVersionstamp(entity.LogId)}))
+		tr.Clear(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, int64(AuditLogByActor), entity.Actor, pkTuple[0]}))
 		// Fan-out index
 		{
 			seen := make(map[string]struct{}, len(entity.Tags))
@@ -250,40 +228,68 @@ func (r *auditlogRepository) Delete(ctx context.Context, tx *fdblayer.Tx, pk []b
 					continue
 				}
 				seen[item] = struct{}{}
-				tr.Clear(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 2,
+				tr.Clear(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, int64(AuditLogByTags),
 					item,
-					fdblayer.BytesToVersionstamp(entity.LogId),
+					pkTuple[0],
 				}))
 			}
 		}
 	}
-	tr.Clear(key)
+	tr.Clear(dataKey)
 
 	return nil
 }
 
-// BatchGet retrieves multiple AuditLog entities by their primary keys.
-func (r *auditlogRepository) BatchGet(ctx context.Context, tx *fdblayer.Tx, pks [][]byte) ([]*AuditLog, error) {
+// ReadRow retrieves a single AuditLog entity by its primary key.
+func (r *auditlogRepository) ReadRow(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) (*AuditLog, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if len(pks) == 0 {
+	tr := tx.Transaction()
+	dir := tx.Dir()
+
+	pkTuple, dataKey, err := fdblayer.PackPrimaryKey(dir, AuditLogTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindVersionstamp})
+	if err != nil {
+		return nil, err
+	}
+	value := tr.Get(dataKey).MustGet()
+	if value == nil {
+		return nil, fmt.Errorf("auditlog %w", fdblayer.ErrNotFound)
+	}
+	entity := &AuditLog{}
+	if err := proto.Unmarshal(value, entity); err != nil {
+		return nil, err
+	}
+	if vs, ok := pkTuple[0].(tuple.Versionstamp); ok {
+		entity.LogId = vs.Bytes()
+	}
+	return entity, nil
+}
+
+// ReadRows retrieves multiple AuditLog entities by their primary keys in parallel.
+func (r *auditlogRepository) ReadRows(ctx context.Context, tx *fdblayer.Tx, keys []fdblayer.Key) ([]*AuditLog, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
 		return nil, nil
 	}
 	tr := tx.Transaction()
 	dir := tx.Dir()
-	futures := make([]fdb.FutureByteSlice, len(pks))
-	for i, pk := range pks {
+	futures := make([]fdb.FutureByteSlice, len(keys))
+	pkTuples := make([]tuple.Tuple, len(keys))
+	for i, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if len(pk) != 12 {
-			return nil, fmt.Errorf("invalid versionstamp length %d for LogId at index %d: must be 12 bytes", len(pk), i)
+		pkTuple, dataKey, err := fdblayer.PackPrimaryKey(dir, AuditLogTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindVersionstamp})
+		if err != nil {
+			return nil, fmt.Errorf("at index %d: %w", i, err)
 		}
-		key := dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.DataNamespace, fdblayer.BytesToVersionstamp(pk)})
-		futures[i] = tr.Get(key)
+		pkTuples[i] = pkTuple
+		futures[i] = tr.Get(dataKey)
 	}
-	entities := make([]*AuditLog, 0, len(pks))
+	entities := make([]*AuditLog, 0, len(keys))
 	for i, future := range futures {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -296,77 +302,31 @@ func (r *auditlogRepository) BatchGet(ctx context.Context, tx *fdblayer.Tx, pks 
 		if err := proto.Unmarshal(value, entity); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity at index %d: %w", i, err)
 		}
-		entity.LogId = fdblayer.BytesToVersionstamp(pks[i]).Bytes()
+		if vs, ok := pkTuples[i][0].(tuple.Versionstamp); ok {
+			entity.LogId = vs.Bytes()
+		}
 		entities = append(entities, entity)
 	}
 	return entities, nil
 }
 
-// List retrieves a list of AuditLog entities starting from the given key.
-func (r *auditlogRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*AuditLog], error) {
+// Scan performs a paginated range or prefix scan over AuditLog primary keys.
+func (r *auditlogRepository) Scan(ctx context.Context, tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*AuditLog], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	tr := tx.Transaction()
 	dir := tx.Dir()
 
-	result := &fdblayer.PaginatedResult[*AuditLog]{
+	result := &fdblayer.Page[*AuditLog]{
 		Items: make([]*AuditLog, 0),
 	}
 
-	// Compute data prefix range (scoped to opts.Prefix when provided).
-	prefixTpl := make(tuple.Tuple, 2+len(opts.Prefix))
-	prefixTpl[0] = AuditLogTypeID
-	prefixTpl[1] = fdblayer.DataNamespace
-	for j, el := range opts.Prefix {
-		prefixTpl[2+j] = fdblayer.NormalizeTupleElement(el)
-	}
-	if len(opts.Prefix) > 0 {
-		if rawVS, ok := opts.Prefix[0].([]byte); ok {
-			if len(rawVS) != 12 {
-				return nil, fmt.Errorf("invalid versionstamp length %d in opts.Prefix: must be 12 bytes", len(rawVS))
-			}
-			prefixTpl[2+0] = fdblayer.BytesToVersionstamp(rawVS)
-		}
-	}
-	dataPrefix := dir.Pack(prefixTpl)
-	dataPrefixRange, err := fdb.PrefixRange(dataPrefix)
+	rangeBegin, rangeEnd, err := fdblayer.ResolveScanBounds(dir, tuple.Tuple{AuditLogTypeID, fdblayer.DataNamespace}, kr, opts, []fdblayer.FieldKind{fdblayer.FieldKindVersionstamp})
 	if err != nil {
 		return nil, err
 	}
-
-	beginTpl := make(tuple.Tuple, 2+len(opts.Begin))
-	beginTpl[0] = AuditLogTypeID
-	beginTpl[1] = fdblayer.DataNamespace
-	for j, el := range opts.Begin {
-		beginTpl[2+j] = fdblayer.NormalizeTupleElement(el)
-	}
-	if len(opts.Begin) > 0 {
-		if rawVS, ok := opts.Begin[0].([]byte); ok {
-			if len(rawVS) != 12 {
-				return nil, fmt.Errorf("invalid versionstamp length %d in opts.Begin: must be 12 bytes", len(rawVS))
-			}
-			beginTpl[2+0] = fdblayer.BytesToVersionstamp(rawVS)
-		}
-	}
-	begin := dir.Pack(beginTpl)
-
-	rangeBegin := dataPrefixRange.Begin
-	rangeEnd := dataPrefixRange.End
-	if len(opts.Begin) > 0 {
-		if opts.Reverse {
-			beginRange, err := fdb.PrefixRange(begin)
-			if err != nil {
-				return nil, err
-			}
-			if string(beginRange.End.FDBKey()) < string(rangeEnd.FDBKey()) {
-				rangeEnd = beginRange.End
-			}
-		} else if string(begin) > string(rangeBegin.FDBKey()) {
-			rangeBegin = begin
-		}
-	}
-	if string(rangeBegin.FDBKey()) >= string(rangeEnd.FDBKey()) {
+	if string(rangeBegin) >= string(rangeEnd) {
 		return result, nil
 	}
 
@@ -391,15 +351,13 @@ func (r *auditlogRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdb
 			if err != nil {
 				return nil, fmt.Errorf("failed to unpack next key: %w", err)
 			}
-			// Remove typeID and DataNamespace to return just the PK tuple
 			result.HasMore = true
-			result.NextKey = tpl[2:]
+			result.NextCursor = fdblayer.ExtractCursorKey(tpl, 2)
 			break
 		}
 
 		entity := &AuditLog{}
-		err = proto.Unmarshal(kv.Value, entity)
-		if err != nil {
+		if err := proto.Unmarshal(kv.Value, entity); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal entity: %w", err)
 		}
 		tpl, unpackErr := dir.Unpack(kv.Key)
@@ -417,183 +375,50 @@ func (r *auditlogRepository) List(ctx context.Context, tx *fdblayer.Tx, opts fdb
 	return result, nil
 }
 
-// GetByActor retrieves a paginated page of AuditLog entities by their Actor index.
-func (r *auditlogRepository) GetByActor(ctx context.Context, tx *fdblayer.Tx, Actor string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*AuditLog], error) {
+// ScanIndex performs a paginated range or prefix scan over a secondary index of AuditLog.
+func (r *auditlogRepository) ScanIndex(ctx context.Context, tx *fdblayer.Tx, index fdblayer.IndexID, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*AuditLog], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	var idxSchema []fdblayer.FieldKind
+	switch index {
+	case AuditLogByActor:
+		idxSchema = []fdblayer.FieldKind{fdblayer.FieldKindString, fdblayer.FieldKindVersionstamp}
+	case AuditLogByTags:
+		idxSchema = []fdblayer.FieldKind{fdblayer.FieldKindString, fdblayer.FieldKindVersionstamp}
+	default:
+		return nil, fmt.Errorf("auditlog index %d: %w", index, fdblayer.ErrUnknownIndex)
+	}
+
 	tr := tx.Transaction()
 	dir := tx.Dir()
 
-	result := &fdblayer.PaginatedResult[*AuditLog]{
+	result := &fdblayer.Page[*AuditLog]{
 		Items: make([]*AuditLog, 0),
 	}
-	baseTpl := tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 1, Actor}
-	indexKeyPrefix := dir.Pack(baseTpl)
-	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
+	baseTpl := tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, int64(index)}
+	rangeBegin, rangeEnd, err := fdblayer.ResolveScanBounds(dir, baseTpl, kr, opts, idxSchema)
 	if err != nil {
 		return nil, err
 	}
-	rangeBegin := indexRange.Begin
-	rangeEnd := indexRange.End
-	if len(opts.Begin) > 0 {
-		cursorTpl := make(tuple.Tuple, len(baseTpl)+len(opts.Begin))
-		copy(cursorTpl, baseTpl)
-		for j, el := range opts.Begin {
-			cursorTpl[len(baseTpl)+j] = fdblayer.NormalizeTupleElement(el)
-		}
-		if len(opts.Begin) > 0 {
-			if rawVS, ok := opts.Begin[0].([]byte); ok {
-				if len(rawVS) != 12 {
-					return nil, fmt.Errorf("invalid versionstamp length %d in opts.Begin: must be 12 bytes", len(rawVS))
-				}
-				cursorTpl[len(baseTpl)+0] = fdblayer.BytesToVersionstamp(rawVS)
-			}
-		}
-		cursorKey := dir.Pack(cursorTpl)
-		if opts.Reverse {
-			cursorRange, err := fdb.PrefixRange(cursorKey)
-			if err != nil {
-				return nil, err
-			}
-			if string(cursorRange.End.FDBKey()) < string(rangeEnd.FDBKey()) {
-				rangeEnd = cursorRange.End
-			}
-		} else if string(cursorKey) > string(rangeBegin.FDBKey()) {
-			rangeBegin = cursorKey
-		}
-	}
-	if string(rangeBegin.FDBKey()) >= string(rangeEnd.FDBKey()) {
+	if string(rangeBegin) >= string(rangeEnd) {
 		return result, nil
 	}
+
 	rangeOpts := fdb.RangeOptions{Reverse: opts.Reverse}
 	if opts.Limit > 0 {
 		rangeOpts.Limit = opts.Limit + 1
 	}
 	kvs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: rangeBegin, End: rangeEnd}, rangeOpts).GetSliceOrPanic()
-	pageLen := len(kvs)
-	pkIndexStart := 3 + 1
-	if opts.Limit > 0 && pageLen > opts.Limit {
+	pkIndexStart := 3 + len(idxSchema) - 1
+	if opts.Limit > 0 && len(kvs) > opts.Limit {
 		nextTpl, err := dir.Unpack(kvs[opts.Limit].Key)
 		if err != nil {
 			return nil, err
 		}
-		if len(nextTpl) > pkIndexStart {
+		if len(nextTpl) > 3 {
 			result.HasMore = true
-			result.NextKey = nextTpl[pkIndexStart:]
-		}
-		kvs = kvs[:opts.Limit]
-	}
-	futures := make([]fdb.FutureByteSlice, len(kvs))
-	pkTuples := make([]tuple.Tuple, len(kvs))
-	for i, kv := range kvs {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		tpl, err := dir.Unpack(kv.Key)
-		if err != nil {
-			return nil, err
-		}
-		if len(tpl) <= pkIndexStart {
-			continue
-		}
-		pkTuple := tpl[pkIndexStart:]
-		pkTuples[i] = pkTuple
-		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
-		keyTpl[0] = AuditLogTypeID
-		keyTpl[1] = fdblayer.DataNamespace
-		copy(keyTpl[2:], pkTuple)
-		futures[i] = tr.Get(dir.Pack(keyTpl))
-	}
-	for i, future := range futures {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if future == nil {
-			continue
-		}
-		value := future.MustGet()
-		if value == nil {
-			continue
-		}
-		entity := &AuditLog{}
-		if err := proto.Unmarshal(value, entity); err != nil {
-			return nil, err
-		}
-		if len(pkTuples[i]) > 0 {
-			if vs, ok := pkTuples[i][0].(tuple.Versionstamp); ok {
-				entity.LogId = vs.Bytes()
-			}
-		}
-		result.Items = append(result.Items, entity)
-	}
-	return result, nil
-}
-
-// GetByTags retrieves a paginated page of AuditLog entities by their Tags index.
-func (r *auditlogRepository) GetByTags(ctx context.Context, tx *fdblayer.Tx, Tags string, opts fdblayer.PaginationOptions) (*fdblayer.PaginatedResult[*AuditLog], error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	tr := tx.Transaction()
-	dir := tx.Dir()
-
-	result := &fdblayer.PaginatedResult[*AuditLog]{
-		Items: make([]*AuditLog, 0),
-	}
-	baseTpl := tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, 2, Tags}
-	indexKeyPrefix := dir.Pack(baseTpl)
-	indexRange, err := fdb.PrefixRange(indexKeyPrefix)
-	if err != nil {
-		return nil, err
-	}
-	rangeBegin := indexRange.Begin
-	rangeEnd := indexRange.End
-	if len(opts.Begin) > 0 {
-		cursorTpl := make(tuple.Tuple, len(baseTpl)+len(opts.Begin))
-		copy(cursorTpl, baseTpl)
-		for j, el := range opts.Begin {
-			cursorTpl[len(baseTpl)+j] = fdblayer.NormalizeTupleElement(el)
-		}
-		if len(opts.Begin) > 0 {
-			if rawVS, ok := opts.Begin[0].([]byte); ok {
-				if len(rawVS) != 12 {
-					return nil, fmt.Errorf("invalid versionstamp length %d in opts.Begin: must be 12 bytes", len(rawVS))
-				}
-				cursorTpl[len(baseTpl)+0] = fdblayer.BytesToVersionstamp(rawVS)
-			}
-		}
-		cursorKey := dir.Pack(cursorTpl)
-		if opts.Reverse {
-			cursorRange, err := fdb.PrefixRange(cursorKey)
-			if err != nil {
-				return nil, err
-			}
-			if string(cursorRange.End.FDBKey()) < string(rangeEnd.FDBKey()) {
-				rangeEnd = cursorRange.End
-			}
-		} else if string(cursorKey) > string(rangeBegin.FDBKey()) {
-			rangeBegin = cursorKey
-		}
-	}
-	if string(rangeBegin.FDBKey()) >= string(rangeEnd.FDBKey()) {
-		return result, nil
-	}
-	rangeOpts := fdb.RangeOptions{Reverse: opts.Reverse}
-	if opts.Limit > 0 {
-		rangeOpts.Limit = opts.Limit + 1
-	}
-	kvs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: rangeBegin, End: rangeEnd}, rangeOpts).GetSliceOrPanic()
-	pageLen := len(kvs)
-	pkIndexStart := 3 + 1
-	if opts.Limit > 0 && pageLen > opts.Limit {
-		nextTpl, err := dir.Unpack(kvs[opts.Limit].Key)
-		if err != nil {
-			return nil, err
-		}
-		if len(nextTpl) > pkIndexStart {
-			result.HasMore = true
-			result.NextKey = nextTpl[pkIndexStart:]
+			result.NextCursor = fdblayer.ExtractCursorKey(nextTpl, 3)
 		}
 		kvs = kvs[:opts.Limit]
 	}
