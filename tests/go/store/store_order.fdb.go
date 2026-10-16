@@ -5,7 +5,6 @@ package store
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -38,8 +37,8 @@ func NewOrderRepository() OrderRepository {
 }
 
 // Insert creates a new Order entity in the database.
-func (r *orderRepository) Insert(ctx context.Context, tx *fdblayer.Tx, entity *Order) error {
-	if err := ctx.Err(); err != nil {
+func (r *orderRepository) Insert(tx *fdblayer.Tx, entity *Order) error {
+	if err := tx.Context().Err(); err != nil {
 		return err
 	}
 	if entity == nil {
@@ -103,8 +102,8 @@ func (r *orderRepository) Insert(ctx context.Context, tx *fdblayer.Tx, entity *O
 }
 
 // Upsert inserts a new Order entity or updates an existing one in the database.
-func (r *orderRepository) Upsert(ctx context.Context, tx *fdblayer.Tx, entity *Order) error {
-	if err := ctx.Err(); err != nil {
+func (r *orderRepository) Upsert(tx *fdblayer.Tx, entity *Order) error {
+	if err := tx.Context().Err(); err != nil {
 		return err
 	}
 	if entity == nil {
@@ -262,8 +261,8 @@ func (r *orderRepository) Upsert(ctx context.Context, tx *fdblayer.Tx, entity *O
 }
 
 // Delete removes a Order entity from the database by its primary key.
-func (r *orderRepository) Delete(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) error {
-	if err := ctx.Err(); err != nil {
+func (r *orderRepository) Delete(tx *fdblayer.Tx, key fdblayer.Key) error {
+	if err := tx.Context().Err(); err != nil {
 		return err
 	}
 	tr := tx.Transaction()
@@ -321,8 +320,8 @@ func (r *orderRepository) Delete(ctx context.Context, tx *fdblayer.Tx, key fdbla
 }
 
 // ReadRow retrieves a single Order entity by its primary key.
-func (r *orderRepository) ReadRow(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) (*Order, error) {
-	if err := ctx.Err(); err != nil {
+func (r *orderRepository) ReadRow(tx *fdblayer.Tx, key fdblayer.Key) (*Order, error) {
+	if err := tx.Context().Err(); err != nil {
 		return nil, err
 	}
 	tr := tx.Transaction()
@@ -344,8 +343,8 @@ func (r *orderRepository) ReadRow(ctx context.Context, tx *fdblayer.Tx, key fdbl
 }
 
 // ReadRows retrieves multiple Order entities by their primary keys in parallel.
-func (r *orderRepository) ReadRows(ctx context.Context, tx *fdblayer.Tx, keys []fdblayer.Key) ([]*Order, error) {
-	if err := ctx.Err(); err != nil {
+func (r *orderRepository) ReadRows(tx *fdblayer.Tx, keys []fdblayer.Key) ([]*Order, error) {
+	if err := tx.Context().Err(); err != nil {
 		return nil, err
 	}
 	if len(keys) == 0 {
@@ -355,7 +354,7 @@ func (r *orderRepository) ReadRows(ctx context.Context, tx *fdblayer.Tx, keys []
 	dir := tx.Dir()
 	futures := make([]fdb.FutureByteSlice, len(keys))
 	for i, key := range keys {
-		if err := ctx.Err(); err != nil {
+		if err := tx.Context().Err(); err != nil {
 			return nil, err
 		}
 		_, dataKey, err := fdblayer.PackPrimaryKey(dir, OrderTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString, fdblayer.FieldKindInt64})
@@ -366,7 +365,7 @@ func (r *orderRepository) ReadRows(ctx context.Context, tx *fdblayer.Tx, keys []
 	}
 	entities := make([]*Order, 0, len(keys))
 	for i, future := range futures {
-		if err := ctx.Err(); err != nil {
+		if err := tx.Context().Err(); err != nil {
 			return nil, err
 		}
 		value := future.MustGet()
@@ -383,8 +382,8 @@ func (r *orderRepository) ReadRows(ctx context.Context, tx *fdblayer.Tx, keys []
 }
 
 // Scan performs a paginated range or prefix scan over Order primary keys.
-func (r *orderRepository) Scan(ctx context.Context, tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*Order], error) {
-	if err := ctx.Err(); err != nil {
+func (r *orderRepository) Scan(tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*Order], error) {
+	if err := tx.Context().Err(); err != nil {
 		return nil, err
 	}
 	tr := tx.Transaction()
@@ -415,7 +414,7 @@ func (r *orderRepository) Scan(ctx context.Context, tx *fdblayer.Tx, kr fdblayer
 	}, rangeOpts).GetSliceOrPanic()
 
 	for i, kv := range kvs {
-		if err := ctx.Err(); err != nil {
+		if err := tx.Context().Err(); err != nil {
 			return nil, err
 		}
 		if opts.Limit > 0 && i == opts.Limit {
@@ -439,8 +438,8 @@ func (r *orderRepository) Scan(ctx context.Context, tx *fdblayer.Tx, kr fdblayer
 }
 
 // ScanIndex performs a paginated range or prefix scan over a secondary index of Order.
-func (r *orderRepository) ScanIndex(ctx context.Context, tx *fdblayer.Tx, index fdblayer.IndexID, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*Order], error) {
-	if err := ctx.Err(); err != nil {
+func (r *orderRepository) ScanIndex(tx *fdblayer.Tx, index fdblayer.IndexID, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*Order], error) {
+	if err := tx.Context().Err(); err != nil {
 		return nil, err
 	}
 	var idxSchema []fdblayer.FieldKind
@@ -491,7 +490,7 @@ func (r *orderRepository) ScanIndex(ctx context.Context, tx *fdblayer.Tx, index 
 	}
 	futures := make([]fdb.FutureByteSlice, len(kvs))
 	for i, kv := range kvs {
-		if err := ctx.Err(); err != nil {
+		if err := tx.Context().Err(); err != nil {
 			return nil, err
 		}
 		tpl, err := dir.Unpack(kv.Key)
@@ -509,7 +508,7 @@ func (r *orderRepository) ScanIndex(ctx context.Context, tx *fdblayer.Tx, index 
 		futures[i] = tr.Get(dir.Pack(keyTpl))
 	}
 	for _, future := range futures {
-		if err := ctx.Err(); err != nil {
+		if err := tx.Context().Err(); err != nil {
 			return nil, err
 		}
 		if future == nil {

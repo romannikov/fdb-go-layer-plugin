@@ -79,7 +79,6 @@ func generateHeader(g Printer, msg ir.MessageSpec) {
 	if !msg.IsQueue && HasBytesImports(msg) {
 		g.P(`	"bytes"`)
 	}
-	g.P(`	"context"`)
 	g.P(`	"fmt"`)
 	g.P()
 	g.P(`	"github.com/apple/foundationdb/bindings/go/src/fdb"`)
@@ -140,8 +139,8 @@ func generateEnqueue(g Printer, msg ir.MessageSpec) {
 	typeIDConst := typeIDConstName(msg)
 
 	g.P("// Enqueue adds a ", msg.Name, " to the queue.")
-	g.P("func (r *", lowerName, "Repository) Enqueue(ctx context.Context, tx *fdblayer.Tx, entity *", msg.Name, ") error {")
-	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("func (r *", lowerName, "Repository) Enqueue(tx *fdblayer.Tx, entity *", msg.Name, ") error {")
+	g.P("	if err := tx.Context().Err(); err != nil {")
 	g.P("		return err")
 	g.P("	}")
 	g.P("	if entity == nil {")
@@ -181,8 +180,8 @@ func generateDequeue(g Printer, msg ir.MessageSpec) {
 	partitionSchema := schemaSliceExpr(msg.PrimaryKeyFields[:1])
 
 	g.P("// Dequeue reads and removes the single oldest message from the queue.")
-	g.P("func (r *", lowerName, "Repository) Dequeue(ctx context.Context, tx *fdblayer.Tx, partitionKey fdblayer.Key) (*", msg.Name, ", error) {")
-	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("func (r *", lowerName, "Repository) Dequeue(tx *fdblayer.Tx, partitionKey fdblayer.Key) (*", msg.Name, ", error) {")
+	g.P("	if err := tx.Context().Err(); err != nil {")
 	g.P("		return nil, err")
 	g.P("	}")
 	g.P("	if len(partitionKey) != 1 {")
@@ -242,8 +241,8 @@ func generateDequeueBatch(g Printer, msg ir.MessageSpec) {
 	partitionSchema := schemaSliceExpr(msg.PrimaryKeyFields[:1])
 
 	g.P("// DequeueBatch reads and removes up to limit oldest messages from the queue in a single range scan.")
-	g.P("func (r *", lowerName, "Repository) DequeueBatch(ctx context.Context, tx *fdblayer.Tx, partitionKey fdblayer.Key, limit int) ([]*", msg.Name, ", error) {")
-	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("func (r *", lowerName, "Repository) DequeueBatch(tx *fdblayer.Tx, partitionKey fdblayer.Key, limit int) ([]*", msg.Name, ", error) {")
+	g.P("	if err := tx.Context().Err(); err != nil {")
 	g.P("		return nil, err")
 	g.P("	}")
 	g.P("	if len(partitionKey) != 1 {")
@@ -271,7 +270,7 @@ func generateDequeueBatch(g Printer, msg ir.MessageSpec) {
 	g.P()
 	g.P("	items := make([]*", msg.Name, ", 0, len(rows))")
 	g.P("	for _, row := range rows {")
-	g.P("		if err := ctx.Err(); err != nil {")
+	g.P("		if err := tx.Context().Err(); err != nil {")
 	g.P("			return nil, err")
 	g.P("		}")
 	g.P("		entity := &", msg.Name, "{}")
@@ -349,8 +348,8 @@ func generateInsert(g Printer, msg ir.MessageSpec) {
 	typeIDConst := typeIDConstName(msg)
 
 	g.P("// Insert creates a new ", msg.Name, " entity in the database.")
-	g.P("func (r *", lowerName, "Repository) Insert(ctx context.Context, tx *fdblayer.Tx, entity *", msg.Name, ") error {")
-	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("func (r *", lowerName, "Repository) Insert(tx *fdblayer.Tx, entity *", msg.Name, ") error {")
+	g.P("	if err := tx.Context().Err(); err != nil {")
 	g.P("		return err")
 	g.P("	}")
 	g.P("	if entity == nil {")
@@ -450,8 +449,8 @@ func generateUpsert(g Printer, msg ir.MessageSpec) {
 	}
 
 	g.P("// Upsert inserts a new ", msg.Name, " entity or updates an existing one in the database.")
-	g.P("func (r *", lowerName, "Repository) Upsert(ctx context.Context, tx *fdblayer.Tx, entity *", msg.Name, ") error {")
-	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("func (r *", lowerName, "Repository) Upsert(tx *fdblayer.Tx, entity *", msg.Name, ") error {")
+	g.P("	if err := tx.Context().Err(); err != nil {")
 	g.P("		return err")
 	g.P("	}")
 	g.P("	if entity == nil {")
@@ -462,7 +461,7 @@ func generateUpsert(g Printer, msg ir.MessageSpec) {
 		g.P(`		return fmt.Errorf("%w: invalid versionstamp length %d for `, vsFieldName, `: must be 0 or 12 bytes", fdblayer.ErrInvalidKey, len(entity.`, vsFieldName, `))`)
 		g.P("	}")
 		g.P("	if len(entity.", vsFieldName, ") == 0 {")
-		g.P("		return r.Insert(ctx, tx, entity)")
+		g.P("		return r.Insert(tx, entity)")
 		g.P("	}")
 		g.P("	if _, err := fdblayer.PackVersionstampElement(entity.", vsFieldName, "); err != nil {")
 		g.P("		return err")
@@ -636,8 +635,8 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 	}
 
 	g.P("// Delete removes a ", msg.Name, " entity from the database by its primary key.")
-	g.P("func (r *", lowerName, "Repository) Delete(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) error {")
-	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("func (r *", lowerName, "Repository) Delete(tx *fdblayer.Tx, key fdblayer.Key) error {")
+	g.P("	if err := tx.Context().Err(); err != nil {")
 	g.P("		return err")
 	g.P("	}")
 	g.P("	tr := tx.Transaction()")
@@ -700,8 +699,8 @@ func generateReadRow(g Printer, msg ir.MessageSpec) {
 	}
 
 	g.P("// ReadRow retrieves a single ", msg.Name, " entity by its primary key.")
-	g.P("func (r *", lowerName, "Repository) ReadRow(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) (*", msg.Name, ", error) {")
-	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("func (r *", lowerName, "Repository) ReadRow(tx *fdblayer.Tx, key fdblayer.Key) (*", msg.Name, ", error) {")
+	g.P("	if err := tx.Context().Err(); err != nil {")
 	g.P("		return nil, err")
 	g.P("	}")
 	g.P("	tr := tx.Transaction()")
@@ -740,8 +739,8 @@ func generateReadRows(g Printer, msg ir.MessageSpec) {
 	pkSchema := schemaSliceExpr(msg.PrimaryKeyFields)
 
 	g.P("// ReadRows retrieves multiple ", msg.Name, " entities by their primary keys in parallel.")
-	g.P("func (r *", lowerName, "Repository) ReadRows(ctx context.Context, tx *fdblayer.Tx, keys []fdblayer.Key) ([]*", msg.Name, ", error) {")
-	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("func (r *", lowerName, "Repository) ReadRows(tx *fdblayer.Tx, keys []fdblayer.Key) ([]*", msg.Name, ", error) {")
+	g.P("	if err := tx.Context().Err(); err != nil {")
 	g.P("		return nil, err")
 	g.P("	}")
 	g.P("	if len(keys) == 0 {")
@@ -754,7 +753,7 @@ func generateReadRows(g Printer, msg ir.MessageSpec) {
 		g.P("	pkTuples := make([]tuple.Tuple, len(keys))")
 	}
 	g.P("	for i, key := range keys {")
-	g.P("		if err := ctx.Err(); err != nil {")
+	g.P("		if err := tx.Context().Err(); err != nil {")
 	g.P("			return nil, err")
 	g.P("		}")
 	if hasVS {
@@ -773,7 +772,7 @@ func generateReadRows(g Printer, msg ir.MessageSpec) {
 	g.P("	}")
 	g.P("	entities := make([]*", msg.Name, ", 0, len(keys))")
 	g.P("	for i, future := range futures {")
-	g.P("		if err := ctx.Err(); err != nil {")
+	g.P("		if err := tx.Context().Err(); err != nil {")
 	g.P("			return nil, err")
 	g.P("		}")
 	g.P("		value := future.MustGet()")
@@ -806,8 +805,8 @@ func generateScan(g Printer, msg ir.MessageSpec) {
 	pkSchema := schemaSliceExpr(msg.PrimaryKeyFields)
 
 	g.P("// Scan performs a paginated range or prefix scan over ", msg.Name, " primary keys.")
-	g.P("func (r *", lowerName, "Repository) Scan(ctx context.Context, tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*", msg.Name, "], error) {")
-	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("func (r *", lowerName, "Repository) Scan(tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*", msg.Name, "], error) {")
+	g.P("	if err := tx.Context().Err(); err != nil {")
 	g.P("		return nil, err")
 	g.P("	}")
 	g.P("	tr := tx.Transaction()")
@@ -838,7 +837,7 @@ func generateScan(g Printer, msg ir.MessageSpec) {
 	g.P("	}, rangeOpts).GetSliceOrPanic()")
 	g.P()
 	g.P("	for i, kv := range kvs {")
-	g.P("		if err := ctx.Err(); err != nil {")
+	g.P("		if err := tx.Context().Err(); err != nil {")
 	g.P("			return nil, err")
 	g.P("		}")
 	g.P("		if opts.Limit > 0 && i == opts.Limit {")
@@ -885,8 +884,8 @@ func generateScanIndex(g Printer, msg ir.MessageSpec) {
 	pkLen := len(msg.PrimaryKeyFields)
 
 	g.P("// ScanIndex performs a paginated range or prefix scan over a secondary index of ", msg.Name, ".")
-	g.P("func (r *", lowerName, "Repository) ScanIndex(ctx context.Context, tx *fdblayer.Tx, index fdblayer.IndexID, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*", msg.Name, "], error) {")
-	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("func (r *", lowerName, "Repository) ScanIndex(tx *fdblayer.Tx, index fdblayer.IndexID, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*", msg.Name, "], error) {")
+	g.P("	if err := tx.Context().Err(); err != nil {")
 	g.P("		return nil, err")
 	g.P("	}")
 	if len(msg.SecondaryIndexes) == 0 {
@@ -946,7 +945,7 @@ func generateScanIndex(g Printer, msg ir.MessageSpec) {
 		g.P("	pkTuples := make([]tuple.Tuple, len(kvs))")
 	}
 	g.P("	for i, kv := range kvs {")
-	g.P("		if err := ctx.Err(); err != nil {")
+	g.P("		if err := tx.Context().Err(); err != nil {")
 	g.P("			return nil, err")
 	g.P("		}")
 	g.P("		tpl, err := dir.Unpack(kv.Key)")
@@ -971,7 +970,7 @@ func generateScanIndex(g Printer, msg ir.MessageSpec) {
 		iterVar = "i"
 	}
 	g.P("	for ", iterVar, ", future := range futures {")
-	g.P("		if err := ctx.Err(); err != nil {")
+	g.P("		if err := tx.Context().Err(); err != nil {")
 	g.P("			return nil, err")
 	g.P("		}")
 	g.P("		if future == nil {")
