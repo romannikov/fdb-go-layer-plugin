@@ -4,7 +4,6 @@
 package store
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -29,8 +28,8 @@ func NewTaskMessageRepository() TaskMessageRepository {
 }
 
 // Enqueue adds a TaskMessage to the queue.
-func (r *taskmessageRepository) Enqueue(ctx context.Context, tx *fdblayer.Tx, entity *TaskMessage) error {
-	if err := ctx.Err(); err != nil {
+func (r *taskmessageRepository) Enqueue(tx *fdblayer.Tx, entity *TaskMessage) error {
+	if err := tx.Context().Err(); err != nil {
 		return err
 	}
 	if entity == nil {
@@ -66,8 +65,8 @@ func (r *taskmessageRepository) Enqueue(ctx context.Context, tx *fdblayer.Tx, en
 }
 
 // Dequeue reads and removes the single oldest message from the queue.
-func (r *taskmessageRepository) Dequeue(ctx context.Context, tx *fdblayer.Tx, partitionKey fdblayer.Key) (*TaskMessage, error) {
-	if err := ctx.Err(); err != nil {
+func (r *taskmessageRepository) Dequeue(tx *fdblayer.Tx, partitionKey fdblayer.Key) (*TaskMessage, error) {
+	if err := tx.Context().Err(); err != nil {
 		return nil, err
 	}
 	if len(partitionKey) != 1 {
@@ -114,8 +113,8 @@ func (r *taskmessageRepository) Dequeue(ctx context.Context, tx *fdblayer.Tx, pa
 }
 
 // DequeueBatch reads and removes up to limit oldest messages from the queue in a single range scan.
-func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tx *fdblayer.Tx, partitionKey fdblayer.Key, limit int) ([]*TaskMessage, error) {
-	if err := ctx.Err(); err != nil {
+func (r *taskmessageRepository) DequeueBatch(tx *fdblayer.Tx, partitionKey fdblayer.Key, limit int) ([]*TaskMessage, error) {
+	if err := tx.Context().Err(); err != nil {
 		return nil, err
 	}
 	if len(partitionKey) != 1 {
@@ -143,7 +142,7 @@ func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tx *fdblayer.T
 
 	items := make([]*TaskMessage, 0, len(rows))
 	for _, row := range rows {
-		if err := ctx.Err(); err != nil {
+		if err := tx.Context().Err(); err != nil {
 			return nil, err
 		}
 		entity := &TaskMessage{}

@@ -29,13 +29,13 @@ func TestIntegration_InsertAndReadRowPost(t *testing.T) {
 	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return postRepo.Insert(ctx, fdblayer.NewTx(tr, dir), &store.Post{Id: "p1", Tags: []string{"go", "fdb", "testing"}})
+		return postRepo.Insert(fdblayer.NewTx(ctx, tr, dir), &store.Post{Id: "p1", Tags: []string{"go", "fdb", "testing"}})
 	})
 
 	var post *store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		post, err = postRepo.ReadRow(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"p1"})
+		post, err = postRepo.ReadRow(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"p1"})
 		return err
 	})
 	if post.Id != "p1" {
@@ -55,20 +55,20 @@ func TestIntegration_ScanIndexPostByTags_FanOut(t *testing.T) {
 	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
-		if err := postRepo.Insert(ctx, tx, &store.Post{Id: "p1", Tags: []string{"go", "fdb"}}); err != nil {
+		tx := fdblayer.NewTx(ctx, tr, dir)
+		if err := postRepo.Insert(tx, &store.Post{Id: "p1", Tags: []string{"go", "fdb"}}); err != nil {
 			return err
 		}
-		if err := postRepo.Insert(ctx, tx, &store.Post{Id: "p2", Tags: []string{"go", "rust"}}); err != nil {
+		if err := postRepo.Insert(tx, &store.Post{Id: "p2", Tags: []string{"go", "rust"}}); err != nil {
 			return err
 		}
-		return postRepo.Insert(ctx, tx, &store.Post{Id: "p3", Tags: []string{"rust", "wasm"}})
+		return postRepo.Insert(tx, &store.Post{Id: "p3", Tags: []string{"rust", "wasm"}})
 	})
 
 	// "go" should match p1 and p2
 	var posts []*store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.PostByTags, fdblayer.Prefix("go"), fdblayer.ScanOptions{})
+		res, err := postRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.PostByTags, fdblayer.Prefix("go"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -81,7 +81,7 @@ func TestIntegration_ScanIndexPostByTags_FanOut(t *testing.T) {
 
 	// "rust" should match p2 and p3
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.PostByTags, fdblayer.Prefix("rust"), fdblayer.ScanOptions{})
+		res, err := postRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.PostByTags, fdblayer.Prefix("rust"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -94,7 +94,7 @@ func TestIntegration_ScanIndexPostByTags_FanOut(t *testing.T) {
 
 	// "fdb" should match only p1
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.PostByTags, fdblayer.Prefix("fdb"), fdblayer.ScanOptions{})
+		res, err := postRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.PostByTags, fdblayer.Prefix("fdb"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -107,7 +107,7 @@ func TestIntegration_ScanIndexPostByTags_FanOut(t *testing.T) {
 
 	// "wasm" should match only p3
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.PostByTags, fdblayer.Prefix("wasm"), fdblayer.ScanOptions{})
+		res, err := postRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.PostByTags, fdblayer.Prefix("wasm"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -120,7 +120,7 @@ func TestIntegration_ScanIndexPostByTags_FanOut(t *testing.T) {
 
 	// Nonexistent tag
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.PostByTags, fdblayer.Prefix("python"), fdblayer.ScanOptions{})
+		res, err := postRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.PostByTags, fdblayer.Prefix("python"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -141,18 +141,18 @@ func TestIntegration_UpsertPost_FanOutIndexUpdated(t *testing.T) {
 	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return postRepo.Insert(ctx, fdblayer.NewTx(tr, dir), &store.Post{Id: "p1", Tags: []string{"alpha", "beta"}})
+		return postRepo.Insert(fdblayer.NewTx(ctx, tr, dir), &store.Post{Id: "p1", Tags: []string{"alpha", "beta"}})
 	})
 
 	// Update tags: remove "alpha", keep "beta", add "gamma"
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return postRepo.Upsert(ctx, fdblayer.NewTx(tr, dir), &store.Post{Id: "p1", Tags: []string{"beta", "gamma"}})
+		return postRepo.Upsert(fdblayer.NewTx(ctx, tr, dir), &store.Post{Id: "p1", Tags: []string{"beta", "gamma"}})
 	})
 
 	// "alpha" should no longer return any results (stale index cleared)
 	var posts []*store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.PostByTags, fdblayer.Prefix("alpha"), fdblayer.ScanOptions{})
+		res, err := postRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.PostByTags, fdblayer.Prefix("alpha"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -165,7 +165,7 @@ func TestIntegration_UpsertPost_FanOutIndexUpdated(t *testing.T) {
 
 	// "beta" should still find the post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.PostByTags, fdblayer.Prefix("beta"), fdblayer.ScanOptions{})
+		res, err := postRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.PostByTags, fdblayer.Prefix("beta"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -178,7 +178,7 @@ func TestIntegration_UpsertPost_FanOutIndexUpdated(t *testing.T) {
 
 	// "gamma" should find the post (new index entry)
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.PostByTags, fdblayer.Prefix("gamma"), fdblayer.ScanOptions{})
+		res, err := postRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.PostByTags, fdblayer.Prefix("gamma"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -199,18 +199,18 @@ func TestIntegration_DeletePost_ClearsFanOutIndex(t *testing.T) {
 	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return postRepo.Insert(ctx, fdblayer.NewTx(tr, dir), &store.Post{Id: "p1", Tags: []string{"x", "y", "z"}})
+		return postRepo.Insert(fdblayer.NewTx(ctx, tr, dir), &store.Post{Id: "p1", Tags: []string{"x", "y", "z"}})
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return postRepo.Delete(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"p1"})
+		return postRepo.Delete(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"p1"})
 	})
 
 	// All tag index entries should be cleared
 	for _, tag := range []string{"x", "y", "z"} {
 		var posts []*store.Post
 		tests.WithTx(t, db, func(tr fdb.Transaction) error {
-			res, err := postRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.PostByTags, fdblayer.Prefix(tag), fdblayer.ScanOptions{})
+			res, err := postRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.PostByTags, fdblayer.Prefix(tag), fdblayer.ScanOptions{})
 			if err != nil {
 				return err
 			}
@@ -224,7 +224,7 @@ func TestIntegration_DeletePost_ClearsFanOutIndex(t *testing.T) {
 
 	// ReadRow should fail
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		return postRepo.ReadRow(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"p1"})
+		return postRepo.ReadRow(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"p1"})
 	})
 	if err == nil {
 		t.Fatal("expected not found after delete")
@@ -240,10 +240,10 @@ func TestIntegration_ScanPost_WithFanOutIndex(t *testing.T) {
 	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
+		tx := fdblayer.NewTx(ctx, tr, dir)
 		// Create posts with multiple tags each — generates many index entries
 		for i := 0; i < 5; i++ {
-			if err := postRepo.Insert(ctx, tx, &store.Post{
+			if err := postRepo.Insert(tx, &store.Post{
 				Id:   fmt.Sprintf("p%d", i),
 				Tags: []string{"common", fmt.Sprintf("unique%d", i)},
 			}); err != nil {
@@ -257,7 +257,7 @@ func TestIntegration_ScanPost_WithFanOutIndex(t *testing.T) {
 	var result *fdblayer.Page[*store.Post]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = postRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
+		result, err = postRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
 		return err
 	})
 	if len(result.Items) != 5 {
@@ -277,9 +277,9 @@ func TestIntegration_ScanPost_Pagination(t *testing.T) {
 	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
+		tx := fdblayer.NewTx(ctx, tr, dir)
 		for i := 0; i < 5; i++ {
-			if err := postRepo.Insert(ctx, tx, &store.Post{
+			if err := postRepo.Insert(tx, &store.Post{
 				Id:   fmt.Sprintf("p%d", i),
 				Tags: []string{"t1", "t2", "t3"},
 			}); err != nil {
@@ -293,7 +293,7 @@ func TestIntegration_ScanPost_Pagination(t *testing.T) {
 	var page1 *fdblayer.Page[*store.Post]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = postRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 2})
+		page1, err = postRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 2})
 		return err
 	})
 	if len(page1.Items) != 2 {
@@ -306,7 +306,7 @@ func TestIntegration_ScanPost_Pagination(t *testing.T) {
 	var page2 *fdblayer.Page[*store.Post]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page2, err = postRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Cursor: page1.NextCursor, Limit: 2})
+		page2, err = postRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Cursor: page1.NextCursor, Limit: 2})
 		return err
 	})
 	if len(page2.Items) != 2 {
@@ -316,7 +316,7 @@ func TestIntegration_ScanPost_Pagination(t *testing.T) {
 	var page3 *fdblayer.Page[*store.Post]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page3, err = postRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Cursor: page2.NextCursor, Limit: 2})
+		page3, err = postRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Cursor: page2.NextCursor, Limit: 2})
 		return err
 	})
 	if len(page3.Items) != 1 {
@@ -336,13 +336,13 @@ func TestIntegration_Post_EmptyTags(t *testing.T) {
 	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return postRepo.Insert(ctx, fdblayer.NewTx(tr, dir), &store.Post{Id: "p1", Tags: []string{}})
+		return postRepo.Insert(fdblayer.NewTx(ctx, tr, dir), &store.Post{Id: "p1", Tags: []string{}})
 	})
 
 	var post *store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		post, err = postRepo.ReadRow(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"p1"})
+		post, err = postRepo.ReadRow(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"p1"})
 		return err
 	})
 	if post.Id != "p1" {
@@ -362,9 +362,9 @@ func TestIntegration_ReadRowsPost(t *testing.T) {
 	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
+		tx := fdblayer.NewTx(ctx, tr, dir)
 		for _, id := range []string{"p1", "p2", "p3"} {
-			if err := postRepo.Insert(ctx, tx, &store.Post{Id: id, Tags: []string{"tag"}}); err != nil {
+			if err := postRepo.Insert(tx, &store.Post{Id: id, Tags: []string{"tag"}}); err != nil {
 				return err
 			}
 		}
@@ -374,7 +374,7 @@ func TestIntegration_ReadRowsPost(t *testing.T) {
 	var result []*store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = postRepo.ReadRows(ctx, fdblayer.NewTx(tr, dir), []fdblayer.Key{{"p1"}, {"p2"}, {"p3"}})
+		result, err = postRepo.ReadRows(fdblayer.NewTx(ctx, tr, dir), []fdblayer.Key{{"p1"}, {"p2"}, {"p3"}})
 		return err
 	})
 	if len(result) != 3 {
@@ -395,21 +395,21 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 	postRepo := store.NewPostRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
+		tx := fdblayer.NewTx(ctx, tr, dir)
 		// Create entities of all types simultaneously
-		if err := userRepo.Insert(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"}); err != nil {
+		if err := userRepo.Insert(tx, &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"}); err != nil {
 			return err
 		}
-		if err := productRepo.Insert(ctx, tx, &store.Product{Id: "pr1", Name: "Widget", Category: "tools", Price: 10}); err != nil {
+		if err := productRepo.Insert(tx, &store.Product{Id: "pr1", Name: "Widget", Category: "tools", Price: 10}); err != nil {
 			return err
 		}
-		return postRepo.Insert(ctx, tx, &store.Post{Id: "po1", Tags: []string{"go"}})
+		return postRepo.Insert(tx, &store.Post{Id: "po1", Tags: []string{"go"}})
 	})
 
 	// Each type's operations should be completely isolated
 	var users []*store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := userRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.UserByEmail, fdblayer.Prefix("a@test.com"), fdblayer.ScanOptions{})
+		res, err := userRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.UserByEmail, fdblayer.Prefix("a@test.com"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -422,7 +422,7 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 
 	var posts []*store.Post
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := postRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.PostByTags, fdblayer.Prefix("go"), fdblayer.ScanOptions{})
+		res, err := postRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.PostByTags, fdblayer.Prefix("go"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -437,7 +437,7 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 	var userResult *fdblayer.Page[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		userResult, err = userRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
+		userResult, err = userRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
 		return err
 	})
 	if len(userResult.Items) != 1 {
@@ -447,7 +447,7 @@ func TestIntegration_CrossTypeIsolation_ComplexIndexes(t *testing.T) {
 	var postResult *fdblayer.Page[*store.Post]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		postResult, err = postRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
+		postResult, err = postRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
 		return err
 	})
 	if len(postResult.Items) != 1 {
@@ -467,24 +467,24 @@ func TestIntegration_QueueEnqueueDequeue(t *testing.T) {
 	// to verify global FIFO ordering by versionstamp rather than shard_id.
 	task1 := &store.TaskMessage{QueueName: "test_queue", ShardId: 3, Payload: []byte("task 1")}
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return taskRepo.Enqueue(ctx, fdblayer.NewTx(tr, dir), task1)
+		return taskRepo.Enqueue(fdblayer.NewTx(ctx, tr, dir), task1)
 	})
 
 	task2 := &store.TaskMessage{QueueName: "test_queue", ShardId: 1, Payload: []byte("task 2")}
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return taskRepo.Enqueue(ctx, fdblayer.NewTx(tr, dir), task2)
+		return taskRepo.Enqueue(fdblayer.NewTx(ctx, tr, dir), task2)
 	})
 
 	task3 := &store.TaskMessage{QueueName: "test_queue", ShardId: 2, Payload: []byte("task 3")}
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return taskRepo.Enqueue(ctx, fdblayer.NewTx(tr, dir), task3)
+		return taskRepo.Enqueue(fdblayer.NewTx(ctx, tr, dir), task3)
 	})
 
 	// 2. Dequeue tasks and verify FIFO order across shards
 	var dequeued1 *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		dequeued1, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"test_queue"})
+		dequeued1, err = taskRepo.Dequeue(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"test_queue"})
 		return err
 	})
 	if dequeued1 == nil || string(dequeued1.Payload) != "task 1" || dequeued1.ShardId != 3 {
@@ -494,7 +494,7 @@ func TestIntegration_QueueEnqueueDequeue(t *testing.T) {
 	var dequeued2 *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		dequeued2, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"test_queue"})
+		dequeued2, err = taskRepo.Dequeue(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"test_queue"})
 		return err
 	})
 	if dequeued2 == nil || string(dequeued2.Payload) != "task 2" || dequeued2.ShardId != 1 {
@@ -504,7 +504,7 @@ func TestIntegration_QueueEnqueueDequeue(t *testing.T) {
 	var dequeued3 *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		dequeued3, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"test_queue"})
+		dequeued3, err = taskRepo.Dequeue(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"test_queue"})
 		return err
 	})
 	if dequeued3 == nil || string(dequeued3.Payload) != "task 3" || dequeued3.ShardId != 2 {
@@ -515,7 +515,7 @@ func TestIntegration_QueueEnqueueDequeue(t *testing.T) {
 	var emptyResult *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		emptyResult, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"test_queue"})
+		emptyResult, err = taskRepo.Dequeue(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"test_queue"})
 		return err
 	})
 	if emptyResult != nil {
@@ -534,20 +534,20 @@ func TestIntegration_MultipleQueues(t *testing.T) {
 	// 1. Enqueue task A to queue_A
 	taskA := &store.TaskMessage{QueueName: "queue_A", ShardId: 1, Payload: []byte("task A")}
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return taskRepo.Enqueue(ctx, fdblayer.NewTx(tr, dir), taskA)
+		return taskRepo.Enqueue(fdblayer.NewTx(ctx, tr, dir), taskA)
 	})
 
 	// 2. Enqueue task B to queue_B
 	taskB := &store.TaskMessage{QueueName: "queue_B", ShardId: 1, Payload: []byte("task B")}
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return taskRepo.Enqueue(ctx, fdblayer.NewTx(tr, dir), taskB)
+		return taskRepo.Enqueue(fdblayer.NewTx(ctx, tr, dir), taskB)
 	})
 
 	// 3. Dequeue from queue_A and verify it is task A
 	var dequeuedA *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		dequeuedA, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"queue_A"})
+		dequeuedA, err = taskRepo.Dequeue(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"queue_A"})
 		return err
 	})
 	if dequeuedA == nil || string(dequeuedA.Payload) != "task A" {
@@ -558,7 +558,7 @@ func TestIntegration_MultipleQueues(t *testing.T) {
 	var dequeuedB *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		dequeuedB, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"queue_B"})
+		dequeuedB, err = taskRepo.Dequeue(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"queue_B"})
 		return err
 	})
 	if dequeuedB == nil || string(dequeuedB.Payload) != "task B" {
@@ -569,7 +569,7 @@ func TestIntegration_MultipleQueues(t *testing.T) {
 	var emptyA *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		emptyA, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"queue_A"})
+		emptyA, err = taskRepo.Dequeue(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"queue_A"})
 		return err
 	})
 	if emptyA != nil {
@@ -579,7 +579,7 @@ func TestIntegration_MultipleQueues(t *testing.T) {
 	var emptyB *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		emptyB, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"queue_B"})
+		emptyB, err = taskRepo.Dequeue(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"queue_B"})
 		return err
 	})
 	if emptyB != nil {
@@ -597,15 +597,15 @@ func TestIntegration_QueueSameTransactionEnqueue(t *testing.T) {
 
 	// Enqueue two tasks with the SAME QueueName and ShardId in a SINGLE transaction.
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
-		if err := taskRepo.Enqueue(ctx, tx, &store.TaskMessage{
+		tx := fdblayer.NewTx(ctx, tr, dir)
+		if err := taskRepo.Enqueue(tx, &store.TaskMessage{
 			QueueName: "batch_q",
 			ShardId:   1,
 			Payload:   []byte("first"),
 		}); err != nil {
 			return err
 		}
-		return taskRepo.Enqueue(ctx, tx, &store.TaskMessage{
+		return taskRepo.Enqueue(tx, &store.TaskMessage{
 			QueueName: "batch_q",
 			ShardId:   1,
 			Payload:   []byte("second"),
@@ -615,7 +615,7 @@ func TestIntegration_QueueSameTransactionEnqueue(t *testing.T) {
 	var d1, d2 *store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		d1, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"batch_q"})
+		d1, err = taskRepo.Dequeue(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"batch_q"})
 		return err
 	})
 	if d1 == nil || string(d1.Payload) != "first" || len(d1.Versionstamp) != 12 {
@@ -624,7 +624,7 @@ func TestIntegration_QueueSameTransactionEnqueue(t *testing.T) {
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		d2, err = taskRepo.Dequeue(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"batch_q"})
+		d2, err = taskRepo.Dequeue(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"batch_q"})
 		return err
 	})
 	if d2 == nil || string(d2.Payload) != "second" || len(d2.Versionstamp) != 12 {
@@ -655,14 +655,14 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	}
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return orderRepo.Insert(ctx, fdblayer.NewTx(tr, dir), order1)
+		return orderRepo.Insert(fdblayer.NewTx(ctx, tr, dir), order1)
 	})
 
 	pk := fdblayer.Key{"acme", int32(101)}
 	var got *store.Order
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		got, err = orderRepo.ReadRow(ctx, fdblayer.NewTx(tr, dir), pk)
+		got, err = orderRepo.ReadRow(fdblayer.NewTx(ctx, tr, dir), pk)
 		return err
 	})
 	if got.Priority != store.Order_PRIORITY_HIGH || got.Address.GetCity() != "Zurich" {
@@ -672,7 +672,7 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	// Compound index lookup
 	var byStatus []*store.Order
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := orderRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING, int64(1700000000)), fdblayer.ScanOptions{})
+		res, err := orderRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING, int64(1700000000)), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -686,7 +686,7 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	// Scalar bytes index lookup
 	var byReceipt []*store.Order
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := orderRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.OrderByReceiptHash, fdblayer.Prefix([]byte{0xAA, 0xBB, 0x01}), fdblayer.ScanOptions{})
+		res, err := orderRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.OrderByReceiptHash, fdblayer.Prefix([]byte{0xAA, 0xBB, 0x01}), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -700,7 +700,7 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	// Fan-out repeated bytes index lookup
 	var byAttach []*store.Order
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := orderRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.OrderByAttachmentHashes, fdblayer.Prefix([]byte{0x10, 0x20}), fdblayer.ScanOptions{})
+		res, err := orderRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.OrderByAttachmentHashes, fdblayer.Prefix([]byte{0x10, 0x20}), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -713,7 +713,7 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 
 	// Update via Upsert
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return orderRepo.Upsert(ctx, fdblayer.NewTx(tr, dir), &store.Order{
+		return orderRepo.Upsert(fdblayer.NewTx(ctx, tr, dir), &store.Order{
 			TenantId:         "acme",
 			OrderSeq:         101,
 			Status:           store.OrderStatus_ORDER_STATUS_SHIPPED,
@@ -725,7 +725,7 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := orderRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING, int64(1700000000)), fdblayer.ScanOptions{})
+		res, err := orderRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING, int64(1700000000)), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -737,7 +737,7 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 	}
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := orderRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.OrderByAttachmentHashes, fdblayer.Prefix([]byte{0x50, 0x60}), fdblayer.ScanOptions{})
+		res, err := orderRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.OrderByAttachmentHashes, fdblayer.Prefix([]byte{0x50, 0x60}), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -750,10 +750,10 @@ func TestIntegration_Order_CompoundPKAndIndexes(t *testing.T) {
 
 	// Delete
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return orderRepo.Delete(ctx, fdblayer.NewTx(tr, dir), pk)
+		return orderRepo.Delete(fdblayer.NewTx(ctx, tr, dir), pk)
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := orderRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_SHIPPED, int64(1700000000)), fdblayer.ScanOptions{})
+		res, err := orderRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_SHIPPED, int64(1700000000)), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -776,15 +776,15 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	// 1. Insert two AuditLog entities in the same transaction with initial Views,
 	// standard index (Actor), and fan-out index (Tags).
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
-		if err := auditRepo.Insert(ctx, tx, &store.AuditLog{
+		tx := fdblayer.NewTx(ctx, tr, dir)
+		if err := auditRepo.Insert(tx, &store.AuditLog{
 			Actor: "alice",
 			Tags:  []string{"auth", "login"},
 			Views: 10,
 		}); err != nil {
 			return err
 		}
-		return auditRepo.Insert(ctx, tx, &store.AuditLog{
+		return auditRepo.Insert(tx, &store.AuditLog{
 			Actor: "bob",
 			Tags:  []string{"auth", "logout"},
 			Views: 5,
@@ -795,7 +795,7 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	var listed *fdblayer.Page[*store.AuditLog]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		listed, err = auditRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
+		listed, err = auditRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
 		return err
 	})
 	if len(listed.Items) != 2 || len(listed.Items[0].LogId) != 12 || len(listed.Items[1].LogId) != 12 {
@@ -814,7 +814,7 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	var got *store.AuditLog
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		got, err = auditRepo.ReadRow(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{firstID})
+		got, err = auditRepo.ReadRow(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{firstID})
 		return err
 	})
 	if got.Actor != "alice" || !bytes.Equal(got.LogId, firstID) || got.Views != 10 {
@@ -824,13 +824,13 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	// 4. Query by standard index (AuditLogByActor) and fan-out index (AuditLogByTags)
 	var byActor, byTagAuth []*store.AuditLog
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
-		resActor, err := auditRepo.ScanIndex(ctx, tx, store.AuditLogByActor, fdblayer.Prefix("alice"), fdblayer.ScanOptions{})
+		tx := fdblayer.NewTx(ctx, tr, dir)
+		resActor, err := auditRepo.ScanIndex(tx, store.AuditLogByActor, fdblayer.Prefix("alice"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
 		byActor = resActor.Items
-		resTag, err := auditRepo.ScanIndex(ctx, tx, store.AuditLogByTags, fdblayer.Prefix("auth"), fdblayer.ScanOptions{})
+		resTag, err := auditRepo.ScanIndex(tx, store.AuditLogByTags, fdblayer.Prefix("auth"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -848,7 +848,7 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	var batchRes []*store.AuditLog
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		batchRes, err = auditRepo.ReadRows(ctx, fdblayer.NewTx(tr, dir), []fdblayer.Key{{firstID}, {secondID}})
+		batchRes, err = auditRepo.ReadRows(fdblayer.NewTx(ctx, tr, dir), []fdblayer.Key{{firstID}, {secondID}})
 		return err
 	})
 	if len(batchRes) != 2 {
@@ -866,8 +866,8 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	// 6. Upsert on existing entity updates in-place (preserving LogId) and updates indexes;
 	// Upsert on empty LogId creates a new entity.
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
-		if err := auditRepo.Upsert(ctx, tx, &store.AuditLog{
+		tx := fdblayer.NewTx(ctx, tr, dir)
+		if err := auditRepo.Upsert(tx, &store.AuditLog{
 			LogId: firstID,
 			Actor: "alice_admin",
 			Tags:  []string{"auth", "elevated"},
@@ -875,7 +875,7 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 		}); err != nil {
 			return err
 		}
-		return auditRepo.Upsert(ctx, tx, &store.AuditLog{
+		return auditRepo.Upsert(tx, &store.AuditLog{
 			Actor: "charlie",
 			Tags:  []string{"audit"},
 			Views: 3,
@@ -884,32 +884,32 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 
 	var oldActor, newActor, oldTag, newTag, charlieLogs []*store.AuditLog
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
+		tx := fdblayer.NewTx(ctx, tr, dir)
 		var err error
-		if got, err = auditRepo.ReadRow(ctx, tx, fdblayer.Key{firstID}); err != nil {
+		if got, err = auditRepo.ReadRow(tx, fdblayer.Key{firstID}); err != nil {
 			return err
 		}
-		res, err := auditRepo.ScanIndex(ctx, tx, store.AuditLogByActor, fdblayer.Prefix("alice"), fdblayer.ScanOptions{})
+		res, err := auditRepo.ScanIndex(tx, store.AuditLogByActor, fdblayer.Prefix("alice"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
 		oldActor = res.Items
-		res, err = auditRepo.ScanIndex(ctx, tx, store.AuditLogByActor, fdblayer.Prefix("alice_admin"), fdblayer.ScanOptions{})
+		res, err = auditRepo.ScanIndex(tx, store.AuditLogByActor, fdblayer.Prefix("alice_admin"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
 		newActor = res.Items
-		res, err = auditRepo.ScanIndex(ctx, tx, store.AuditLogByTags, fdblayer.Prefix("login"), fdblayer.ScanOptions{})
+		res, err = auditRepo.ScanIndex(tx, store.AuditLogByTags, fdblayer.Prefix("login"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
 		oldTag = res.Items
-		res, err = auditRepo.ScanIndex(ctx, tx, store.AuditLogByTags, fdblayer.Prefix("elevated"), fdblayer.ScanOptions{})
+		res, err = auditRepo.ScanIndex(tx, store.AuditLogByTags, fdblayer.Prefix("elevated"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
 		newTag = res.Items
-		res, err = auditRepo.ScanIndex(ctx, tx, store.AuditLogByActor, fdblayer.Prefix("charlie"), fdblayer.ScanOptions{})
+		res, err = auditRepo.ScanIndex(tx, store.AuditLogByActor, fdblayer.Prefix("charlie"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -932,15 +932,15 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 	// 7b. Scan pagination with raw []byte Cursor and invalid Upsert length check
 	var pageFromSecond *fdblayer.Page[*store.AuditLog]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
-		if err := auditRepo.Upsert(ctx, tx, &store.AuditLog{
+		tx := fdblayer.NewTx(ctx, tr, dir)
+		if err := auditRepo.Upsert(tx, &store.AuditLog{
 			LogId: []byte{1, 2, 3},
 			Actor: "invalid",
 		}); err == nil {
 			t.Fatalf("expected Upsert with 3-byte LogId to fail")
 		}
 		var err error
-		pageFromSecond, err = auditRepo.Scan(ctx, tx, fdblayer.AllKeys(), fdblayer.ScanOptions{
+		pageFromSecond, err = auditRepo.Scan(tx, fdblayer.AllKeys(), fdblayer.ScanOptions{
 			Cursor: fdblayer.Key{secondID},
 			Limit:  1,
 		})
@@ -952,21 +952,21 @@ func TestIntegration_AuditLog_NonQueueVersionstampPK(t *testing.T) {
 
 	// 8. Delete clears primary record, standard index, and fan-out index
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return auditRepo.Delete(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{firstID})
+		return auditRepo.Delete(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{firstID})
 	})
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
-		res, err := auditRepo.ScanIndex(ctx, tx, store.AuditLogByActor, fdblayer.Prefix("alice_admin"), fdblayer.ScanOptions{})
+		tx := fdblayer.NewTx(ctx, tr, dir)
+		res, err := auditRepo.ScanIndex(tx, store.AuditLogByActor, fdblayer.Prefix("alice_admin"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
 		newActor = res.Items
-		res, err = auditRepo.ScanIndex(ctx, tx, store.AuditLogByTags, fdblayer.Prefix("elevated"), fdblayer.ScanOptions{})
+		res, err = auditRepo.ScanIndex(tx, store.AuditLogByTags, fdblayer.Prefix("elevated"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
 		newTag = res.Items
-		res, err = auditRepo.ScanIndex(ctx, tx, store.AuditLogByTags, fdblayer.Prefix("auth"), fdblayer.ScanOptions{})
+		res, err = auditRepo.ScanIndex(tx, store.AuditLogByTags, fdblayer.Prefix("auth"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -993,9 +993,9 @@ func TestIntegration_DequeueBatch_AndPrefixReverseScanOrder(t *testing.T) {
 	// 1. Enqueue 3 messages in the same transaction (including pre-filled Versionstamp)
 	// and dequeue in batches of 2 then 2.
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
+		tx := fdblayer.NewTx(ctx, tr, dir)
 		for i := 1; i <= 3; i++ {
-			if err := taskRepo.Enqueue(ctx, tx, &store.TaskMessage{
+			if err := taskRepo.Enqueue(tx, &store.TaskMessage{
 				QueueName:    "batch_live",
 				ShardId:      uint32(i),
 				Versionstamp: []byte{9, 9, 9},
@@ -1010,7 +1010,7 @@ func TestIntegration_DequeueBatch_AndPrefixReverseScanOrder(t *testing.T) {
 	var batch1, batch2 []*store.TaskMessage
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		batch1, err = taskRepo.DequeueBatch(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"batch_live"}, 2)
+		batch1, err = taskRepo.DequeueBatch(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"batch_live"}, 2)
 		return err
 	})
 	if len(batch1) != 2 || string(batch1[0].Payload) != "msg-1" || string(batch1[1].Payload) != "msg-2" || len(batch1[0].Versionstamp) != 12 {
@@ -1019,7 +1019,7 @@ func TestIntegration_DequeueBatch_AndPrefixReverseScanOrder(t *testing.T) {
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		batch2, err = taskRepo.DequeueBatch(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"batch_live"}, 2)
+		batch2, err = taskRepo.DequeueBatch(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"batch_live"}, 2)
 		return err
 	})
 	if len(batch2) != 1 || string(batch2[0].Payload) != "msg-3" {
@@ -1028,9 +1028,9 @@ func TestIntegration_DequeueBatch_AndPrefixReverseScanOrder(t *testing.T) {
 
 	// 2. Prefix + Reverse pagination on compound PK Order in live FDB
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
+		tx := fdblayer.NewTx(ctx, tr, dir)
 		for _, seq := range []int32{10, 20, 30} {
-			if err := orderRepo.Insert(ctx, tx, &store.Order{
+			if err := orderRepo.Insert(tx, &store.Order{
 				TenantId: "tenant_a",
 				OrderSeq: seq,
 				Status:   store.OrderStatus_ORDER_STATUS_PENDING,
@@ -1038,7 +1038,7 @@ func TestIntegration_DequeueBatch_AndPrefixReverseScanOrder(t *testing.T) {
 				return err
 			}
 		}
-		return orderRepo.Insert(ctx, tx, &store.Order{
+		return orderRepo.Insert(tx, &store.Order{
 			TenantId: "tenant_b",
 			OrderSeq: 99,
 			Status:   store.OrderStatus_ORDER_STATUS_PENDING,
@@ -1048,16 +1048,16 @@ func TestIntegration_DequeueBatch_AndPrefixReverseScanOrder(t *testing.T) {
 	var page1, page2 *fdblayer.Page[*store.Order]
 	var byPK []*store.Order
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
+		tx := fdblayer.NewTx(ctx, tr, dir)
 		var err error
-		page1, err = orderRepo.Scan(ctx, tx, fdblayer.Prefix("tenant_a"), fdblayer.ScanOptions{
+		page1, err = orderRepo.Scan(tx, fdblayer.Prefix("tenant_a"), fdblayer.ScanOptions{
 			Limit:   2,
 			Reverse: true,
 		})
 		if err != nil {
 			return err
 		}
-		page2, err = orderRepo.Scan(ctx, tx, fdblayer.Prefix("tenant_a"), fdblayer.ScanOptions{
+		page2, err = orderRepo.Scan(tx, fdblayer.Prefix("tenant_a"), fdblayer.ScanOptions{
 			Cursor:  page1.NextCursor,
 			Limit:   2,
 			Reverse: true,
@@ -1065,7 +1065,7 @@ func TestIntegration_DequeueBatch_AndPrefixReverseScanOrder(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		byPK, err = orderRepo.ReadRows(ctx, tx, []fdblayer.Key{
+		byPK, err = orderRepo.ReadRows(tx, []fdblayer.Key{
 			{"tenant_a", int32(10)},
 			{"tenant_b", int32(99)},
 		})
@@ -1085,33 +1085,33 @@ func TestIntegration_DequeueBatch_AndPrefixReverseScanOrder(t *testing.T) {
 	var allPending []*store.Order
 	var statusFwd1, statusFwd2, statusRev1, statusRev2 *fdblayer.Page[*store.Order]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
-		res, err := orderRepo.ScanIndex(ctx, tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{})
+		tx := fdblayer.NewTx(ctx, tr, dir)
+		res, err := orderRepo.ScanIndex(tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
 		allPending = res.Items
-		statusFwd1, err = orderRepo.ScanIndex(ctx, tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{
+		statusFwd1, err = orderRepo.ScanIndex(tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{
 			Limit: 2,
 		})
 		if err != nil {
 			return err
 		}
-		statusFwd2, err = orderRepo.ScanIndex(ctx, tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{
+		statusFwd2, err = orderRepo.ScanIndex(tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{
 			Cursor: statusFwd1.NextCursor,
 			Limit:  3,
 		})
 		if err != nil {
 			return err
 		}
-		statusRev1, err = orderRepo.ScanIndex(ctx, tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{
+		statusRev1, err = orderRepo.ScanIndex(tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{
 			Limit:   2,
 			Reverse: true,
 		})
 		if err != nil {
 			return err
 		}
-		statusRev2, err = orderRepo.ScanIndex(ctx, tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{
+		statusRev2, err = orderRepo.ScanIndex(tx, store.OrderByStatusCreatedAt, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.ScanOptions{
 			Cursor:  statusRev1.NextCursor,
 			Limit:   3,
 			Reverse: true,

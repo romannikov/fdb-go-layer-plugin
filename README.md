@@ -9,16 +9,17 @@ The compiler is structured around a **language-neutral Intermediate Representati
 ## Supported Features
 
 - **Uniform `Repository[T]` Operations**: Every standard record repository implements `fdblayer.Repository[*Msg]` with 7 methods:
-  - `Insert(ctx, tx, entity)`: Inserts a new record, returning `fdblayer.ErrAlreadyExists` if the primary key already exists.
-  - `Upsert(ctx, tx, entity)`: Inserts or updates a record in-place with minimal-write index delta maintenance.
-  - `Delete(ctx, tx, key)`: Deletes a record by `fdblayer.Key` and clears all secondary/fan-out index entries.
-  - `ReadRow(ctx, tx, key)`: Reads a single record by `fdblayer.Key` (`fdblayer.ErrNotFound` if missing).
-  - `ReadRows(ctx, tx, keys)`: Pipelined parallel batch fetch by `[]fdblayer.Key` in 1 RTT.
-  - `Scan(ctx, tx, rng, opts)`: Cursor-paginated primary key scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)`, or `fdblayer.Range(begin, end)`.
-  - `ScanIndex(ctx, tx, index, rng, opts)`: Cursor-paginated secondary/fan-out index scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)` (exact or partial leading prefix), or `fdblayer.Range(begin, end)` using generated `<Msg>By<Fields>` `fdblayer.IndexID` constants.
+  - `Insert(tx, entity)`: Inserts a new record, returning `fdblayer.ErrAlreadyExists` if the primary key already exists.
+  - `Upsert(tx, entity)`: Inserts or updates a record in-place with minimal-write index delta maintenance.
+  - `Delete(tx, key)`: Deletes a record by `fdblayer.Key` and clears all secondary/fan-out index entries.
+  - `ReadRow(tx, key)`: Reads a single record by `fdblayer.Key` (`fdblayer.ErrNotFound` if missing).
+  - `ReadRows(tx, keys)`: Pipelined parallel batch fetch by `[]fdblayer.Key` in 1 RTT.
+  - `Scan(tx, rng, opts)`: Cursor-paginated primary key scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)`, or `fdblayer.Range(begin, end)`.
+  - `ScanIndex(tx, index, rng, opts)`: Cursor-paginated secondary/fan-out index scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)` (exact or partial leading prefix), or `fdblayer.Range(begin, end)` using generated `<Msg>By<Fields>` `fdblayer.IndexID` constants.
+- **Ergonomic `fdblayer.Transact` & `fdblayer.TransactVal`**: `fdblayer.Transact(ctx, db, dir, func(tx *fdblayer.Tx) error { ... })` runs a FoundationDB transaction with a fresh `*fdblayer.Tx` (carrying `context.Context` and the per-transaction user-version sequence) on every retry attempt.
 - **Primary Keys**: Support for custom primary keys (`option (annotations.primary_key) = { fields: [...] };`), including single-field and compound keys composed of scalar, `bytes`, or `enum` fields.
 - **Secondary & Fan-Out Indexes**: Support for single-field and composite secondary indexes with explicit `id` (`> 0`), automatic maintenance on `Insert`, `Upsert`, and `Delete`, exact/prefix/range queries via `ScanIndex`, and **fan-out** indexes on `repeated` fields with deduplication and minimal-write delta updates.
-- **Time Versionstamps**: Support for FDB 12-byte versionstamps (`[(annotations.is_versionstamp) = true]`) to order records by commit time, with per-transaction user version monotonicity scoped to `*fdblayer.Tx` (`fdblayer.NewTx(tr, dir)`).
+- **Time Versionstamps**: Support for FDB 12-byte versionstamps (`[(annotations.is_versionstamp) = true]`) to order records by commit time, with per-transaction user version monotonicity scoped to `*fdblayer.Tx`.
 - **Queue Support**: Built-in support for FIFO queues (`option (annotations.is_queue) = true;`) implementing `fdblayer.QueueRepository[*Msg]` (`Enqueue`, `Dequeue`, `DequeueBatch`) ordered by commit versionstamp.
 - **Unified Store**: Support for both standard data records and queue messages within the same system and `directory.DirectorySubspace`.
 - **Shared Protobuf Annotations (`proto/fdb-layer/annotations.proto`)**: Single source of truth for compile-time message `type_id`s, primary keys, secondary/fan-out indexes, versionstamped primary keys, and FIFO queues. Reserved options (`mutation`, `interleave`, `split_large_records`, `ttl_field`, and `SecondaryIndex` options `unique`, `storing`, `sparse`, `aggregate`, `aggregate_field`) are documented in `annotations.proto` with `// [NOT IMPLEMENTED YET]` and rejected at compile time if specified.
@@ -129,12 +130,14 @@ If you want to ensure that all data belonging to a specific user is stored toget
 
 `app_state/user_id/...`
 
-In code, create the subspace and wrap it in `*fdblayer.Tx`:
+In code, create the subspace and pass it to `fdblayer.Transact`:
 
 ```go
 userDir, _ := directory.CreateOrOpen(db, []string{"app_state", "u123"}, nil)
-tx := fdblayer.NewTx(tr, userDir)
-// Pass tx to repository methods
+err := fdblayer.Transact(ctx, db, userDir, func(tx *fdblayer.Tx) error {
+	// Pass tx to repository methods
+	return nil
+})
 ```
 
 This ensures all records and secondary indexes for `"u123"` are stored in a single contiguous key range.
@@ -195,42 +198,35 @@ func main() {
 	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
 	userRepo := generated.NewUserRepository()
 
-	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		tx := fdblayer.NewTx(tr, dataDir)
-
+	err := fdblayer.Transact(ctx, db, dataDir, func(tx *fdblayer.Tx) error {
 		// Insert a new user (fails with fdblayer.ErrAlreadyExists if PK exists)
 		user := &generated.User{Id: "u123", Email: "user@example.com", Name: "John"}
-		if err := userRepo.Insert(ctx, tx, user); err != nil {
-			return nil, err
+		if err := userRepo.Insert(tx, user); err != nil {
+			return err
 		}
 
 		// Read a single user by Primary Key
-		u, err := userRepo.ReadRow(ctx, tx, fdblayer.Key{"u123"})
+		u, err := userRepo.ReadRow(tx, fdblayer.Key{"u123"})
 		if err != nil {
-			return nil, err
+			return err
 		}
 		fmt.Println("Found user:", u.Name)
 
 		// Scan by Secondary Index (exact or leading prefix match)
 		page, err := userRepo.ScanIndex(
-			ctx,
 			tx,
 			generated.UserByEmail,
 			fdblayer.Prefix("user@example.com"),
 			fdblayer.ScanOptions{Limit: 10},
 		)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		fmt.Println("Found users by email:", len(page.Items))
 
 		// Upsert user (updates record and maintains secondary index deltas)
 		user.Name = "John Doe"
-		if err := userRepo.Upsert(ctx, tx, user); err != nil {
-			return nil, err
-		}
-
-		return nil, nil
+		return userRepo.Upsert(tx, user)
 	})
 	if err != nil {
 		panic(err)
@@ -286,13 +282,11 @@ func main() {
 	userRepo := generated.NewUserRepository()
 	taskRepo := generated.NewTaskRepository()
 
-	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		tx := fdblayer.NewTx(tr, dataDir)
-
+	err := fdblayer.Transact(ctx, db, dataDir, func(tx *fdblayer.Tx) error {
 		// Insert a user
 		user := &generated.User{Id: "u123", Email: "user@example.com", Name: "John"}
-		if err := userRepo.Insert(ctx, tx, user); err != nil {
-			return nil, err
+		if err := userRepo.Insert(tx, user); err != nil {
+			return err
 		}
 
 		// Enqueue a task to send a welcome email in the same transaction
@@ -304,11 +298,7 @@ func main() {
 			ShardId: uint32(rand.Intn(10)),
 			Payload: []byte("u123"), // Reference the user ID in payload
 		}
-		if err := taskRepo.Enqueue(ctx, tx, task); err != nil {
-			return nil, err
-		}
-
-		return nil, nil
+		return taskRepo.Enqueue(tx, task)
 	})
 	if err != nil {
 		panic(err)
@@ -346,13 +336,11 @@ func main() {
 	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
 	taskRepo := generated.NewTaskRepository()
 
-	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		tx := fdblayer.NewTx(tr, dataDir)
-
+	err := fdblayer.Transact(ctx, db, dataDir, func(tx *fdblayer.Tx) error {
 		// Dequeue the oldest task (returns nil, nil if the queue is empty)
-		task, err := taskRepo.Dequeue(ctx, tx, "send-email")
+		task, err := taskRepo.Dequeue(tx, fdblayer.Key{"send-email"})
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		if task != nil {
@@ -362,7 +350,7 @@ func main() {
 		} else {
 			fmt.Println("No tasks in queue.")
 		}
-		return nil, nil
+		return nil
 	})
 	if err != nil {
 		panic(err)

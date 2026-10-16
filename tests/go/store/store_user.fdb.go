@@ -4,7 +4,6 @@
 package store
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -34,8 +33,8 @@ func NewUserRepository() UserRepository {
 }
 
 // Insert creates a new User entity in the database.
-func (r *userRepository) Insert(ctx context.Context, tx *fdblayer.Tx, entity *User) error {
-	if err := ctx.Err(); err != nil {
+func (r *userRepository) Insert(tx *fdblayer.Tx, entity *User) error {
+	if err := tx.Context().Err(); err != nil {
 		return err
 	}
 	if entity == nil {
@@ -63,8 +62,8 @@ func (r *userRepository) Insert(ctx context.Context, tx *fdblayer.Tx, entity *Us
 }
 
 // Upsert inserts a new User entity or updates an existing one in the database.
-func (r *userRepository) Upsert(ctx context.Context, tx *fdblayer.Tx, entity *User) error {
-	if err := ctx.Err(); err != nil {
+func (r *userRepository) Upsert(tx *fdblayer.Tx, entity *User) error {
+	if err := tx.Context().Err(); err != nil {
 		return err
 	}
 	if entity == nil {
@@ -105,8 +104,8 @@ func (r *userRepository) Upsert(ctx context.Context, tx *fdblayer.Tx, entity *Us
 }
 
 // Delete removes a User entity from the database by its primary key.
-func (r *userRepository) Delete(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) error {
-	if err := ctx.Err(); err != nil {
+func (r *userRepository) Delete(tx *fdblayer.Tx, key fdblayer.Key) error {
+	if err := tx.Context().Err(); err != nil {
 		return err
 	}
 	tr := tx.Transaction()
@@ -131,8 +130,8 @@ func (r *userRepository) Delete(ctx context.Context, tx *fdblayer.Tx, key fdblay
 }
 
 // ReadRow retrieves a single User entity by its primary key.
-func (r *userRepository) ReadRow(ctx context.Context, tx *fdblayer.Tx, key fdblayer.Key) (*User, error) {
-	if err := ctx.Err(); err != nil {
+func (r *userRepository) ReadRow(tx *fdblayer.Tx, key fdblayer.Key) (*User, error) {
+	if err := tx.Context().Err(); err != nil {
 		return nil, err
 	}
 	tr := tx.Transaction()
@@ -154,8 +153,8 @@ func (r *userRepository) ReadRow(ctx context.Context, tx *fdblayer.Tx, key fdbla
 }
 
 // ReadRows retrieves multiple User entities by their primary keys in parallel.
-func (r *userRepository) ReadRows(ctx context.Context, tx *fdblayer.Tx, keys []fdblayer.Key) ([]*User, error) {
-	if err := ctx.Err(); err != nil {
+func (r *userRepository) ReadRows(tx *fdblayer.Tx, keys []fdblayer.Key) ([]*User, error) {
+	if err := tx.Context().Err(); err != nil {
 		return nil, err
 	}
 	if len(keys) == 0 {
@@ -165,7 +164,7 @@ func (r *userRepository) ReadRows(ctx context.Context, tx *fdblayer.Tx, keys []f
 	dir := tx.Dir()
 	futures := make([]fdb.FutureByteSlice, len(keys))
 	for i, key := range keys {
-		if err := ctx.Err(); err != nil {
+		if err := tx.Context().Err(); err != nil {
 			return nil, err
 		}
 		_, dataKey, err := fdblayer.PackPrimaryKey(dir, UserTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
@@ -176,7 +175,7 @@ func (r *userRepository) ReadRows(ctx context.Context, tx *fdblayer.Tx, keys []f
 	}
 	entities := make([]*User, 0, len(keys))
 	for i, future := range futures {
-		if err := ctx.Err(); err != nil {
+		if err := tx.Context().Err(); err != nil {
 			return nil, err
 		}
 		value := future.MustGet()
@@ -193,8 +192,8 @@ func (r *userRepository) ReadRows(ctx context.Context, tx *fdblayer.Tx, keys []f
 }
 
 // Scan performs a paginated range or prefix scan over User primary keys.
-func (r *userRepository) Scan(ctx context.Context, tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*User], error) {
-	if err := ctx.Err(); err != nil {
+func (r *userRepository) Scan(tx *fdblayer.Tx, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*User], error) {
+	if err := tx.Context().Err(); err != nil {
 		return nil, err
 	}
 	tr := tx.Transaction()
@@ -225,7 +224,7 @@ func (r *userRepository) Scan(ctx context.Context, tx *fdblayer.Tx, kr fdblayer.
 	}, rangeOpts).GetSliceOrPanic()
 
 	for i, kv := range kvs {
-		if err := ctx.Err(); err != nil {
+		if err := tx.Context().Err(); err != nil {
 			return nil, err
 		}
 		if opts.Limit > 0 && i == opts.Limit {
@@ -249,8 +248,8 @@ func (r *userRepository) Scan(ctx context.Context, tx *fdblayer.Tx, kr fdblayer.
 }
 
 // ScanIndex performs a paginated range or prefix scan over a secondary index of User.
-func (r *userRepository) ScanIndex(ctx context.Context, tx *fdblayer.Tx, index fdblayer.IndexID, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*User], error) {
-	if err := ctx.Err(); err != nil {
+func (r *userRepository) ScanIndex(tx *fdblayer.Tx, index fdblayer.IndexID, kr fdblayer.KeyRange, opts fdblayer.ScanOptions) (*fdblayer.Page[*User], error) {
+	if err := tx.Context().Err(); err != nil {
 		return nil, err
 	}
 	var idxSchema []fdblayer.FieldKind
@@ -295,7 +294,7 @@ func (r *userRepository) ScanIndex(ctx context.Context, tx *fdblayer.Tx, index f
 	}
 	futures := make([]fdb.FutureByteSlice, len(kvs))
 	for i, kv := range kvs {
-		if err := ctx.Err(); err != nil {
+		if err := tx.Context().Err(); err != nil {
 			return nil, err
 		}
 		tpl, err := dir.Unpack(kv.Key)
@@ -313,7 +312,7 @@ func (r *userRepository) ScanIndex(ctx context.Context, tx *fdblayer.Tx, index f
 		futures[i] = tr.Get(dir.Pack(keyTpl))
 	}
 	for _, future := range futures {
-		if err := ctx.Err(); err != nil {
+		if err := tx.Context().Err(); err != nil {
 			return nil, err
 		}
 		if future == nil {

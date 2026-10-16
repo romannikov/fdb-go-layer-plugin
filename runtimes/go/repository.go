@@ -84,18 +84,30 @@ type Transaction interface {
 	SetVersionstampedKey(key fdb.KeyConvertible, value []byte)
 }
 
-// Tx bundles a FoundationDB Transaction, its target DirectorySubspace, and the
-// per-transaction userVersionSeq counter for incomplete versionstamps.
-// Create a new Tx inside each db.Transact / TransactContext callback via NewTx(tr, dir).
+// Tx bundles a context.Context, a FoundationDB Transaction, its target DirectorySubspace,
+// and the per-transaction userVersionSeq counter for incomplete versionstamps.
+// Create a new Tx via Transact(ctx, db, dir, ...) or inside db.Transact via NewTx(ctx, tr, dir).
 type Tx struct {
+	ctx            context.Context
 	tr             Transaction
 	dir            directory.DirectorySubspace
 	userVersionSeq atomic.Uint32
 }
 
-// NewTx creates a per-transaction context binding tr and dir with a fresh userVersionSeq counter.
-func NewTx(tr Transaction, dir directory.DirectorySubspace) *Tx {
-	return &Tx{tr: tr, dir: dir}
+// NewTx creates a per-transaction context binding ctx, tr, and dir with a fresh userVersionSeq counter.
+func NewTx(ctx context.Context, tr Transaction, dir directory.DirectorySubspace) *Tx {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return &Tx{ctx: ctx, tr: tr, dir: dir}
+}
+
+// Context returns the context.Context associated with this transaction.
+func (tx *Tx) Context() context.Context {
+	if tx == nil || tx.ctx == nil {
+		return context.Background()
+	}
+	return tx.ctx
 }
 
 // Transaction returns the underlying FoundationDB Transaction.
@@ -124,24 +136,56 @@ func (tx *Tx) NextUserVersion() (uint16, error) {
 	return uint16(v - 1), nil
 }
 
+// Transact executes fn inside a FoundationDB transaction on db and dir with a fresh *Tx on each retry attempt.
+func Transact(ctx context.Context, db fdb.Transactor, dir directory.DirectorySubspace, fn func(tx *Tx) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fn(NewTx(ctx, tr, dir))
+	})
+	return err
+}
+
+// TransactVal executes fn inside a FoundationDB transaction on db and dir and returns the typed result R.
+func TransactVal[R any](ctx context.Context, db fdb.Transactor, dir directory.DirectorySubspace, fn func(tx *Tx) (R, error)) (R, error) {
+	var out R
+	err := Transact(ctx, db, dir, func(tx *Tx) error {
+		var fnErr error
+		out, fnErr = fn(tx)
+		return fnErr
+	})
+	if err != nil {
+		var zero R
+		return zero, err
+	}
+	return out, nil
+}
+
 // Repository is the uniform data access interface implemented by all generated entity repositories.
 type Repository[T any] interface {
-	Insert(ctx context.Context, tx *Tx, entity T) error
-	Upsert(ctx context.Context, tx *Tx, entity T) error
-	Delete(ctx context.Context, tx *Tx, key Key) error
+	Insert(tx *Tx, entity T) error
+	Upsert(tx *Tx, entity T) error
+	Delete(tx *Tx, key Key) error
 
-	ReadRow(ctx context.Context, tx *Tx, key Key) (T, error)
-	ReadRows(ctx context.Context, tx *Tx, keys []Key) ([]T, error)
+	ReadRow(tx *Tx, key Key) (T, error)
+	ReadRows(tx *Tx, keys []Key) ([]T, error)
 
-	Scan(ctx context.Context, tx *Tx, kr KeyRange, opts ScanOptions) (*Page[T], error)
-	ScanIndex(ctx context.Context, tx *Tx, index IndexID, kr KeyRange, opts ScanOptions) (*Page[T], error)
+	Scan(tx *Tx, kr KeyRange, opts ScanOptions) (*Page[T], error)
+	ScanIndex(tx *Tx, index IndexID, kr KeyRange, opts ScanOptions) (*Page[T], error)
 }
 
 // QueueRepository is the uniform interface implemented by all generated FIFO queue repositories (is_queue = true).
 type QueueRepository[T any] interface {
-	Enqueue(ctx context.Context, tx *Tx, msg T) error
-	Dequeue(ctx context.Context, tx *Tx, partitionKey Key) (T, error)
-	DequeueBatch(ctx context.Context, tx *Tx, partitionKey Key, limit int) ([]T, error)
+	Enqueue(tx *Tx, msg T) error
+	Dequeue(tx *Tx, partitionKey Key) (T, error)
+	DequeueBatch(tx *Tx, partitionKey Key, limit int) ([]T, error)
 }
 
 type rangeSliceReader interface {

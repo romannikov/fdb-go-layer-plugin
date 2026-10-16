@@ -28,16 +28,18 @@ func TestIntegration_InsertAndReadRowUser(t *testing.T) {
 
 	userRepo := store.NewUserRepository()
 
-	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return userRepo.Insert(ctx, fdblayer.NewTx(tr, dir), &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
-	})
+	if err := fdblayer.Transact(ctx, db, dir, func(tx *fdblayer.Tx) error {
+		return userRepo.Insert(tx, &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
+	}); err != nil {
+		t.Fatalf("Insert failed: %v", err)
+	}
 
-	var user *store.User
-	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		var err error
-		user, err = userRepo.ReadRow(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"u1"})
-		return err
+	user, err := fdblayer.TransactVal(ctx, db, dir, func(tx *fdblayer.Tx) (*store.User, error) {
+		return userRepo.ReadRow(tx, fdblayer.Key{"u1"})
 	})
+	if err != nil {
+		t.Fatalf("ReadRow failed: %v", err)
+	}
 	if user.Name != "Alice" || user.Email != "alice@test.com" {
 		t.Fatalf("unexpected user: %+v", user)
 	}
@@ -52,11 +54,11 @@ func TestIntegration_InsertUser_AlreadyExists(t *testing.T) {
 	userRepo := store.NewUserRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return userRepo.Insert(ctx, fdblayer.NewTx(tr, dir), &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
+		return userRepo.Insert(fdblayer.NewTx(ctx, tr, dir), &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
 	})
 
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		return nil, userRepo.Insert(ctx, fdblayer.NewTx(tr, dir), &store.User{Id: "u1", Name: "Bob", Email: "bob@test.com"})
+		return nil, userRepo.Insert(fdblayer.NewTx(ctx, tr, dir), &store.User{Id: "u1", Name: "Bob", Email: "bob@test.com"})
 	})
 	if !errors.Is(err, fdblayer.ErrAlreadyExists) {
 		t.Fatalf("expected ErrAlreadyExists on duplicate Insert, got: %v", err)
@@ -64,7 +66,7 @@ func TestIntegration_InsertUser_AlreadyExists(t *testing.T) {
 
 	var byBob []*store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		res, err := userRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.UserByEmail, fdblayer.Prefix("bob@test.com"), fdblayer.ScanOptions{})
+		res, err := userRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.UserByEmail, fdblayer.Prefix("bob@test.com"), fdblayer.ScanOptions{})
 		if err != nil {
 			return err
 		}
@@ -85,13 +87,13 @@ func TestIntegration_InsertAndReadRowProduct(t *testing.T) {
 	productRepo := store.NewProductRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return productRepo.Insert(ctx, fdblayer.NewTx(tr, dir), &store.Product{Id: "p1", Name: "Widget", Category: "tools", Price: 42})
+		return productRepo.Insert(fdblayer.NewTx(ctx, tr, dir), &store.Product{Id: "p1", Name: "Widget", Category: "tools", Price: 42})
 	})
 
 	var product *store.Product
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		product, err = productRepo.ReadRow(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"p1"})
+		product, err = productRepo.ReadRow(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"p1"})
 		return err
 	})
 	if product.Name != "Widget" || product.Price != 42 {
@@ -108,7 +110,7 @@ func TestIntegration_ReadRowUser_NotFound(t *testing.T) {
 	userRepo := store.NewUserRepository()
 
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		return userRepo.ReadRow(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"nonexistent"})
+		return userRepo.ReadRow(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"nonexistent"})
 	})
 	if err == nil {
 		t.Fatal("expected not found error")
@@ -125,17 +127,17 @@ func TestIntegration_UpsertUser_UpdateFields(t *testing.T) {
 	userRepo := store.NewUserRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return userRepo.Insert(ctx, fdblayer.NewTx(tr, dir), &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
+		return userRepo.Insert(fdblayer.NewTx(ctx, tr, dir), &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return userRepo.Upsert(ctx, fdblayer.NewTx(tr, dir), &store.User{Id: "u1", Name: "Bob", Email: "b@test.com"})
+		return userRepo.Upsert(fdblayer.NewTx(ctx, tr, dir), &store.User{Id: "u1", Name: "Bob", Email: "b@test.com"})
 	})
 
 	var user *store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		user, err = userRepo.ReadRow(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"u1"})
+		user, err = userRepo.ReadRow(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"u1"})
 		return err
 	})
 	if user.Name != "Bob" || user.Email != "b@test.com" {
@@ -153,15 +155,15 @@ func TestIntegration_DeleteUser(t *testing.T) {
 	userRepo := store.NewUserRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return userRepo.Insert(ctx, fdblayer.NewTx(tr, dir), &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
+		return userRepo.Insert(fdblayer.NewTx(ctx, tr, dir), &store.User{Id: "u1", Name: "Alice", Email: "a@test.com"})
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return userRepo.Delete(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"u1"})
+		return userRepo.Delete(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"u1"})
 	})
 
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		return userRepo.ReadRow(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"u1"})
+		return userRepo.ReadRow(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"u1"})
 	})
 	if err == nil {
 		t.Fatal("expected not found after delete")
@@ -178,21 +180,21 @@ func TestIntegration_ScanIndexUserByEmail(t *testing.T) {
 	userRepo := store.NewUserRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
-		if err := userRepo.Insert(ctx, tx, &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"}); err != nil {
+		tx := fdblayer.NewTx(ctx, tr, dir)
+		if err := userRepo.Insert(tx, &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"}); err != nil {
 			return err
 		}
-		if err := userRepo.Insert(ctx, tx, &store.User{Id: "u2", Name: "Bob", Email: "bob@test.com"}); err != nil {
+		if err := userRepo.Insert(tx, &store.User{Id: "u2", Name: "Bob", Email: "bob@test.com"}); err != nil {
 			return err
 		}
-		return userRepo.Insert(ctx, tx, &store.User{Id: "u3", Name: "Charlie", Email: "alice@test.com"})
+		return userRepo.Insert(tx, &store.User{Id: "u3", Name: "Charlie", Email: "alice@test.com"})
 	})
 
 	// Should find two users with email "alice@test.com"
 	var users *fdblayer.Page[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.UserByEmail, fdblayer.Prefix("alice@test.com"), fdblayer.ScanOptions{})
+		users, err = userRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.UserByEmail, fdblayer.Prefix("alice@test.com"), fdblayer.ScanOptions{})
 		return err
 	})
 	if len(users.Items) != 2 {
@@ -202,7 +204,7 @@ func TestIntegration_ScanIndexUserByEmail(t *testing.T) {
 	// Should find one user with email "bob@test.com"
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.UserByEmail, fdblayer.Prefix("bob@test.com"), fdblayer.ScanOptions{})
+		users, err = userRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.UserByEmail, fdblayer.Prefix("bob@test.com"), fdblayer.ScanOptions{})
 		return err
 	})
 	if len(users.Items) != 1 || users.Items[0].Name != "Bob" {
@@ -212,7 +214,7 @@ func TestIntegration_ScanIndexUserByEmail(t *testing.T) {
 	// Should find zero for nonexistent email
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.UserByEmail, fdblayer.Prefix("nobody@test.com"), fdblayer.ScanOptions{})
+		users, err = userRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.UserByEmail, fdblayer.Prefix("nobody@test.com"), fdblayer.ScanOptions{})
 		return err
 	})
 	if len(users.Items) != 0 {
@@ -229,20 +231,20 @@ func TestIntegration_ScanIndexProductByCategory(t *testing.T) {
 	productRepo := store.NewProductRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
-		if err := productRepo.Insert(ctx, tx, &store.Product{Id: "p1", Name: "Hammer", Category: "tools", Price: 15}); err != nil {
+		tx := fdblayer.NewTx(ctx, tr, dir)
+		if err := productRepo.Insert(tx, &store.Product{Id: "p1", Name: "Hammer", Category: "tools", Price: 15}); err != nil {
 			return err
 		}
-		if err := productRepo.Insert(ctx, tx, &store.Product{Id: "p2", Name: "Drill", Category: "tools", Price: 80}); err != nil {
+		if err := productRepo.Insert(tx, &store.Product{Id: "p2", Name: "Drill", Category: "tools", Price: 80}); err != nil {
 			return err
 		}
-		return productRepo.Insert(ctx, tx, &store.Product{Id: "p3", Name: "Laptop", Category: "electronics", Price: 999})
+		return productRepo.Insert(tx, &store.Product{Id: "p3", Name: "Laptop", Category: "electronics", Price: 999})
 	})
 
 	var products *fdblayer.Page[*store.Product]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		products, err = productRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.ProductByCategory, fdblayer.Prefix("tools"), fdblayer.ScanOptions{})
+		products, err = productRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.ProductByCategory, fdblayer.Prefix("tools"), fdblayer.ScanOptions{})
 		return err
 	})
 	if len(products.Items) != 2 {
@@ -251,7 +253,7 @@ func TestIntegration_ScanIndexProductByCategory(t *testing.T) {
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		products, err = productRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.ProductByCategory, fdblayer.Prefix("electronics"), fdblayer.ScanOptions{})
+		products, err = productRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.ProductByCategory, fdblayer.Prefix("electronics"), fdblayer.ScanOptions{})
 		return err
 	})
 	if len(products.Items) != 1 || products.Items[0].Name != "Laptop" {
@@ -268,19 +270,19 @@ func TestIntegration_UpsertUser_IndexUpdated(t *testing.T) {
 	userRepo := store.NewUserRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return userRepo.Insert(ctx, fdblayer.NewTx(tr, dir), &store.User{Id: "u1", Name: "Alice", Email: "old@test.com"})
+		return userRepo.Insert(fdblayer.NewTx(ctx, tr, dir), &store.User{Id: "u1", Name: "Alice", Email: "old@test.com"})
 	})
 
 	// Update email
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return userRepo.Upsert(ctx, fdblayer.NewTx(tr, dir), &store.User{Id: "u1", Name: "Alice", Email: "new@test.com"})
+		return userRepo.Upsert(fdblayer.NewTx(ctx, tr, dir), &store.User{Id: "u1", Name: "Alice", Email: "new@test.com"})
 	})
 
 	// Old email should return empty
 	var users *fdblayer.Page[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.UserByEmail, fdblayer.Prefix("old@test.com"), fdblayer.ScanOptions{})
+		users, err = userRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.UserByEmail, fdblayer.Prefix("old@test.com"), fdblayer.ScanOptions{})
 		return err
 	})
 	if len(users.Items) != 0 {
@@ -290,7 +292,7 @@ func TestIntegration_UpsertUser_IndexUpdated(t *testing.T) {
 	// New email should return the user
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.UserByEmail, fdblayer.Prefix("new@test.com"), fdblayer.ScanOptions{})
+		users, err = userRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.UserByEmail, fdblayer.Prefix("new@test.com"), fdblayer.ScanOptions{})
 		return err
 	})
 	if len(users.Items) != 1 || users.Items[0].Name != "Alice" {
@@ -307,17 +309,17 @@ func TestIntegration_DeleteUser_ClearsIndex(t *testing.T) {
 	userRepo := store.NewUserRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return userRepo.Insert(ctx, fdblayer.NewTx(tr, dir), &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
+		return userRepo.Insert(fdblayer.NewTx(ctx, tr, dir), &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return userRepo.Delete(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"u1"})
+		return userRepo.Delete(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"u1"})
 	})
 
 	var users *fdblayer.Page[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		users, err = userRepo.ScanIndex(ctx, fdblayer.NewTx(tr, dir), store.UserByEmail, fdblayer.Prefix("alice@test.com"), fdblayer.ScanOptions{})
+		users, err = userRepo.ScanIndex(fdblayer.NewTx(ctx, tr, dir), store.UserByEmail, fdblayer.Prefix("alice@test.com"), fdblayer.ScanOptions{})
 		return err
 	})
 	if len(users.Items) != 0 {
@@ -335,10 +337,10 @@ func TestIntegration_ScanUser_Basic(t *testing.T) {
 	userRepo := store.NewUserRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
+		tx := fdblayer.NewTx(ctx, tr, dir)
 		for i := 0; i < 5; i++ {
 			id := fmt.Sprintf("u%d", i)
-			if err := userRepo.Insert(ctx, tx, &store.User{
+			if err := userRepo.Insert(tx, &store.User{
 				Id: id, Name: fmt.Sprintf("User%d", i), Email: fmt.Sprintf("u%d@test.com", i),
 			}); err != nil {
 				return err
@@ -350,7 +352,7 @@ func TestIntegration_ScanUser_Basic(t *testing.T) {
 	var result *fdblayer.Page[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = userRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
+		result, err = userRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
 		return err
 	})
 	if len(result.Items) != 5 {
@@ -370,10 +372,10 @@ func TestIntegration_ScanUser_Pagination(t *testing.T) {
 	userRepo := store.NewUserRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
+		tx := fdblayer.NewTx(ctx, tr, dir)
 		for i := 0; i < 5; i++ {
 			id := fmt.Sprintf("u%d", i)
-			if err := userRepo.Insert(ctx, tx, &store.User{
+			if err := userRepo.Insert(tx, &store.User{
 				Id: id, Name: fmt.Sprintf("User%d", i), Email: fmt.Sprintf("u%d@test.com", i),
 			}); err != nil {
 				return err
@@ -386,7 +388,7 @@ func TestIntegration_ScanUser_Pagination(t *testing.T) {
 	var page1 *fdblayer.Page[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = userRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 2})
+		page1, err = userRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 2})
 		return err
 	})
 	if len(page1.Items) != 2 {
@@ -403,7 +405,7 @@ func TestIntegration_ScanUser_Pagination(t *testing.T) {
 	var page2 *fdblayer.Page[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page2, err = userRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Cursor: page1.NextCursor, Limit: 2})
+		page2, err = userRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Cursor: page1.NextCursor, Limit: 2})
 		return err
 	})
 	if len(page2.Items) != 2 {
@@ -417,7 +419,7 @@ func TestIntegration_ScanUser_Pagination(t *testing.T) {
 	var page3 *fdblayer.Page[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page3, err = userRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Cursor: page2.NextCursor, Limit: 2})
+		page3, err = userRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Cursor: page2.NextCursor, Limit: 2})
 		return err
 	})
 	if len(page3.Items) != 1 {
@@ -437,9 +439,9 @@ func TestIntegration_ScanProduct_Pagination(t *testing.T) {
 	productRepo := store.NewProductRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
+		tx := fdblayer.NewTx(ctx, tr, dir)
 		for i := 0; i < 7; i++ {
-			if err := productRepo.Insert(ctx, tx, &store.Product{
+			if err := productRepo.Insert(tx, &store.Product{
 				Id: fmt.Sprintf("p%d", i), Name: fmt.Sprintf("Product%d", i),
 				Category: "cat", Price: int32(i * 10),
 			}); err != nil {
@@ -453,7 +455,7 @@ func TestIntegration_ScanProduct_Pagination(t *testing.T) {
 	var page1 *fdblayer.Page[*store.Product]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page1, err = productRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 3})
+		page1, err = productRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 3})
 		return err
 	})
 	if len(page1.Items) != 3 {
@@ -466,7 +468,7 @@ func TestIntegration_ScanProduct_Pagination(t *testing.T) {
 	var page2 *fdblayer.Page[*store.Product]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page2, err = productRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Cursor: page1.NextCursor, Limit: 3})
+		page2, err = productRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Cursor: page1.NextCursor, Limit: 3})
 		return err
 	})
 	if len(page2.Items) != 3 {
@@ -476,7 +478,7 @@ func TestIntegration_ScanProduct_Pagination(t *testing.T) {
 	var page3 *fdblayer.Page[*store.Product]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		page3, err = productRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Cursor: page2.NextCursor, Limit: 3})
+		page3, err = productRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Cursor: page2.NextCursor, Limit: 3})
 		return err
 	})
 	if len(page3.Items) != 1 {
@@ -498,7 +500,7 @@ func TestIntegration_ScanUser_Empty(t *testing.T) {
 	var result *fdblayer.Page[*store.User]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = userRepo.Scan(ctx, fdblayer.NewTx(tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
+		result, err = userRepo.Scan(fdblayer.NewTx(ctx, tr, dir), fdblayer.AllKeys(), fdblayer.ScanOptions{Limit: 10})
 		return err
 	})
 	if len(result.Items) != 0 {
@@ -516,9 +518,9 @@ func TestIntegration_ReadRowsUser(t *testing.T) {
 	userRepo := store.NewUserRepository()
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
+		tx := fdblayer.NewTx(ctx, tr, dir)
 		for _, id := range []string{"u1", "u2", "u3"} {
-			if err := userRepo.Insert(ctx, tx, &store.User{Id: id, Name: "Name" + id, Email: id + "@test.com"}); err != nil {
+			if err := userRepo.Insert(tx, &store.User{Id: id, Name: "Name" + id, Email: id + "@test.com"}); err != nil {
 				return err
 			}
 		}
@@ -528,7 +530,7 @@ func TestIntegration_ReadRowsUser(t *testing.T) {
 	var result []*store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		result, err = userRepo.ReadRows(ctx, fdblayer.NewTx(tr, dir), []fdblayer.Key{{"u1"}, {"u2"}, {"u3"}})
+		result, err = userRepo.ReadRows(fdblayer.NewTx(ctx, tr, dir), []fdblayer.Key{{"u1"}, {"u2"}, {"u3"}})
 		return err
 	})
 	if len(result) != 3 {
@@ -546,14 +548,14 @@ func TestIntegration_RepositoryInterface(t *testing.T) {
 
 	// 1. Insert via Repository using real FDB transaction
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return repo.Insert(ctx, fdblayer.NewTx(tr, dir), &store.User{Id: "g1", Name: "Generic Alice", Email: "g-alice@test.com"})
+		return repo.Insert(fdblayer.NewTx(ctx, tr, dir), &store.User{Id: "g1", Name: "Generic Alice", Email: "g-alice@test.com"})
 	})
 
 	// 2. ReadRow via Repository
 	var got *store.User
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		got, err = repo.ReadRow(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"g1"})
+		got, err = repo.ReadRow(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"g1"})
 		return err
 	})
 	if got == nil || got.Name != "Generic Alice" {
@@ -563,13 +565,13 @@ func TestIntegration_RepositoryInterface(t *testing.T) {
 	// 3. Upsert via Repository
 	got.Name = "Updated Generic Alice"
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return repo.Upsert(ctx, fdblayer.NewTx(tr, dir), got)
+		return repo.Upsert(fdblayer.NewTx(ctx, tr, dir), got)
 	})
 
 	// Verify update
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		var err error
-		got, err = repo.ReadRow(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"g1"})
+		got, err = repo.ReadRow(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"g1"})
 		return err
 	})
 	if got == nil || got.Name != "Updated Generic Alice" {
@@ -578,12 +580,12 @@ func TestIntegration_RepositoryInterface(t *testing.T) {
 
 	// 4. Delete via Repository
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return repo.Delete(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"g1"})
+		return repo.Delete(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"g1"})
 	})
 
 	// Verify deletion
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		return repo.ReadRow(ctx, fdblayer.NewTx(tr, dir), fdblayer.Key{"g1"})
+		return repo.ReadRow(fdblayer.NewTx(ctx, tr, dir), fdblayer.Key{"g1"})
 	})
 	if !errors.Is(err, fdblayer.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound after delete, got: %v", err)
@@ -598,9 +600,9 @@ func TestIntegration_PaginatedIndexQuery(t *testing.T) {
 
 	productRepo := store.NewProductRepository()
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
+		tx := fdblayer.NewTx(ctx, tr, dir)
 		for i := 1; i <= 4; i++ {
-			if err := productRepo.Insert(ctx, tx, &store.Product{
+			if err := productRepo.Insert(tx, &store.Product{
 				Id:       fmt.Sprintf("p%d", i),
 				Name:     fmt.Sprintf("Item %d", i),
 				Category: "hardware",
@@ -615,16 +617,16 @@ func TestIntegration_PaginatedIndexQuery(t *testing.T) {
 	// Reverse pagination on secondary index
 	var revPage1, revPage2 *fdblayer.Page[*store.Product]
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		tx := fdblayer.NewTx(tr, dir)
+		tx := fdblayer.NewTx(ctx, tr, dir)
 		var err error
-		revPage1, err = productRepo.ScanIndex(ctx, tx, store.ProductByCategory, fdblayer.Prefix("hardware"), fdblayer.ScanOptions{
+		revPage1, err = productRepo.ScanIndex(tx, store.ProductByCategory, fdblayer.Prefix("hardware"), fdblayer.ScanOptions{
 			Limit:   2,
 			Reverse: true,
 		})
 		if err != nil {
 			return err
 		}
-		revPage2, err = productRepo.ScanIndex(ctx, tx, store.ProductByCategory, fdblayer.Prefix("hardware"), fdblayer.ScanOptions{
+		revPage2, err = productRepo.ScanIndex(tx, store.ProductByCategory, fdblayer.Prefix("hardware"), fdblayer.ScanOptions{
 			Cursor:  revPage1.NextCursor,
 			Limit:   2,
 			Reverse: true,
