@@ -54,25 +54,10 @@ func TestContextCancellation(t *testing.T) {
 		t.Fatal("expected error on ScanIndex with cancelled context")
 	}
 
-	// Test Store.Transact with cancelled context
-	mockStore := fdblayer.NewMockStore(tr, dir)
-	if err := mockStore.Transact(ctx, func(tx *fdblayer.Tx) error {
+	// Test Transact with cancelled context
+	if err := fdblayer.Transact(ctx, nil, dir, func(tx *fdblayer.Tx) error {
 		return userRepo.Insert(tx, user)
 	}); err == nil {
-		t.Fatal("expected error on Store.Transact with cancelled context")
-	}
-
-	// Test Store.Transact and TransactVal with valid context
-	bgCtx := context.Background()
-	if err := mockStore.Transact(bgCtx, func(tx *fdblayer.Tx) error {
-		return userRepo.Insert(tx, &store.User{Id: "u_store", Name: "StoreUser", Email: "store@test.com"})
-	}); err != nil {
-		t.Fatalf("unexpected error on Store.Transact: %v", err)
-	}
-	got, err := fdblayer.TransactVal(bgCtx, mockStore, func(tx *fdblayer.Tx) (*store.User, error) {
-		return userRepo.ReadRow(tx, fdblayer.Key{"u_store"})
-	})
-	if err != nil || got.GetName() != "StoreUser" {
-		t.Fatalf("unexpected result from TransactVal: got=%v, err=%v", got, err)
+		t.Fatal("expected error on Transact with cancelled context")
 	}
 }

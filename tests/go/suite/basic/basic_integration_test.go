@@ -26,16 +26,15 @@ func TestIntegration_InsertAndReadRowUser(t *testing.T) {
 	dir, cleanup := tests.TestDir(t, db)
 	defer cleanup()
 
-	fdbStore := fdblayer.NewStore(db, dir)
 	userRepo := store.NewUserRepository()
 
-	if err := fdbStore.Transact(ctx, func(tx *fdblayer.Tx) error {
+	if err := fdblayer.Transact(ctx, db, dir, func(tx *fdblayer.Tx) error {
 		return userRepo.Insert(tx, &store.User{Id: "u1", Name: "Alice", Email: "alice@test.com"})
 	}); err != nil {
 		t.Fatalf("Insert failed: %v", err)
 	}
 
-	user, err := fdblayer.TransactVal(ctx, fdbStore, func(tx *fdblayer.Tx) (*store.User, error) {
+	user, err := fdblayer.TransactVal(ctx, db, dir, func(tx *fdblayer.Tx) (*store.User, error) {
 		return userRepo.ReadRow(tx, fdblayer.Key{"u1"})
 	})
 	if err != nil {

@@ -86,7 +86,7 @@ type Transaction interface {
 
 // Tx bundles a context.Context, a FoundationDB Transaction, its target DirectorySubspace,
 // and the per-transaction userVersionSeq counter for incomplete versionstamps.
-// Create a new Tx via Store.Transact(ctx, ...) or inside db.Transact via NewTx(ctx, tr, dir).
+// Create a new Tx via Transact(ctx, db, dir, ...) or inside db.Transact via NewTx(ctx, tr, dir).
 type Tx struct {
 	ctx            context.Context
 	tr             Transaction
@@ -136,53 +136,27 @@ func (tx *Tx) NextUserVersion() (uint16, error) {
 	return uint16(v - 1), nil
 }
 
-// Store binds a FoundationDB Transactor (such as fdb.Database) or mock Transaction
-// to a target DirectorySubspace and executes transactions with a fresh *Tx per retry attempt.
-type Store struct {
-	db  fdb.Transactor
-	tr  Transaction
-	dir directory.DirectorySubspace
-}
-
-// NewStore creates a Store backed by a FoundationDB Transactor (e.g., fdb.Database) and DirectorySubspace.
-func NewStore(db fdb.Transactor, dir directory.DirectorySubspace) *Store {
-	return &Store{db: db, dir: dir}
-}
-
-// NewMockStore creates a Store backed by a mock Transaction (for unit tests) and DirectorySubspace.
-func NewMockStore(tr Transaction, dir directory.DirectorySubspace) *Store {
-	return &Store{tr: tr, dir: dir}
-}
-
-// Dir returns the DirectorySubspace associated with this Store.
-func (s *Store) Dir() directory.DirectorySubspace {
-	return s.dir
-}
-
-// Transact executes fn inside a FoundationDB transaction with a fresh *Tx on each retry attempt.
-func (s *Store) Transact(ctx context.Context, fn func(tx *Tx) error) error {
+// Transact executes fn inside a FoundationDB transaction on db and dir with a fresh *Tx on each retry attempt.
+func Transact(ctx context.Context, db fdb.Transactor, dir directory.DirectorySubspace, fn func(tx *Tx) error) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if s.tr != nil {
-		return fn(NewTx(ctx, s.tr, s.dir))
-	}
-	_, err := s.db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		return nil, fn(NewTx(ctx, tr, s.dir))
+		return nil, fn(NewTx(ctx, tr, dir))
 	})
 	return err
 }
 
-// TransactVal executes fn inside a Store transaction and returns the typed result R.
-func TransactVal[R any](ctx context.Context, s *Store, fn func(tx *Tx) (R, error)) (R, error) {
+// TransactVal executes fn inside a FoundationDB transaction on db and dir and returns the typed result R.
+func TransactVal[R any](ctx context.Context, db fdb.Transactor, dir directory.DirectorySubspace, fn func(tx *Tx) (R, error)) (R, error) {
 	var out R
-	err := s.Transact(ctx, func(tx *Tx) error {
+	err := Transact(ctx, db, dir, func(tx *Tx) error {
 		var fnErr error
 		out, fnErr = fn(tx)
 		return fnErr

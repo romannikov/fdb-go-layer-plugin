@@ -16,7 +16,7 @@ The compiler is structured around a **language-neutral Intermediate Representati
   - `ReadRows(tx, keys)`: Pipelined parallel batch fetch by `[]fdblayer.Key` in 1 RTT.
   - `Scan(tx, rng, opts)`: Cursor-paginated primary key scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)`, or `fdblayer.Range(begin, end)`.
   - `ScanIndex(tx, index, rng, opts)`: Cursor-paginated secondary/fan-out index scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)` (exact or partial leading prefix), or `fdblayer.Range(begin, end)` using generated `<Msg>By<Fields>` `fdblayer.IndexID` constants.
-- **Ergonomic `Store.Transact` & `TransactVal`**: `fdblayer.NewStore(db, dir)` binds a database and `directory.DirectorySubspace`, creating a fresh `*fdblayer.Tx` (carrying `context.Context` and the per-transaction user-version sequence) on every retry attempt.
+- **Ergonomic `fdblayer.Transact` & `fdblayer.TransactVal`**: `fdblayer.Transact(ctx, db, dir, func(tx *fdblayer.Tx) error { ... })` runs a FoundationDB transaction with a fresh `*fdblayer.Tx` (carrying `context.Context` and the per-transaction user-version sequence) on every retry attempt.
 - **Primary Keys**: Support for custom primary keys (`option (annotations.primary_key) = { fields: [...] };`), including single-field and compound keys composed of scalar, `bytes`, or `enum` fields.
 - **Secondary & Fan-Out Indexes**: Support for single-field and composite secondary indexes with explicit `id` (`> 0`), automatic maintenance on `Insert`, `Upsert`, and `Delete`, exact/prefix/range queries via `ScanIndex`, and **fan-out** indexes on `repeated` fields with deduplication and minimal-write delta updates.
 - **Time Versionstamps**: Support for FDB 12-byte versionstamps (`[(annotations.is_versionstamp) = true]`) to order records by commit time, with per-transaction user version monotonicity scoped to `*fdblayer.Tx`.
@@ -130,11 +130,14 @@ If you want to ensure that all data belonging to a specific user is stored toget
 
 `app_state/user_id/...`
 
-In code, create the subspace and bind a `*fdblayer.Store` to it:
+In code, create the subspace and pass it to `fdblayer.Transact`:
 
 ```go
 userDir, _ := directory.CreateOrOpen(db, []string{"app_state", "u123"}, nil)
-userStore := fdblayer.NewStore(db, userDir)
+err := fdblayer.Transact(ctx, db, userDir, func(tx *fdblayer.Tx) error {
+	// Pass tx to repository methods
+	return nil
+})
 ```
 
 This ensures all records and secondary indexes for `"u123"` are stored in a single contiguous key range.
@@ -193,10 +196,9 @@ func main() {
 	ctx := context.Background()
 
 	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
-	store := fdblayer.NewStore(db, dataDir)
 	userRepo := generated.NewUserRepository()
 
-	err := store.Transact(ctx, func(tx *fdblayer.Tx) error {
+	err := fdblayer.Transact(ctx, db, dataDir, func(tx *fdblayer.Tx) error {
 		// Insert a new user (fails with fdblayer.ErrAlreadyExists if PK exists)
 		user := &generated.User{Id: "u123", Email: "user@example.com", Name: "John"}
 		if err := userRepo.Insert(tx, user); err != nil {
@@ -277,11 +279,10 @@ func main() {
 	ctx := context.Background()
 
 	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
-	store := fdblayer.NewStore(db, dataDir)
 	userRepo := generated.NewUserRepository()
 	taskRepo := generated.NewTaskRepository()
 
-	err := store.Transact(ctx, func(tx *fdblayer.Tx) error {
+	err := fdblayer.Transact(ctx, db, dataDir, func(tx *fdblayer.Tx) error {
 		// Insert a user
 		user := &generated.User{Id: "u123", Email: "user@example.com", Name: "John"}
 		if err := userRepo.Insert(tx, user); err != nil {
@@ -333,10 +334,9 @@ func main() {
 	ctx := context.Background()
 
 	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
-	store := fdblayer.NewStore(db, dataDir)
 	taskRepo := generated.NewTaskRepository()
 
-	err := store.Transact(ctx, func(tx *fdblayer.Tx) error {
+	err := fdblayer.Transact(ctx, db, dataDir, func(tx *fdblayer.Tx) error {
 		// Dequeue the oldest task (returns nil, nil if the queue is empty)
 		task, err := taskRepo.Dequeue(tx, fdblayer.Key{"send-email"})
 		if err != nil {
