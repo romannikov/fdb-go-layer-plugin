@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/big"
 	"reflect"
-	"sync/atomic"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
@@ -24,9 +23,6 @@ var ErrUnknownIndex = errors.New("unknown index")
 
 // ErrInvalidKey is returned when a Key or KeyRange has an invalid tuple length or element type.
 var ErrInvalidKey = errors.New("invalid key")
-
-// ErrUserVersionOverflow is returned when versionstamped operations exceed 65,536 (0..65535).
-var ErrUserVersionOverflow = errors.New("user version overflow in transaction")
 
 // Partition namespaces under the typeID prefix.
 const (
@@ -62,11 +58,73 @@ func Range(begin, end Key) KeyRange {
 	return KeyRange{Begin: begin, End: end}
 }
 
-// ScanOptions configures pagination and scan direction for Scan and ScanIndex.
-type ScanOptions struct {
+// WriteConfig holds optional configuration for versionstamped writes.
+type WriteConfig struct {
+	UserVersion uint16
+}
+
+// WriteOption configures an Insert, Upsert, or Enqueue call.
+type WriteOption func(*WriteConfig)
+
+// WithUserVersion sets the 16-bit transaction-local user version (default 0)
+// when writing multiple versionstamped records in the same transaction.
+func WithUserVersion(v uint16) WriteOption {
+	return func(c *WriteConfig) {
+		c.UserVersion = v
+	}
+}
+
+// ApplyWriteOptions resolves a slice of WriteOption functions into a WriteConfig.
+func ApplyWriteOptions(opts []WriteOption) WriteConfig {
+	var cfg WriteConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg
+}
+
+// ScanConfig holds resolved pagination and direction settings for Scan and ScanIndex.
+type ScanConfig struct {
 	Limit   int
 	Reverse bool
 	Cursor  Key // Resume token from Page.NextCursor
+}
+
+// ScanOption configures pagination and scan direction for Scan and ScanIndex.
+type ScanOption func(*ScanConfig)
+
+// WithLimit caps the number of records returned in a single page.
+func WithLimit(limit int) ScanOption {
+	return func(c *ScanConfig) {
+		c.Limit = limit
+	}
+}
+
+// WithReverse scans keys in descending order instead of ascending order.
+func WithReverse() ScanOption {
+	return func(c *ScanConfig) {
+		c.Reverse = true
+	}
+}
+
+// WithCursor resumes a forward or reverse scan from a Page.NextCursor token.
+func WithCursor(cursor Key) ScanOption {
+	return func(c *ScanConfig) {
+		c.Cursor = cursor
+	}
+}
+
+// ApplyScanOptions resolves a slice of ScanOption functions into a ScanConfig.
+func ApplyScanOptions(opts []ScanOption) ScanConfig {
+	var cfg ScanConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg
 }
 
 // Page represents a single page of results from Scan or ScanIndex.
@@ -84,108 +142,24 @@ type Transaction interface {
 	SetVersionstampedKey(key fdb.KeyConvertible, value []byte)
 }
 
-// Tx bundles a context.Context, a FoundationDB Transaction, its target DirectorySubspace,
-// and the per-transaction userVersionSeq counter for incomplete versionstamps.
-// Create a new Tx via Transact(ctx, db, dir, ...) or inside db.Transact via NewTx(ctx, tr, dir).
-type Tx struct {
-	ctx            context.Context
-	tr             Transaction
-	dir            directory.DirectorySubspace
-	userVersionSeq atomic.Uint32
-}
-
-// NewTx creates a per-transaction context binding ctx, tr, and dir with a fresh userVersionSeq counter.
-func NewTx(ctx context.Context, tr Transaction, dir directory.DirectorySubspace) *Tx {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return &Tx{ctx: ctx, tr: tr, dir: dir}
-}
-
-// Context returns the context.Context associated with this transaction.
-func (tx *Tx) Context() context.Context {
-	if tx == nil || tx.ctx == nil {
-		return context.Background()
-	}
-	return tx.ctx
-}
-
-// Transaction returns the underlying FoundationDB Transaction.
-func (tx *Tx) Transaction() Transaction {
-	return tx.tr
-}
-
-// Dir returns the DirectorySubspace associated with this transaction context.
-func (tx *Tx) Dir() directory.DirectorySubspace {
-	return tx.dir
-}
-
-// ResetUserVersion resets the transaction's user version sequence to 0.
-func (tx *Tx) ResetUserVersion() {
-	tx.userVersionSeq.Store(0)
-}
-
-// NextUserVersion returns a monotonically increasing 16-bit user version (0..65535)
-// so that multiple versionstamped keys written within the same transaction receive
-// distinct user versions instead of colliding at 0.
-func (tx *Tx) NextUserVersion() (uint16, error) {
-	v := tx.userVersionSeq.Add(1)
-	if v > 65536 {
-		return 0, ErrUserVersionOverflow
-	}
-	return uint16(v - 1), nil
-}
-
-// Transact executes fn inside a FoundationDB transaction on db and dir with a fresh *Tx on each retry attempt.
-func Transact(ctx context.Context, db fdb.Transactor, dir directory.DirectorySubspace, fn func(tx *Tx) error) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		return nil, fn(NewTx(ctx, tr, dir))
-	})
-	return err
-}
-
-// TransactVal executes fn inside a FoundationDB transaction on db and dir and returns the typed result R.
-func TransactVal[R any](ctx context.Context, db fdb.Transactor, dir directory.DirectorySubspace, fn func(tx *Tx) (R, error)) (R, error) {
-	var out R
-	err := Transact(ctx, db, dir, func(tx *Tx) error {
-		var fnErr error
-		out, fnErr = fn(tx)
-		return fnErr
-	})
-	if err != nil {
-		var zero R
-		return zero, err
-	}
-	return out, nil
-}
-
 // Repository is the uniform data access interface implemented by all generated entity repositories.
 type Repository[T any] interface {
-	Insert(tx *Tx, entity T) error
-	Upsert(tx *Tx, entity T) error
-	Delete(tx *Tx, key Key) error
+	Insert(ctx context.Context, tr Transaction, entity T, opts ...WriteOption) error
+	Upsert(ctx context.Context, tr Transaction, entity T, opts ...WriteOption) error
+	Delete(ctx context.Context, tr Transaction, key Key) error
 
-	ReadRow(tx *Tx, key Key) (T, error)
-	ReadRows(tx *Tx, keys []Key) ([]T, error)
+	ReadRow(ctx context.Context, tr Transaction, key Key) (T, error)
+	ReadRows(ctx context.Context, tr Transaction, keys []Key) ([]T, error)
 
-	Scan(tx *Tx, kr KeyRange, opts ScanOptions) (*Page[T], error)
-	ScanIndex(tx *Tx, index IndexID, kr KeyRange, opts ScanOptions) (*Page[T], error)
+	Scan(ctx context.Context, tr Transaction, kr KeyRange, opts ...ScanOption) (*Page[T], error)
+	ScanIndex(ctx context.Context, tr Transaction, index IndexID, kr KeyRange, opts ...ScanOption) (*Page[T], error)
 }
 
 // QueueRepository is the uniform interface implemented by all generated FIFO queue repositories (is_queue = true).
 type QueueRepository[T any] interface {
-	Enqueue(tx *Tx, msg T) error
-	Dequeue(tx *Tx, partitionKey Key) (T, error)
-	DequeueBatch(tx *Tx, partitionKey Key, limit int) ([]T, error)
+	Enqueue(ctx context.Context, tr Transaction, msg T, opts ...WriteOption) error
+	Dequeue(ctx context.Context, tr Transaction, partitionKey Key) (T, error)
+	DequeueBatch(ctx context.Context, tr Transaction, partitionKey Key, limit int) ([]T, error)
 }
 
 type rangeSliceReader interface {
@@ -474,31 +448,32 @@ func PackSubspaceTuple(
 	return dir.Pack(tpl), nil
 }
 
-// ResolveScanBounds computes the [Begin, End) FDB key range for Scan or ScanIndex.
+// ResolveScanBounds computes the [Begin, End) FDB key range and ScanConfig for Scan or ScanIndex.
 // baseTpl is {typeID, DataNamespace} for Scan, or {typeID, IndexNamespace, int64(indexID)} for ScanIndex.
 // schema is the FieldKind slice for the full key (PrimaryKeyFields for Scan, or IndexFields+PrimaryKeyFields for ScanIndex).
 func ResolveScanBounds(
 	dir directory.DirectorySubspace,
 	baseTpl tuple.Tuple,
 	kr KeyRange,
-	opts ScanOptions,
+	opts []ScanOption,
 	schema []FieldKind,
-) (fdb.Key, fdb.Key, error) {
+) (fdb.Key, fdb.Key, ScanConfig, error) {
+	cfg := ApplyScanOptions(opts)
 	fullKeyLen := len(schema)
 	if len(kr.Prefix) > 0 && (len(kr.Begin) > 0 || len(kr.End) > 0) {
-		return nil, nil, fmt.Errorf("%w: KeyRange cannot specify both Prefix and Begin/End", ErrInvalidKey)
+		return nil, nil, cfg, fmt.Errorf("%w: KeyRange cannot specify both Prefix and Begin/End", ErrInvalidKey)
 	}
 	if len(kr.Prefix) > fullKeyLen {
-		return nil, nil, fmt.Errorf("%w: prefix length %d exceeds maximum key length %d", ErrInvalidKey, len(kr.Prefix), fullKeyLen)
+		return nil, nil, cfg, fmt.Errorf("%w: prefix length %d exceeds maximum key length %d", ErrInvalidKey, len(kr.Prefix), fullKeyLen)
 	}
 	if len(kr.Begin) > fullKeyLen {
-		return nil, nil, fmt.Errorf("%w: range begin length %d exceeds maximum key length %d", ErrInvalidKey, len(kr.Begin), fullKeyLen)
+		return nil, nil, cfg, fmt.Errorf("%w: range begin length %d exceeds maximum key length %d", ErrInvalidKey, len(kr.Begin), fullKeyLen)
 	}
 	if len(kr.End) > fullKeyLen {
-		return nil, nil, fmt.Errorf("%w: range end length %d exceeds maximum key length %d", ErrInvalidKey, len(kr.End), fullKeyLen)
+		return nil, nil, cfg, fmt.Errorf("%w: range end length %d exceeds maximum key length %d", ErrInvalidKey, len(kr.End), fullKeyLen)
 	}
-	if len(opts.Cursor) > fullKeyLen {
-		return nil, nil, fmt.Errorf("%w: cursor length %d exceeds maximum key length %d", ErrInvalidKey, len(opts.Cursor), fullKeyLen)
+	if len(cfg.Cursor) > fullKeyLen {
+		return nil, nil, cfg, fmt.Errorf("%w: cursor length %d exceeds maximum key length %d", ErrInvalidKey, len(cfg.Cursor), fullKeyLen)
 	}
 
 	baseBytes := dir.Pack(baseTpl)
@@ -508,7 +483,7 @@ func ResolveScanBounds(
 	if len(kr.Prefix) > 0 {
 		prefixKey, err := PackSubspaceTuple(dir, baseTpl, kr.Prefix, schema)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, cfg, err
 		}
 		rangeBegin = prefixKey
 		rangeEnd = fdb.Key(append(append([]byte(nil), prefixKey...), 0xFF))
@@ -516,7 +491,7 @@ func ResolveScanBounds(
 		if len(kr.Begin) > 0 {
 			beginKey, err := PackSubspaceTuple(dir, baseTpl, kr.Begin, schema)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, cfg, err
 			}
 			if string(beginKey) > string(rangeBegin) {
 				rangeBegin = beginKey
@@ -525,7 +500,7 @@ func ResolveScanBounds(
 		if len(kr.End) > 0 {
 			endKey, err := PackSubspaceTuple(dir, baseTpl, kr.End, schema)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, cfg, err
 			}
 			if string(endKey) < string(rangeEnd) {
 				rangeEnd = endKey
@@ -533,14 +508,14 @@ func ResolveScanBounds(
 		}
 	}
 
-	if len(opts.Cursor) > 0 {
-		cursorKey, err := PackSubspaceTuple(dir, baseTpl, opts.Cursor, schema)
+	if len(cfg.Cursor) > 0 {
+		cursorKey, err := PackSubspaceTuple(dir, baseTpl, cfg.Cursor, schema)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, cfg, err
 		}
-		if opts.Reverse {
+		if cfg.Reverse {
 			sep := byte(0xFF)
-			if len(opts.Cursor) >= fullKeyLen {
+			if len(cfg.Cursor) >= fullKeyLen {
 				sep = 0x00
 			}
 			upperEnd := fdb.Key(append(append([]byte(nil), cursorKey...), sep))
@@ -552,7 +527,7 @@ func ResolveScanBounds(
 		}
 	}
 
-	return rangeBegin, rangeEnd, nil
+	return rangeBegin, rangeEnd, cfg, nil
 }
 
 // ExtractCursorKey slices tpl[startIdx:] and converts any tuple.Versionstamp
