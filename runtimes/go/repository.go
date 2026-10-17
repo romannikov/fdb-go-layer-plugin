@@ -2,6 +2,7 @@ package fdblayer
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/big"
@@ -140,6 +141,9 @@ type Transaction interface {
 	Set(key fdb.KeyConvertible, value []byte)
 	Clear(key fdb.KeyConvertible)
 	SetVersionstampedKey(key fdb.KeyConvertible, value []byte)
+	Add(key fdb.KeyConvertible, param []byte)
+	Min(key fdb.KeyConvertible, param []byte)
+	Max(key fdb.KeyConvertible, param []byte)
 }
 
 // Repository is the uniform data access interface implemented by all generated entity repositories.
@@ -153,6 +157,7 @@ type Repository[T any] interface {
 
 	Scan(ctx context.Context, tr Transaction, kr KeyRange, opts ...ScanOption) (*Page[T], error)
 	ScanIndex(ctx context.Context, tr Transaction, index IndexID, kr KeyRange, opts ...ScanOption) (*Page[T], error)
+	ReadAggregate(ctx context.Context, tr Transaction, index IndexID, groupKey Key) (int64, error)
 }
 
 // QueueRepository is the uniform interface implemented by all generated FIFO queue repositories (is_queue = true).
@@ -545,4 +550,83 @@ func ExtractCursorKey(tpl tuple.Tuple, startIdx int) Key {
 		}
 	}
 	return out
+}
+
+// AggregateEncoding specifies how an 8-byte little-endian aggregate index value is decoded.
+type AggregateEncoding uint8
+
+const (
+	AggregateEncodingDelta        AggregateEncoding = iota + 1 // COUNT or SUM (missing key -> 0, nil)
+	AggregateEncodingSignedMinMax                              // Signed MIN or MAX (missing key -> ErrNotFound)
+	AggregateEncodingUintMinMax                                // Unsigned MIN or MAX (missing key -> ErrNotFound)
+)
+
+// EncodeDeltaLE encodes a signed 64-bit integer delta in two's complement 8-byte little-endian format for FDB Add.
+func EncodeDeltaLE(delta int64) []byte {
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], uint64(delta))
+	return buf[:]
+}
+
+// EncodeSignedOrderLE encodes a signed 64-bit integer with its sign bit flipped in 8-byte little-endian format
+// so FDB's unsigned Min and Max atomic mutations preserve signed integer ordering.
+func EncodeSignedOrderLE(v int64) []byte {
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], uint64(v)^(uint64(1)<<63))
+	return buf[:]
+}
+
+// EncodeUnsignedLE encodes an unsigned 64-bit integer in 8-byte little-endian format for FDB Min and Max.
+func EncodeUnsignedLE(v uint64) []byte {
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], v)
+	return buf[:]
+}
+
+// PackAggregateKey validates that groupKey matches schema in length and element types, normalizes
+// each element, and packs the aggregate index key under IndexNamespace.
+func PackAggregateKey(
+	dir directory.DirectorySubspace,
+	typeID int64,
+	index IndexID,
+	groupKey Key,
+	schema []FieldKind,
+) (fdb.Key, error) {
+	if len(groupKey) != len(schema) {
+		return nil, fmt.Errorf("%w: expected %d group key elements, got %d", ErrInvalidKey, len(schema), len(groupKey))
+	}
+	tpl := make(tuple.Tuple, 3+len(schema))
+	tpl[0] = typeID
+	tpl[1] = IndexNamespace
+	tpl[2] = int64(index)
+	for j, el := range groupKey {
+		norm, err := normalizeElementWithKind(el, schema[j])
+		if err != nil {
+			return nil, err
+		}
+		tpl[3+j] = norm
+	}
+	return dir.Pack(tpl), nil
+}
+
+// DecodeAggregateValue decodes a raw 8-byte little-endian aggregate index value according to its encoding.
+func DecodeAggregateValue(raw []byte, encoding AggregateEncoding, entityName string) (int64, error) {
+	if raw == nil {
+		if encoding == AggregateEncodingDelta {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("%s %w", entityName, ErrNotFound)
+	}
+	if len(raw) != 8 {
+		return 0, fmt.Errorf("invalid aggregate value length %d for %s: expected 8 bytes", len(raw), entityName)
+	}
+	u := binary.LittleEndian.Uint64(raw)
+	switch encoding {
+	case AggregateEncodingDelta, AggregateEncodingUintMinMax:
+		return int64(u), nil
+	case AggregateEncodingSignedMinMax:
+		return int64(u ^ (uint64(1) << 63)), nil
+	default:
+		return 0, fmt.Errorf("unknown aggregate encoding %d", encoding)
+	}
 }

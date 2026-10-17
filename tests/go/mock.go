@@ -50,6 +50,49 @@ func (m *MockKV) Clear(key []byte) {
 	delete(m.data, string(key))
 }
 
+func (m *MockKV) Add(key, param []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var cur uint64
+	if existing, ok := m.data[string(key)]; ok && len(existing) == 8 {
+		cur = binary.LittleEndian.Uint64(existing)
+	}
+	delta := binary.LittleEndian.Uint64(param)
+	var out [8]byte
+	binary.LittleEndian.PutUint64(out[:], cur+delta)
+	m.data[string(key)] = out[:]
+}
+
+func (m *MockKV) Min(key, param []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	incoming := binary.LittleEndian.Uint64(param)
+	if existing, ok := m.data[string(key)]; ok && len(existing) == 8 {
+		cur := binary.LittleEndian.Uint64(existing)
+		if incoming >= cur {
+			return
+		}
+	}
+	v := make([]byte, 8)
+	copy(v, param)
+	m.data[string(key)] = v
+}
+
+func (m *MockKV) Max(key, param []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	incoming := binary.LittleEndian.Uint64(param)
+	if existing, ok := m.data[string(key)]; ok && len(existing) == 8 {
+		cur := binary.LittleEndian.Uint64(existing)
+		if incoming <= cur {
+			return
+		}
+	}
+	v := make([]byte, 8)
+	copy(v, param)
+	m.data[string(key)] = v
+}
+
 // RangeSlice returns all KVs whose keys are in [begin, end).
 func (m *MockKV) RangeSlice(begin, end []byte, opts fdb.RangeOptions) []fdb.KeyValue {
 	m.mu.RLock()
@@ -159,6 +202,9 @@ type MockTransaction struct {
 	kv         *MockKV
 	SetCalls   []fdb.Key
 	ClearCalls []fdb.Key
+	AddCalls   []fdb.Key
+	MinCalls   []fdb.Key
+	MaxCalls   []fdb.Key
 }
 
 func NewMockTransaction(kv *MockKV) *MockTransaction {
@@ -168,12 +214,33 @@ func NewMockTransaction(kv *MockKV) *MockTransaction {
 func (m *MockTransaction) ResetLog() {
 	m.SetCalls = nil
 	m.ClearCalls = nil
+	m.AddCalls = nil
+	m.MinCalls = nil
+	m.MaxCalls = nil
 }
 
 func (m *MockTransaction) Set(key fdb.KeyConvertible, value []byte) {
 	k := key.FDBKey()
 	m.SetCalls = append(m.SetCalls, append(fdb.Key(nil), k...))
 	m.kv.Set(k, value)
+}
+
+func (m *MockTransaction) Add(key fdb.KeyConvertible, param []byte) {
+	k := key.FDBKey()
+	m.AddCalls = append(m.AddCalls, append(fdb.Key(nil), k...))
+	m.kv.Add(k, param)
+}
+
+func (m *MockTransaction) Min(key fdb.KeyConvertible, param []byte) {
+	k := key.FDBKey()
+	m.MinCalls = append(m.MinCalls, append(fdb.Key(nil), k...))
+	m.kv.Min(k, param)
+}
+
+func (m *MockTransaction) Max(key fdb.KeyConvertible, param []byte) {
+	k := key.FDBKey()
+	m.MaxCalls = append(m.MaxCalls, append(fdb.Key(nil), k...))
+	m.kv.Max(k, param)
 }
 
 func (m *MockTransaction) SetVersionstampedKey(key fdb.KeyConvertible, value []byte) {

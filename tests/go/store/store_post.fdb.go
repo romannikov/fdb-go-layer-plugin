@@ -19,7 +19,8 @@ const PostTypeID int64 = 3
 
 // Secondary index IDs for Post.
 const (
-	PostByTags fdblayer.IndexID = 1
+	PostByTags      fdblayer.IndexID = 1
+	PostCountByTags fdblayer.IndexID = 2
 )
 
 // PostRepository defines the repository interface for Post.
@@ -70,6 +71,18 @@ func (r *postRepository) Insert(ctx context.Context, tr fdblayer.Transaction, en
 				item,
 				entity.Id,
 			}), []byte{})
+		}
+	}
+
+	// Fan-out aggregate index
+	{
+		seen := make(map[string]struct{}, len(entity.Tags))
+		for _, item := range entity.Tags {
+			if _, dup := seen[item]; dup {
+				continue
+			}
+			seen[item] = struct{}{}
+			tr.Add(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostCountByTags), item}), fdblayer.EncodeDeltaLE(1))
 		}
 	}
 
@@ -148,6 +161,43 @@ func (r *postRepository) Upsert(ctx context.Context, tr fdblayer.Transaction, en
 		}
 	}
 
+	// Fan-out aggregate index
+	if old != nil {
+		oldSet := make(map[string]struct{}, len(old.Tags))
+		for _, item := range old.Tags {
+			oldSet[item] = struct{}{}
+		}
+		newSet := make(map[string]struct{}, len(entity.Tags))
+		for _, item := range entity.Tags {
+			newSet[item] = struct{}{}
+		}
+		for _, item := range old.Tags {
+			if _, keep := newSet[item]; !keep {
+				newSet[item] = struct{}{}
+				tr.Add(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostCountByTags), item}), fdblayer.EncodeDeltaLE(-1))
+			}
+		}
+		seenNew := make(map[string]struct{}, len(entity.Tags))
+		for _, item := range entity.Tags {
+			if _, dup := seenNew[item]; dup {
+				continue
+			}
+			seenNew[item] = struct{}{}
+			if _, existed := oldSet[item]; !existed {
+				tr.Add(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostCountByTags), item}), fdblayer.EncodeDeltaLE(1))
+			}
+		}
+	} else {
+		seen := make(map[string]struct{}, len(entity.Tags))
+		for _, item := range entity.Tags {
+			if _, dup := seen[item]; dup {
+				continue
+			}
+			seen[item] = struct{}{}
+			tr.Add(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostCountByTags), item}), fdblayer.EncodeDeltaLE(1))
+		}
+	}
+
 	return nil
 }
 
@@ -180,6 +230,17 @@ func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, ke
 					item,
 					pkTuple[0],
 				}))
+			}
+		}
+		// Fan-out aggregate index
+		{
+			seen := make(map[string]struct{}, len(entity.Tags))
+			for _, item := range entity.Tags {
+				if _, dup := seen[item]; dup {
+					continue
+				}
+				seen[item] = struct{}{}
+				tr.Add(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostCountByTags), item}), fdblayer.EncodeDeltaLE(-1))
 			}
 		}
 	}
@@ -384,4 +445,27 @@ func (r *postRepository) ScanIndex(ctx context.Context, tr fdblayer.Transaction,
 		result.Items = append(result.Items, entity)
 	}
 	return result, nil
+}
+
+// ReadAggregate reads the current value of an atomic aggregate secondary index (COUNT, SUM, MIN, MAX) for the given groupKey.
+func (r *postRepository) ReadAggregate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, groupKey fdblayer.Key) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	var groupSchema []fdblayer.FieldKind
+	var encoding fdblayer.AggregateEncoding
+	switch index {
+	case PostCountByTags:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingDelta
+	default:
+		return 0, fmt.Errorf("post aggregate index %d: %w", index, fdblayer.ErrUnknownIndex)
+	}
+
+	aggKey, err := fdblayer.PackAggregateKey(r.dir, PostTypeID, index, groupKey, groupSchema)
+	if err != nil {
+		return 0, err
+	}
+	raw := tr.Get(aggKey).MustGet()
+	return fdblayer.DecodeAggregateValue(raw, encoding, "post")
 }

@@ -45,17 +45,16 @@ message InterleaveSpec {
   bool on_delete_cascade = 2;  // [NOT IMPLEMENTED YET] Clear interleaved child key range when parent is deleted
 }
 
-// [NOT IMPLEMENTED YET]
 enum IndexAggregateType {
   AGGREGATE_NONE = 0;   // Standard / Fan-Out secondary index
-  AGGREGATE_COUNT = 1;  // [NOT IMPLEMENTED YET] Maintains atomic int64 count grouped by `fields`
-  AGGREGATE_SUM = 2;    // [NOT IMPLEMENTED YET] Maintains atomic int64 sum of `aggregate_field` grouped by `fields`
-  AGGREGATE_MIN = 3;    // [NOT IMPLEMENTED YET] Maintains atomic min of `aggregate_field` grouped by `fields`
-  AGGREGATE_MAX = 4;    // [NOT IMPLEMENTED YET] Maintains atomic max of `aggregate_field` grouped by `fields`
+  AGGREGATE_COUNT = 1;  // Maintains atomic int64 count grouped by `fields`
+  AGGREGATE_SUM = 2;    // Maintains atomic int64 sum of `aggregate_field` grouped by `fields`
+  AGGREGATE_MIN = 3;    // Maintains atomic min of `aggregate_field` grouped by `fields`
+  AGGREGATE_MAX = 4;    // Maintains atomic max of `aggregate_field` grouped by `fields`
 }
 
 message SecondaryIndex {
-  // Indexed field names in tuple sort order.
+  // Indexed field names in tuple sort order (or grouping field names for aggregate indexes; may be empty for ungrouped aggregates).
   repeated string fields = 1;
 
   // Mandatory explicit index ID (> 0). Compilation fails if id is 0 or duplicated within a message.
@@ -70,10 +69,10 @@ message SecondaryIndex {
   // [NOT IMPLEMENTED YET] Omit index entry when any indexed field has its zero/empty value.
   bool sparse = 5;
 
-  // [NOT IMPLEMENTED YET] Atomic aggregate index type (COUNT, SUM, MIN, MAX grouped by `fields`).
+  // Atomic aggregate index type (COUNT, SUM, MIN, MAX grouped by `fields`).
   IndexAggregateType aggregate = 6;
 
-  // [NOT IMPLEMENTED YET] Target integer field name for AGGREGATE_SUM, AGGREGATE_MIN, or AGGREGATE_MAX.
+  // Target integer field name for AGGREGATE_SUM, AGGREGATE_MIN, or AGGREGATE_MAX.
   string aggregate_field = 7;
 }
 

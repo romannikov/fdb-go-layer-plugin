@@ -460,3 +460,11 @@ func (r *auditlogRepository) ScanIndex(ctx context.Context, tr fdblayer.Transact
 	}
 	return result, nil
 }
+
+// ReadAggregate reads the current value of an atomic aggregate secondary index (COUNT, SUM, MIN, MAX) for the given groupKey.
+func (r *auditlogRepository) ReadAggregate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, groupKey fdblayer.Key) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return 0, fmt.Errorf("auditlog aggregate index %d: %w", index, fdblayer.ErrUnknownIndex)
+}

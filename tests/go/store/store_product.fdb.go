@@ -19,7 +19,12 @@ const ProductTypeID int64 = 2
 
 // Secondary index IDs for Product.
 const (
-	ProductByCategory fdblayer.IndexID = 1
+	ProductByCategory         fdblayer.IndexID = 1
+	ProductCountByCategory    fdblayer.IndexID = 2
+	ProductSumPriceByCategory fdblayer.IndexID = 3
+	ProductMinPriceByCategory fdblayer.IndexID = 4
+	ProductMaxPriceByCategory fdblayer.IndexID = 5
+	ProductCount              fdblayer.IndexID = 6
 )
 
 // ProductRepository defines the repository interface for Product.
@@ -60,6 +65,23 @@ func (r *productRepository) Insert(ctx context.Context, tr fdblayer.Transaction,
 
 	// Standard index
 	tr.Set(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductByCategory), entity.Category, entity.Id}), []byte{})
+
+	// Aggregate index
+	tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductCountByCategory), entity.Category}), fdblayer.EncodeDeltaLE(1))
+
+	// Aggregate index
+	if entity.Price != 0 {
+		tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductSumPriceByCategory), entity.Category}), fdblayer.EncodeDeltaLE(int64(entity.Price)))
+	}
+
+	// Aggregate index
+	tr.Min(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductMinPriceByCategory), entity.Category}), fdblayer.EncodeSignedOrderLE(int64(entity.Price)))
+
+	// Aggregate index
+	tr.Max(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductMaxPriceByCategory), entity.Category}), fdblayer.EncodeSignedOrderLE(int64(entity.Price)))
+
+	// Aggregate index
+	tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductCount)}), fdblayer.EncodeDeltaLE(1))
 
 	return nil
 }
@@ -102,6 +124,45 @@ func (r *productRepository) Upsert(ctx context.Context, tr fdblayer.Transaction,
 		tr.Set(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductByCategory), entity.Category, entity.Id}), []byte{})
 	}
 
+	// Aggregate index
+	if old == nil {
+		tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductCountByCategory), entity.Category}), fdblayer.EncodeDeltaLE(1))
+	} else if old.Category != entity.Category {
+		tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductCountByCategory), old.Category}), fdblayer.EncodeDeltaLE(-1))
+		tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductCountByCategory), entity.Category}), fdblayer.EncodeDeltaLE(1))
+	}
+
+	// Aggregate index
+	if old == nil {
+		if entity.Price != 0 {
+			tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductSumPriceByCategory), entity.Category}), fdblayer.EncodeDeltaLE(int64(entity.Price)))
+		}
+	} else if old.Category != entity.Category {
+		if old.Price != 0 {
+			tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductSumPriceByCategory), old.Category}), fdblayer.EncodeDeltaLE(-int64(old.Price)))
+		}
+		if entity.Price != 0 {
+			tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductSumPriceByCategory), entity.Category}), fdblayer.EncodeDeltaLE(int64(entity.Price)))
+		}
+	} else if delta := int64(entity.Price) - int64(old.Price); delta != 0 {
+		tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductSumPriceByCategory), entity.Category}), fdblayer.EncodeDeltaLE(delta))
+	}
+
+	// Aggregate index
+	if old == nil || old.Category != entity.Category || old.Price != entity.Price {
+		tr.Min(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductMinPriceByCategory), entity.Category}), fdblayer.EncodeSignedOrderLE(int64(entity.Price)))
+	}
+
+	// Aggregate index
+	if old == nil || old.Category != entity.Category || old.Price != entity.Price {
+		tr.Max(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductMaxPriceByCategory), entity.Category}), fdblayer.EncodeSignedOrderLE(int64(entity.Price)))
+	}
+
+	// Aggregate index
+	if old == nil {
+		tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductCount)}), fdblayer.EncodeDeltaLE(1))
+	}
+
 	return nil
 }
 
@@ -124,6 +185,14 @@ func (r *productRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 		}
 		// Standard index
 		tr.Clear(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductByCategory), entity.Category, pkTuple[0]}))
+		// Aggregate index
+		tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductCountByCategory), entity.Category}), fdblayer.EncodeDeltaLE(-1))
+		// Aggregate index
+		if entity.Price != 0 {
+			tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductSumPriceByCategory), entity.Category}), fdblayer.EncodeDeltaLE(-int64(entity.Price)))
+		}
+		// Aggregate index
+		tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductCount)}), fdblayer.EncodeDeltaLE(-1))
 	}
 	tr.Clear(dataKey)
 
@@ -326,4 +395,39 @@ func (r *productRepository) ScanIndex(ctx context.Context, tr fdblayer.Transacti
 		result.Items = append(result.Items, entity)
 	}
 	return result, nil
+}
+
+// ReadAggregate reads the current value of an atomic aggregate secondary index (COUNT, SUM, MIN, MAX) for the given groupKey.
+func (r *productRepository) ReadAggregate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, groupKey fdblayer.Key) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	var groupSchema []fdblayer.FieldKind
+	var encoding fdblayer.AggregateEncoding
+	switch index {
+	case ProductCountByCategory:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingDelta
+	case ProductSumPriceByCategory:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingDelta
+	case ProductMinPriceByCategory:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingSignedMinMax
+	case ProductMaxPriceByCategory:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingSignedMinMax
+	case ProductCount:
+		groupSchema = []fdblayer.FieldKind{}
+		encoding = fdblayer.AggregateEncodingDelta
+	default:
+		return 0, fmt.Errorf("product aggregate index %d: %w", index, fdblayer.ErrUnknownIndex)
+	}
+
+	aggKey, err := fdblayer.PackAggregateKey(r.dir, ProductTypeID, index, groupKey, groupSchema)
+	if err != nil {
+		return 0, err
+	}
+	raw := tr.Get(aggKey).MustGet()
+	return fdblayer.DecodeAggregateValue(raw, encoding, "product")
 }

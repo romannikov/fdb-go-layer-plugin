@@ -8,21 +8,23 @@ The compiler is structured around a **language-neutral Intermediate Representati
 
 ## Supported Features
 
-- **Uniform `Repository[T]` Operations**: Every standard record repository is constructed with `New<Msg>Repository(dir)` and implements `fdblayer.Repository[*Msg]` with 7 methods taking `(ctx context.Context, tr fdblayer.Transaction, ...)`:
+- **Uniform `Repository[T]` Operations**: Every standard record repository is constructed with `New<Msg>Repository(dir)` and implements `fdblayer.Repository[*Msg]` with 8 methods taking `(ctx context.Context, tr fdblayer.Transaction, ...)`:
   - `Insert(ctx, tr, entity, opts ...fdblayer.WriteOption)`: Inserts a new record, returning `fdblayer.ErrAlreadyExists` if the primary key already exists.
   - `Upsert(ctx, tr, entity, opts ...fdblayer.WriteOption)`: Inserts or updates a record in-place with minimal-write index delta maintenance.
-  - `Delete(ctx, tr, key)`: Deletes a record by `fdblayer.Key` and clears all secondary/fan-out index entries.
+  - `Delete(ctx, tr, key)`: Deletes a record by `fdblayer.Key` and clears all secondary/fan-out index entries (and decrements `AGGREGATE_COUNT` / `AGGREGATE_SUM` aggregate indexes).
   - `ReadRow(ctx, tr, key)`: Reads a single record by `fdblayer.Key` (`fdblayer.ErrNotFound` if missing).
   - `ReadRows(ctx, tr, keys)`: Pipelined parallel batch fetch by `[]fdblayer.Key` in 1 RTT.
   - `Scan(ctx, tr, rng, opts ...fdblayer.ScanOption)`: Cursor-paginated primary key scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)`, or `fdblayer.Range(begin, end)` with optional `fdblayer.WithLimit(n)`, `fdblayer.WithReverse()`, and `fdblayer.WithCursor(c)`.
   - `ScanIndex(ctx, tr, index, rng, opts ...fdblayer.ScanOption)`: Cursor-paginated secondary/fan-out index scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)` (exact or partial leading prefix), or `fdblayer.Range(begin, end)` using generated `<Msg>By<Fields>` `fdblayer.IndexID` constants.
+  - `ReadAggregate(ctx, tr, index, groupKey)`: Reads an $O(1)$ atomic aggregate secondary index (`AGGREGATE_COUNT`, `AGGREGATE_SUM`, `AGGREGATE_MIN`, `AGGREGATE_MAX`) for `groupKey` (`fdblayer.Key`).
 - **Direct `fdb.Transaction` Compatibility**: Repository methods accept `fdblayer.Transaction` directly, which is satisfied out-of-the-box by `fdb.Transaction` inside standard `db.Transact(func(tr fdb.Transaction) (any, error) { ... })` blocks as well as by in-memory `MockKV` for unit tests.
 - **Primary Keys**: Support for custom primary keys (`option (annotations.primary_key) = { fields: [...] };`), including single-field and compound keys composed of scalar, `bytes`, or `enum` fields.
 - **Secondary & Fan-Out Indexes**: Support for single-field and composite secondary indexes with explicit `id` (`> 0`), automatic maintenance on `Insert`, `Upsert`, and `Delete`, exact/prefix/range queries via `ScanIndex`, and **fan-out** indexes on `repeated` fields with deduplication and minimal-write delta updates.
+- **Aggregate Secondary Indexes (`AGGREGATE_COUNT`, `AGGREGATE_SUM`, `AGGREGATE_MIN`, `AGGREGATE_MAX`)**: Materialized group-by rollups maintained automatically on `Insert`, `Upsert`, and `Delete` using FoundationDB conflict-free atomic mutations (`tr.Add`, `tr.Min`, `tr.Max`) and queried in $O(1)$ via `ReadAggregate`.
 - **Time Versionstamps**: Support for FDB 12-byte versionstamps (`[(annotations.is_versionstamp) = true]`) to order records by commit time, with optional 16-bit user versions (`fdblayer.WithUserVersion(n)` passed to `Insert`, `Upsert`, or `Enqueue`) to disambiguate multiple writes within the same transaction.
 - **Queue Support**: Built-in support for FIFO queues (`option (annotations.is_queue) = true;`) implementing `fdblayer.QueueRepository[*Msg]` (`Enqueue(ctx, tr, msg, opts ...fdblayer.WriteOption)`, `Dequeue(ctx, tr, partitionKey)`, `DequeueBatch(ctx, tr, partitionKey, limit)`) ordered by commit versionstamp.
 - **Unified Store**: Support for both standard data records and queue messages within the same system and `directory.DirectorySubspace`.
-- **Shared Protobuf Annotations (`proto/fdb-layer/annotations.proto`)**: Single source of truth for compile-time message `type_id`s, primary keys, secondary/fan-out indexes, versionstamped primary keys, and FIFO queues. Reserved options (`mutation`, `interleave`, `split_large_records`, `ttl_field`, and `SecondaryIndex` options `unique`, `storing`, `sparse`, `aggregate`, `aggregate_field`) are documented in `annotations.proto` with `// [NOT IMPLEMENTED YET]` and rejected at compile time if specified.
+- **Shared Protobuf Annotations (`proto/fdb-layer/annotations.proto`)**: Single source of truth for compile-time message `type_id`s, primary keys, secondary/fan-out/aggregate indexes, versionstamped primary keys, and FIFO queues. Reserved options (`mutation`, `interleave`, `split_large_records`, `ttl_field`, and `SecondaryIndex` options `unique`, `storing`, `sparse`) are documented in `annotations.proto` with `// [NOT IMPLEMENTED YET]` and rejected at compile time if specified.
 
 ---
 
@@ -118,7 +120,13 @@ Assume we have a `User` message with `TypeID = 1` and a `Task` message with `Typ
 - *Note*: The plugin does NOT store the whole record in the index. It stores a **reference** to the record (the primary key `"u123"`) within the index key itself.
 - *Example*: Scanning `generated.UserByEmail` with `fdblayer.Prefix("user@example.com")` finds this index key, extracts the trailing `"u123"` primary key, and fetches the corresponding `User` record in a pipelined batch read.
 
-#### 3. Queue Message
+#### 3. Aggregate Secondary Index (`AGGREGATE_COUNT`, `AGGREGATE_SUM`, `AGGREGATE_MIN`, `AGGREGATE_MAX`)
+- **Purpose**: Maintains $O(1)$ conflict-free group-by rollups (`COUNT`, `SUM`, `MIN`, `MAX`) across records using FoundationDB atomic mutations (`tr.Add`, `tr.Min`, `tr.Max`).
+- **Key**: `[Data Subspace] + (1, 1, indexID, group_1, ..., group_m)` (No primary key suffix; all records sharing the same grouping tuple map to a single accumulator key)
+- **Value**: `[8-byte Little-Endian uint64]` (two's complement `int64` for `COUNT`/`SUM`; sign-bit-flipped `int64` or raw `uint64` for `MIN`/`MAX`)
+- *Example*: Calling `orderRepo.ReadAggregate(ctx, tr, generated.OrderCountByTenantIdStatus, fdblayer.Key{"acme", "PENDING"})` reads the single 8-byte counter key in 1 RTT without scanning matching rows.
+
+#### 4. Queue Message
 - **Purpose**: Stores messages in a FIFO queue ordered by commit versionstamp.
 - **Key**: `[Data Subspace] + (2, 0, queue_name, versionstamp, shard_id)` (Uses `TypeID = 2` and namespace constant `0` for data; `versionstamp` is placed immediately after `queue_name` to guarantee global FIFO order)
 - **Value**: `[Serialized Task Protobuf Blob]`

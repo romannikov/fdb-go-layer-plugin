@@ -21,15 +21,14 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// [NOT IMPLEMENTED YET]
 type IndexAggregateType int32
 
 const (
 	IndexAggregateType_AGGREGATE_NONE  IndexAggregateType = 0 // Standard / Fan-Out secondary index
-	IndexAggregateType_AGGREGATE_COUNT IndexAggregateType = 1 // [NOT IMPLEMENTED YET] Maintains atomic int64 count grouped by `fields`
-	IndexAggregateType_AGGREGATE_SUM   IndexAggregateType = 2 // [NOT IMPLEMENTED YET] Maintains atomic int64 sum of `aggregate_field` grouped by `fields`
-	IndexAggregateType_AGGREGATE_MIN   IndexAggregateType = 3 // [NOT IMPLEMENTED YET] Maintains atomic min of `aggregate_field` grouped by `fields`
-	IndexAggregateType_AGGREGATE_MAX   IndexAggregateType = 4 // [NOT IMPLEMENTED YET] Maintains atomic max of `aggregate_field` grouped by `fields`
+	IndexAggregateType_AGGREGATE_COUNT IndexAggregateType = 1 // Maintains atomic int64 count grouped by `fields`
+	IndexAggregateType_AGGREGATE_SUM   IndexAggregateType = 2 // Maintains atomic int64 sum of `aggregate_field` grouped by `fields`
+	IndexAggregateType_AGGREGATE_MIN   IndexAggregateType = 3 // Maintains atomic min of `aggregate_field` grouped by `fields`
+	IndexAggregateType_AGGREGATE_MAX   IndexAggregateType = 4 // Maintains atomic max of `aggregate_field` grouped by `fields`
 )
 
 // Enum value maps for IndexAggregateType.
@@ -235,7 +234,7 @@ type SecondaryIndex struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	// Indexed field names in tuple sort order.
+	// Indexed field names in tuple sort order (or grouping field names for aggregate indexes; may be empty for ungrouped aggregates).
 	Fields []string `protobuf:"bytes,1,rep,name=fields,proto3" json:"fields,omitempty"`
 	// Mandatory explicit index ID (> 0). Compilation fails if id is 0 or duplicated within a message.
 	Id uint32 `protobuf:"varint,2,opt,name=id,proto3" json:"id,omitempty"`
@@ -245,9 +244,9 @@ type SecondaryIndex struct {
 	Storing []string `protobuf:"bytes,4,rep,name=storing,proto3" json:"storing,omitempty"`
 	// [NOT IMPLEMENTED YET] Omit index entry when any indexed field has its zero/empty value.
 	Sparse bool `protobuf:"varint,5,opt,name=sparse,proto3" json:"sparse,omitempty"`
-	// [NOT IMPLEMENTED YET] Atomic aggregate index type (COUNT, SUM, MIN, MAX grouped by `fields`).
+	// Atomic aggregate index type (COUNT, SUM, MIN, MAX grouped by `fields`).
 	Aggregate IndexAggregateType `protobuf:"varint,6,opt,name=aggregate,proto3,enum=annotations.IndexAggregateType" json:"aggregate,omitempty"`
-	// [NOT IMPLEMENTED YET] Target integer field name for AGGREGATE_SUM, AGGREGATE_MIN, or AGGREGATE_MAX.
+	// Target integer field name for AGGREGATE_SUM, AGGREGATE_MIN, or AGGREGATE_MAX.
 	AggregateField string `protobuf:"bytes,7,opt,name=aggregate_field,json=aggregateField,proto3" json:"aggregate_field,omitempty"`
 }
 

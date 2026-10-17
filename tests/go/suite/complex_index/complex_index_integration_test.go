@@ -1111,3 +1111,49 @@ func TestIntegration_DequeueBatch_AndPrefixReverseScanOrder(t *testing.T) {
 		t.Fatalf("unexpected ScanIndex reverse pages: p1=%+v, p2=%+v", statusRev1, statusRev2)
 	}
 }
+
+func TestIntegration_AggregateSecondaryIndexes_PostAndOrder(t *testing.T) {
+	ctx := context.Background()
+	db := fdb.MustOpenDefault()
+	dir, cleanup := tests.TestDir(t, db)
+	defer cleanup()
+
+	postRepo := store.NewPostRepository(dir)
+	orderRepo := store.NewOrderRepository(dir)
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if err := postRepo.Insert(ctx, tr, &store.Post{Id: "p1", Tags: []string{"go", "fdb", "go"}}); err != nil {
+			return err
+		}
+		if err := postRepo.Insert(ctx, tr, &store.Post{Id: "p2", Tags: []string{"go", "cloud"}}); err != nil {
+			return err
+		}
+		if err := orderRepo.Insert(ctx, tr, &store.Order{
+			TenantId:  "t1",
+			OrderSeq:  1,
+			Status:    store.OrderStatus_ORDER_STATUS_PENDING,
+			CreatedAt: 100,
+		}); err != nil {
+			return err
+		}
+		return orderRepo.Insert(ctx, tr, &store.Order{
+			TenantId:  "t1",
+			OrderSeq:  2,
+			Status:    store.OrderStatus_ORDER_STATUS_PENDING,
+			CreatedAt: 250,
+		})
+	})
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if cnt, err := postRepo.ReadAggregate(ctx, tr, store.PostCountByTags, fdblayer.Key{"go"}); err != nil || cnt != 2 {
+			t.Fatalf("expected PostCountByTags('go')=2, got %d, err=%v", cnt, err)
+		}
+		if cnt, err := orderRepo.ReadAggregate(ctx, tr, store.OrderCountByTenantIdStatus, fdblayer.Key{"t1", store.OrderStatus_ORDER_STATUS_PENDING}); err != nil || cnt != 2 {
+			t.Fatalf("expected OrderCountByTenantIdStatus(t1, PENDING)=2, got %d, err=%v", cnt, err)
+		}
+		if sum, err := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAtByTenantId, fdblayer.Key{"t1"}); err != nil || sum != 350 {
+			t.Fatalf("expected OrderSumCreatedAtByTenantId(t1)=350, got %d, err=%v", sum, err)
+		}
+		return nil
+	})
+}
