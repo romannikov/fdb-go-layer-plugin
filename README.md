@@ -1,54 +1,17 @@
 # FoundationDB Protobuf Layer (`fdb-layer`)
 
-A `protoc` compiler (`protoc-gen-fdb-go`) and runtime library that generates FoundationDB data access layer code from shared Protobuf annotations (`proto/fdb-layer/annotations.proto`). It simplifies building applications on top of FoundationDB by handling the boilerplate of mapping Protobuf messages to keys, secondary indexes, and FIFO queues.
-
-The compiler is structured around a **language-neutral Intermediate Representation (`compiler/ir`)** and a **pluggable backend interface (`compiler/backend`)** so new target languages can be added without duplicating schema parsing or validation logic. Currently, the **Go** backend (`compiler/backend/golang`) and runtime (`runtimes/go`) are implemented.
+A `protoc` compiler and runtime library that generates FoundationDB data access layer code from shared Protobuf annotations. It simplifies building applications on top of FoundationDB by handling the boilerplate of mapping Protobuf messages to keys, secondary indexes, atomic aggregations, and FIFO queues.
 
 ---
 
 ## Supported Features
 
-- **Uniform `Repository[T]` Operations**: Every standard record repository is constructed with `New<Msg>Repository(dir)` and implements `fdblayer.Repository[*Msg]` with 9 methods taking `(ctx context.Context, tr fdblayer.Transaction, ...)`:
-  - `Insert(ctx, tr, entity, opts ...fdblayer.WriteOption)`: Inserts a new record, returning `fdblayer.ErrAlreadyExists` if the primary key already exists.
-  - `Upsert(ctx, tr, entity, opts ...fdblayer.WriteOption)`: Inserts or updates a record in-place with minimal-write index delta maintenance.
-  - `Delete(ctx, tr, key)`: Deletes a record by `fdblayer.Key` and clears all secondary/fan-out index entries (decrements `AGGREGATE_COUNT` / `AGGREGATE_SUM` aggregate indexes, and clears primary-key-scoped `mutation` indexes).
-  - `Mutate(ctx, tr, index, key, val)`: Applies a 0-RTT conflict-free atomic mutation (`MUTATION_COUNT`, `MUTATION_ADD`, `MUTATION_MIN`, `MUTATION_MAX`) to a manual mutation secondary index for `key` (`fdblayer.Key`).
-  - `ReadRow(ctx, tr, key)`: Reads a single record by `fdblayer.Key` (`fdblayer.ErrNotFound` if missing).
-  - `ReadRows(ctx, tr, keys)`: Pipelined parallel batch fetch by `[]fdblayer.Key` in 1 RTT.
-  - `Scan(ctx, tr, rng, opts ...fdblayer.ScanOption)`: Cursor-paginated primary key scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)`, or `fdblayer.Range(begin, end)` with optional `fdblayer.WithLimit(n)`, `fdblayer.WithReverse()`, and `fdblayer.WithCursor(c)`.
-  - `ScanIndex(ctx, tr, index, rng, opts ...fdblayer.ScanOption)`: Cursor-paginated secondary/fan-out index scan over `fdblayer.AllKeys()`, `fdblayer.Prefix(...)` (exact or partial leading prefix), or `fdblayer.Range(begin, end)` using generated `<Msg>By<Fields>` `fdblayer.IndexID` constants.
-  - `ReadAggregate(ctx, tr, index, groupKey)`: Reads an $O(1)$ atomic aggregate (`AGGREGATE_COUNT`, `AGGREGATE_SUM`, `AGGREGATE_MIN`, `AGGREGATE_MAX`) or mutation (`MUTATION_COUNT`, `MUTATION_ADD`, `MUTATION_MIN`, `MUTATION_MAX`) secondary index for `groupKey` (`fdblayer.Key`).
-- **Direct `fdb.Transaction` Compatibility**: Repository methods accept `fdblayer.Transaction` directly, which is satisfied out-of-the-box by `fdb.Transaction` inside standard `db.Transact(func(tr fdb.Transaction) (any, error) { ... })` blocks as well as by in-memory `MockKV` for unit tests.
-- **Primary Keys**: Support for custom primary keys (`option (annotations.primary_key) = { fields: [...] };`), including single-field and compound keys composed of scalar, `bytes`, or `enum` fields.
-- **Secondary & Fan-Out Indexes**: Support for single-field and composite secondary indexes with explicit `id` (`> 0`), automatic maintenance on `Insert`, `Upsert`, and `Delete`, exact/prefix/range queries via `ScanIndex`, and **fan-out** indexes on `repeated` fields with deduplication and minimal-write delta updates.
-- **Aggregate Secondary Indexes (`AGGREGATE_COUNT`, `AGGREGATE_SUM`, `AGGREGATE_MIN`, `AGGREGATE_MAX`)**: Materialized group-by rollups maintained automatically on `Insert`, `Upsert`, and `Delete` using FoundationDB conflict-free atomic mutations (`tr.Add`, `tr.Min`, `tr.Max`) and queried in $O(1)$ via `ReadAggregate`.
-- **Manual Atomic Mutation Secondary Indexes (`MUTATION_COUNT`, `MUTATION_ADD`, `MUTATION_MIN`, `MUTATION_MAX`)**: High-contention per-key or per-group counters and watermarks (such as view counts, likes, or max latency) updated explicitly via `Mutate` in 0 RTTs without rewriting the serialized Protobuf record in `DataNamespace`, and queried in $O(1)$ via `ReadAggregate`.
-- **Time Versionstamps**: Support for FDB 12-byte versionstamps (`[(annotations.is_versionstamp) = true]`) to order records by commit time, with optional 16-bit user versions (`fdblayer.WithUserVersion(n)` passed to `Insert`, `Upsert`, or `Enqueue`) to disambiguate multiple writes within the same transaction.
-- **Queue Support**: Built-in support for FIFO queues (`option (annotations.is_queue) = true;`) implementing `fdblayer.QueueRepository[*Msg]` (`Enqueue(ctx, tr, msg, opts ...fdblayer.WriteOption)`, `Dequeue(ctx, tr, partitionKey)`, `DequeueBatch(ctx, tr, partitionKey, limit)`) ordered by commit versionstamp.
-- **Unified Store**: Support for both standard data records and queue messages within the same system and `directory.DirectorySubspace`.
-- **Shared Protobuf Annotations (`proto/fdb-layer/annotations.proto`)**: Single source of truth for compile-time message `type_id`s, primary keys, secondary/fan-out/aggregate indexes, versionstamped primary keys, and FIFO queues. Reserved options (`mutation`, `interleave`, `split_large_records`, `ttl_field`, and `SecondaryIndex` options `unique`, `storing`, `sparse`) are documented in `annotations.proto` with `// [NOT IMPLEMENTED YET]` and rejected at compile time if specified.
-
----
-
-## Repository Structure
-
-```text
-fdb-layer/
-├── proto/
-│   └── fdb-layer/
-│       └── annotations.proto          # Shared Protobuf options (tags 50000..50008)
-├── compiler/                          # Extensible protoc compiler written in Go
-│   ├── ir/                            # Language-neutral Intermediate Representation (IR)
-│   ├── backend/                       # Common backend Generator interface & Registry
-│   │   └── golang/                    # Go backend emitting *.fdb.go
-│   └── cmd/
-│       └── protoc-gen-fdb-go/         # CLI entrypoint for Go codegen
-├── runtimes/
-│   └── go/                            # Go runtime package (github.com/romannikov/fdb-layer/runtimes/go)
-└── tests/
-    ├── proto/                         # Shared test schemas (store.proto)
-    └── go/                            # Go unit (MockKV) and live FDB integration tests
-```
+- **Type-Safe CRUD & Batch Reads**: Insert, upsert, delete, and fetch Protobuf records by single-field or composite primary keys, including pipelined batch reads that fetch multiple records in a single network round-trip.
+- **Range Scans & Cursor Pagination**: Query primary keys or secondary indexes by exact match, leading tuple prefix, or bounded `[begin, end)` range with configurable page limits, reverse iteration, and resume cursors.
+- **Secondary & Fan-Out Indexes**: Index scalar, composite, or `repeated` (fan-out) fields directly from Protobuf annotations. The generated repository automatically maintains index entries on `Insert`, `Upsert` (updating only changed index deltas), and `Delete`.
+- **Automatic Aggregate Indexes (`COUNT`, `SUM`, `MIN`, `MAX`)**: Maintain conflict-free group-by rollups (or global table-wide totals) automatically whenever records are inserted, upserted, or deleted, and read the aggregated value in $O(1)$ via `ReadAggregate`.
+- **Manual Atomic Mutation Indexes (`COUNT`, `ADD`, `MIN`, `MAX`)**: Update high-contention counters and watermarks (such as view counts, likes, or peak latency) in 0 RTTs via `Mutate` without reading or rewriting the underlying Protobuf record.
+- **Versionstamped Keys & FIFO Queues**: Order records by commit time or turn a message into a transactional FIFO queue (`Enqueue`, `Dequeue`, `DequeueBatch`) powered by FoundationDB 12-byte versionstamps.
 
 ---
 
@@ -75,93 +38,66 @@ protoc -I proto -I . \
   generated/store.proto
 ```
 
-To regenerate all internal annotations and test schemas in this repository, run:
-
-```bash
-./update_protos.sh
-```
-
 ---
 
 ## Data Storage Layout
 
-The plugin stores data in FoundationDB using a deterministic key-value layout. All keys are prefixed by a `directory.DirectorySubspace` bound to the repository constructor `New<Msg>Repository(dir)`.
+The layer stores data in FoundationDB using a deterministic tuple key-value layout. All keys are prefixed by the `directory.DirectorySubspace` passed to the repository constructor `New<Msg>Repository(dir)`.
 
 ### Data Locality
 
-Using a directory subspace ensures that all data for a specific application or layer is stored in a contiguous key range in FoundationDB. This provides strong data locality, making range reads efficient and keeping related data physically close in the cluster.
+Using a directory subspace ensures that all data for a specific application or tenant is stored in a contiguous key range in FoundationDB. This provides strong data locality, making range reads efficient and keeping related data physically close in the cluster.
 
 ### Key Components
 
 - **Subspace**: The root `directory.DirectorySubspace` for your application data.
-- **TypeID**: A mandatory non-zero compile-time integer ID (`option (annotations.type_id) = <N>;`) for each message type. Values `<= 255` use a compact 2-byte FDB Tuple integer encoding, minimizing key size in FDB compared to using full message names and eliminating any runtime metadata registry lookup.
-- **Namespaces & Tuple Type Normalization**:
-  1. **Namespaces** are packed as signed 64-bit integers (`int64`):
-     - `DataNamespace` = `0`
-     - `IndexNamespace` = `1`
-  2. **Integer & Enum Normalization**:
-     - Signed integers (`int32`, `sint32`, `sfixed32`, `int64`, `sint64`, `sfixed64`) and `enum` values are widened to `int64` before tuple packing.
-     - Unsigned integers (`uint32`, `fixed32`, `uint64`, `fixed64`) are widened to `uint64` before tuple packing.
-  3. **Byte Strings (`bytes` fields)**:
-     - Protobuf `bytes` fields in primary keys and secondary/fan-out indexes are packed as raw FDB Tuple Byte Strings (`[]byte`).
+- **Type ID**: A mandatory non-zero integer ID (`option (annotations.type_id) = <N>;`) for each message type. Values `<= 255` use a compact 2-byte FDB Tuple integer encoding, keeping keys small and surviving message renames safely.
+- **Namespaces**:
+  - `0` — Primary data records and queue messages.
+  - `1` — Secondary, fan-out, aggregate, and atomic mutation indexes.
 
 ### Layout Examples
 
-Assume we have a `User` message with `TypeID = 1` and a `Task` message with `TypeID = 2`.
+Assume a `User` message with `type_id = 1`, an `Order` message with `type_id = 2`, and a `Task` queue message with `type_id = 3`:
 
 #### 1. Standard Data Record
-- **Purpose**: Stores the serialized Protobuf message.
-- **Key**: `[Data Subspace] + (1, 0, "u123")` (Uses `TypeID = 1` and namespace constant `0` for data)
-- **Value**: `[Serialized User Protobuf Blob]`
-- *Example*: A user with ID `"u123"` is stored at key `app_data/1/0/"u123"`.
+- **Purpose**: Stores the serialized Protobuf message under its primary key.
+- **Key**: `[Subspace] + (1, 0, "u123")`
+- **Value**: `[Serialized User Protobuf Bytes]`
 
 #### 2. Secondary & Fan-Out Index
-- **Purpose**: Enables lookup and range scans by indexed scalar or `repeated` fields.
-- **Key**: `[Data Subspace] + (1, 1, indexID, "user@example.com", "u123")` (Uses `TypeID = 1`, namespace constant `1` for index, and the explicit non-zero `SecondaryIndex.id`)
+- **Purpose**: Enables lookups and range scans by indexed scalar or `repeated` fields.
+- **Key**: `[Subspace] + (1, 1, indexID, "user@example.com", "u123")`
 - **Value**: `[]` (empty)
-- *Note*: The plugin does NOT store the whole record in the index. It stores a **reference** to the record (the primary key `"u123"`) within the index key itself.
-- *Example*: Scanning `generated.UserByEmail` with `fdblayer.Prefix("user@example.com")` finds this index key, extracts the trailing `"u123"` primary key, and fetches the corresponding `User` record in a pipelined batch read.
+- *Note*: The index key appends the record's primary key (`"u123"`). Scanning the index extracts the primary keys from matching index entries and fetches the full records in a single pipelined batch read.
 
-#### 3. Aggregate Secondary Index (`AGGREGATE_COUNT`, `AGGREGATE_SUM`, `AGGREGATE_MIN`, `AGGREGATE_MAX`)
-- **Purpose**: Maintains $O(1)$ conflict-free group-by rollups (`COUNT`, `SUM`, `MIN`, `MAX`) across records using FoundationDB atomic mutations (`tr.Add`, `tr.Min`, `tr.Max`).
-- **Key**: `[Data Subspace] + (1, 1, indexID, group_1, ..., group_m)` (No primary key suffix; all records sharing the same grouping tuple map to a single accumulator key)
-- **Value**: `[8-byte Little-Endian uint64]` (two's complement `int64` for `COUNT`/`SUM`; sign-bit-flipped `int64` or raw `uint64` for `MIN`/`MAX`)
-- *Example*: Calling `orderRepo.ReadAggregate(ctx, tr, generated.OrderCountByTenantIdStatus, fdblayer.Key{"acme", "PENDING"})` reads the single 8-byte counter key in 1 RTT without scanning matching rows.
+#### 3. Aggregate & Atomic Mutation Index
+- **Purpose**: Maintains $O(1)$ conflict-free counters, sums, and min/max watermarks using FoundationDB atomic operations (`Add`, `Min`, `Max`).
+- **Key**: `[Subspace] + (2, 1, indexID, "acme", "PENDING")`
+- **Value**: `[8-byte Little-Endian Integer]`
+- *Note*: All records sharing the same grouping key update the same 8-byte accumulator key atomically, allowing `ReadAggregate` to return the result in a single key read without scanning records.
 
 #### 4. Queue Message
 - **Purpose**: Stores messages in a FIFO queue ordered by commit versionstamp.
-- **Key**: `[Data Subspace] + (2, 0, queue_name, versionstamp, shard_id)` (Uses `TypeID = 2` and namespace constant `0` for data; `versionstamp` is placed immediately after `queue_name` to guarantee global FIFO order)
-- **Value**: `[Serialized Task Protobuf Blob]`
-- *Example*: A task in the `"high-priority"` queue (`queue_name`) with `shard_id = 1` is stored at `app_data/2/0/"high-priority"/versionstamp/1`.
+- **Key**: `[Subspace] + (3, 0, "send-email", versionstamp, shard_id)`
+- **Value**: `[Serialized Task Protobuf Bytes]`
 
 ### How to Make Data User-Local
 
-If you want to ensure that all data belonging to a specific user is stored together (e.g., for GDPR compliance, multi-tenant isolation, or efficient cleanup), you can structure your directory subspaces by user ID:
-
-`app_state/user_id/...`
-
-In code, create the subspace and pass it to the repository constructor:
+To isolate all records and indexes belonging to a specific user or tenant into a dedicated contiguous key range (e.g., for multi-tenant isolation or fast tenant deletion), open a per-user directory subspace:
 
 ```go
 userDir, _ := directory.CreateOrOpen(db, []string{"app_state", "u123"}, nil)
 userRepo := generated.NewUserRepository(userDir)
-_, err := db.Transact(func(tr fdb.Transaction) (any, error) {
-	// Pass ctx and tr to repository methods
-	return nil, nil
-})
 ```
-
-This ensures all records and secondary indexes for `"u123"` are stored in a single contiguous key range.
 
 ---
 
 ## Proto and Code Examples
 
-Here are examples of how to define your messages and use the generated code for common use cases.
+### 1. Standard Record & Secondary Indexes
 
-### 1. Standard Record
-
-This example shows basic CRUD operations (`Insert`, `Upsert`, `ReadRow`, `ReadRows`, `Delete`) and scans (`Scan`, `ScanIndex`) for a standard record.
+This example shows CRUD operations (`Insert`, `Upsert`, `ReadRow`, `ReadRows`, `Delete`) and scans (`Scan`, `ScanIndex`) for a standard record.
 
 #### Define Proto
 
@@ -210,7 +146,7 @@ func main() {
 	userRepo := generated.NewUserRepository(dataDir)
 
 	_, err := db.Transact(func(tr fdb.Transaction) (any, error) {
-		// Insert a new user (fails with fdblayer.ErrAlreadyExists if PK exists)
+		// Insert a new user (returns fdblayer.ErrAlreadyExists if the PK already exists)
 		user := &generated.User{Id: "u123", Email: "user@example.com", Name: "John"}
 		if err := userRepo.Insert(ctx, tr, user); err != nil {
 			return nil, err
@@ -223,7 +159,7 @@ func main() {
 		}
 		fmt.Println("Found user:", u.Name)
 
-		// Scan by Secondary Index (exact or leading prefix match)
+		// Scan by Secondary Index (supports Prefix, Range, WithLimit, WithReverse, WithCursor)
 		page, err := userRepo.ScanIndex(
 			ctx,
 			tr,
@@ -248,155 +184,199 @@ func main() {
 
 ---
 
-### 2. Queue
+### 2. Automatic Aggregate & Manual Atomic Mutation Indexes
 
-This example shows how to insert a user and enqueue `"send-email"` tasks in the **same transaction**, ensuring atomicity. When enqueuing multiple messages within the same transaction, pass `fdblayer.WithUserVersion(n)` with a distinct 16-bit user version (`0..65535`).
+- **Automatic Aggregate Indexes (`aggregate`)** are maintained automatically on `Insert`, `Upsert`, and `Delete` based on the record's fields.
+- **Manual Atomic Mutation Indexes (`mutation`)** are updated explicitly via `Mutate` in 0 RTTs without rewriting the record, and primary-key-scoped mutation entries are cleaned up automatically when the record is deleted.
+- Both are read in $O(1)$ via `ReadAggregate`.
+
+#### Define Proto
+
+```protobuf
+syntax = "proto3";
+
+import "fdb-layer/annotations.proto";
+
+message Post {
+  option (annotations.type_id) = 2;
+  option (annotations.primary_key) = {
+    fields: ["id"]
+  };
+
+  // Automatic aggregates (updated on Insert / Upsert / Delete)
+  // Generates: PostCountByAuthorId
+  option (annotations.secondary_index) = {
+    id: 1
+    fields: ["author_id"]
+    aggregate: AGGREGATE_COUNT
+  };
+
+  // Generates: PostSumWordCountByAuthorId
+  option (annotations.secondary_index) = {
+    id: 2
+    fields: ["author_id"]
+    aggregate: AGGREGATE_SUM
+    aggregate_field: "word_count"
+  };
+
+  // Manual atomic mutations (updated explicitly via repo.Mutate)
+  // Generates: PostCountViewsById
+  option (annotations.secondary_index) = {
+    id: 3
+    fields: ["id"]
+    mutation: MUTATION_COUNT
+    name: "views"
+  };
+
+  // Generates: PostMaxLatencyMsById
+  option (annotations.secondary_index) = {
+    id: 4
+    fields: ["id"]
+    mutation: MUTATION_MAX
+    name: "latency_ms"
+  };
+
+  string id = 1;
+  string author_id = 2;
+  int64 word_count = 3;
+}
+```
+
+#### Use Generated Code
+
+```go
+_, err := db.Transact(func(tr fdb.Transaction) (any, error) {
+	// 1. Insert a post — automatically updates PostCountByAuthorId (+1)
+	//    and PostSumWordCountByAuthorId (+1200)
+	post := &generated.Post{
+		Id:        "post-1",
+		AuthorId:  "alice",
+		WordCount: 1200,
+	}
+	if err := postRepo.Insert(ctx, tr, post); err != nil {
+		return nil, err
+	}
+
+	// 2. Apply conflict-free manual atomic mutations in 0 RTTs without rewriting the Post record
+	if err := postRepo.Mutate(ctx, tr, generated.PostCountViewsById, fdblayer.Key{"post-1"}, 1); err != nil {
+		return nil, err
+	}
+	if err := postRepo.Mutate(ctx, tr, generated.PostMaxLatencyMsById, fdblayer.Key{"post-1"}, 42); err != nil {
+		return nil, err
+	}
+
+	return nil, nil
+})
+
+// 3. Query both automatic aggregates and manual mutations via ReadAggregate
+_, err = db.Transact(func(tr fdb.Transaction) (any, error) {
+	postCount, err := postRepo.ReadAggregate(ctx, tr, generated.PostCountByAuthorId, fdblayer.Key{"alice"})
+	if err != nil {
+		return nil, err
+	}
+	totalWords, err := postRepo.ReadAggregate(ctx, tr, generated.PostSumWordCountByAuthorId, fdblayer.Key{"alice"})
+	if err != nil {
+		return nil, err
+	}
+	views, err := postRepo.ReadAggregate(ctx, tr, generated.PostCountViewsById, fdblayer.Key{"post-1"})
+	if err != nil {
+		return nil, err
+	}
+	maxLatency, err := postRepo.ReadAggregate(ctx, tr, generated.PostMaxLatencyMsById, fdblayer.Key{"post-1"})
+	if err != nil {
+		return nil, err
+	}
+	fmt.Printf("author posts=%d words=%d | post views=%d maxLatency=%dms\n",
+		postCount, totalWords, views, maxLatency)
+	return nil, nil
+})
+```
+
+---
+
+### 3. Transactional FIFO Queue
+
+This example shows how to insert a user and enqueue `"send-email"` tasks in the **same transaction**, and later dequeue tasks in FIFO commit order. When enqueuing multiple messages within the same transaction, pass `fdblayer.WithUserVersion(n)` with a distinct 16-bit user version (`0..65535`).
 
 #### Define Proto
 
 ```protobuf
 message Task {
-  option (annotations.type_id) = 2;
+  option (annotations.type_id) = 3;
   option (annotations.is_queue) = true;
   option (annotations.primary_key) = {
     fields: ["queue_name", "versionstamp", "shard_id"]
   };
 
   string queue_name = 1;
-  uint32 shard_id = 2; // Tie-breaker / producer shard identifier
+  uint32 shard_id = 2; // Tie-breaker / producer identifier
   bytes versionstamp = 3 [(annotations.is_versionstamp) = true];
   bytes payload = 4;
 }
 ```
 
-#### Use Generated Code
+#### Enqueue Tasks
 
 ```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"math/rand"
-
-	"github.com/apple/foundationdb/bindings/go/src/fdb"
-	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
-	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
-	"your/package/generated"
-)
-
-func main() {
-	fdb.MustAPIVersion(730)
-	db := fdb.MustOpenDefault()
-	ctx := context.Background()
-
-	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
-	userRepo := generated.NewUserRepository(dataDir)
-	taskRepo := generated.NewTaskRepository(dataDir)
-
-	_, err := db.Transact(func(tr fdb.Transaction) (any, error) {
-		// Insert a user
-		user := &generated.User{Id: "u123", Email: "user@example.com", Name: "John"}
-		if err := userRepo.Insert(ctx, tr, user); err != nil {
-			return nil, err
-		}
-
-		// Enqueue a task to send a welcome email in the same transaction (defaults to userVersion 0)
-		task1 := &generated.Task{
-			QueueName: "send-email",
-			// shard_id is stored after the commit versionstamp as a tie-breaker / producer tag.
-			// (To partition a high-throughput queue across independent shards, include the shard
-			// in QueueName, e.g. fmt.Sprintf("send-email-%d", rand.Intn(10))).
-			ShardId: uint32(rand.Intn(10)),
-			Payload: []byte("u123"), // Reference the user ID in payload
-		}
-		if err := taskRepo.Enqueue(ctx, tr, task1); err != nil {
-			return nil, err
-		}
-
-		// When enqueuing a second task in the same transaction, pass fdblayer.WithUserVersion(1)
-		task2 := &generated.Task{
-			QueueName: "send-email",
-			ShardId:   uint32(rand.Intn(10)),
-			Payload:   []byte("u123-audit"),
-		}
-		return nil, taskRepo.Enqueue(ctx, tr, task2, fdblayer.WithUserVersion(1))
-	})
-	if err != nil {
-		panic(err)
+_, err := db.Transact(func(tr fdb.Transaction) (any, error) {
+	// Insert a user
+	user := &generated.User{Id: "u123", Email: "user@example.com", Name: "John"}
+	if err := userRepo.Insert(ctx, tr, user); err != nil {
+		return nil, err
 	}
-	fmt.Println("User created and email tasks enqueued atomically.")
-}
+
+	// Enqueue a welcome email task in the same transaction (defaults to userVersion 0)
+	task1 := &generated.Task{
+		QueueName: "send-email",
+		ShardId:   uint32(rand.Intn(10)),
+		Payload:   []byte("u123"),
+	}
+	if err := taskRepo.Enqueue(ctx, tr, task1); err != nil {
+		return nil, err
+	}
+
+	// Enqueue a second task in the same transaction using fdblayer.WithUserVersion(1)
+	task2 := &generated.Task{
+		QueueName: "send-email",
+		ShardId:   uint32(rand.Intn(10)),
+		Payload:   []byte("u123-audit"),
+	}
+	return nil, taskRepo.Enqueue(ctx, tr, task2, fdblayer.WithUserVersion(1))
+})
 ```
 
----
-
-### 3. Dequeue
-
-This example shows how to pop and process the oldest task (or a batch of tasks) from the queue.
-
-#### Use Generated Code
+#### Dequeue Tasks
 
 ```go
-package main
-
-import (
-	"context"
-	"fmt"
-
-	"github.com/apple/foundationdb/bindings/go/src/fdb"
-	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
-	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
-	"your/package/generated"
-)
-
-func main() {
-	fdb.MustAPIVersion(730)
-	db := fdb.MustOpenDefault()
-	ctx := context.Background()
-
-	dataDir, _ := directory.CreateOrOpen(db, []string{"app_data"}, nil)
-	taskRepo := generated.NewTaskRepository(dataDir)
-
-	_, err := db.Transact(func(tr fdb.Transaction) (any, error) {
-		// Dequeue the oldest task (returns nil, nil if the queue is empty)
-		task, err := taskRepo.Dequeue(ctx, tr, fdblayer.Key{"send-email"})
-		if err != nil {
-			return nil, err
-		}
-
-		if task != nil {
-			userID := string(task.Payload)
-			fmt.Println("Processing: Send welcome email to user", userID)
-			// Actual email sending logic would go here
-		} else {
-			fmt.Println("No tasks in queue.")
-		}
-		return nil, nil
-	})
+_, err := db.Transact(func(tr fdb.Transaction) (any, error) {
+	// Dequeue the oldest task (returns nil, nil if the queue is empty)
+	task, err := taskRepo.Dequeue(ctx, tr, fdblayer.Key{"send-email"})
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-}
+	if task != nil {
+		fmt.Println("Processing task for user:", string(task.Payload))
+	}
+
+	// Or pop a batch of up to 10 oldest tasks in a single range read:
+	batch, err := taskRepo.DequeueBatch(ctx, tr, fdblayer.Key{"send-email"}, 10)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println("Dequeued batch size:", len(batch))
+	return nil, nil
+})
 ```
 
 ---
 
 ## Running Tests
 
-### 1. Compiler Unit Tests (IR + Backend Registry + Go Backend)
-
 ```bash
-go test -race -v ./compiler/...
-```
+# Run compiler and runtime unit tests
+go test -race -v ./compiler/... ./runtimes/go/... ./tests/go/...
 
-### 2. Go Runtime Unit & Integration Tests
-
-```bash
-# Unit tests (in-memory MockKV)
-go test -race -v ./runtimes/go/... ./tests/go/...
-
-# Live FoundationDB integration tests (requires a running FDB cluster)
+# Run live FoundationDB integration tests (requires a running FDB cluster)
 go test -p 1 -v -tags=integration ./tests/go/...
 ```
 
@@ -404,23 +384,18 @@ go test -p 1 -v -tags=integration ./tests/go/...
 
 ## Contributing
 
-We welcome contributions to improve this plugin! Here is the process:
-
-1. **Fork the repository** on GitHub.
-2. **Clone your fork** locally.
-3. **Create a new branch** for your feature or bugfix.
-4. **Make your changes** and ensure code is well-formatted.
-5. **Run unit and integration tests**:
+1. **Fork the repository** on GitHub and **clone your fork** locally.
+2. **Create a new branch** for your feature or bugfix.
+3. **Make your changes** and run the unit and integration tests:
    ```bash
    go test -race -v ./...
    go test -p 1 -v -tags=integration ./tests/go/...
    ```
-6. **Update Protos** if you modified `annotations.proto` or `tests/proto/store.proto`:
+4. **Regenerate Protos** if you modified schema definitions:
    ```bash
    ./update_protos.sh
    ```
-7. **Commit your changes** and push to your fork.
-8. **Submit a Pull Request** with a clear description of what you did.
+5. **Commit your changes**, push to your fork, and **submit a Pull Request**.
 
 ---
 
