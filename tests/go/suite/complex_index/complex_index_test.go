@@ -987,20 +987,31 @@ func TestFanOutAggregateAndCompositeAggregate_PostAndOrder(t *testing.T) {
 		t.Fatalf("expected PostCountByTags('go')=1 after Delete(p2), got %d", got)
 	}
 
-	// 2. Composite group key (tenant_id, status enum) on OrderCountByTenantIdStatus and OrderSumCreatedAtByTenantId
+	// 2. Composite group key (tenant_id, status enum) on OrderCountByTenantIdStatus and OrderSumCreatedAtByTenantId,
+	//    composite fan-out AGGREGATE_SUM (OrderSumCreatedAtByStatusAttachmentHashes),
+	//    unsigned uint64 AGGREGATE_MIN / AGGREGATE_MAX (OrderMinTotalUnitsByTenantId, OrderMaxTotalUnitsByTenantId),
+	//    and ungrouped AGGREGATE_SUM / MIN / MAX (OrderSumCreatedAt, OrderMinCreatedAt, OrderMaxCreatedAt).
+	attA := []byte{0xA1}
+	attB := []byte{0xB2}
+	highUint := (uint64(1) << 63) + 500
+
 	if err := orderRepo.Insert(ctx, tr, &store.Order{
-		TenantId:  "acme",
-		OrderSeq:  1,
-		Status:    store.OrderStatus_ORDER_STATUS_PENDING,
-		CreatedAt: 1000,
+		TenantId:         "acme",
+		OrderSeq:         1,
+		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
+		CreatedAt:        1000,
+		AttachmentHashes: [][]byte{attA, attB, attA},
+		TotalUnits:       25,
 	}); err != nil {
 		t.Fatalf("Insert(order 1) failed: %v", err)
 	}
 	if err := orderRepo.Insert(ctx, tr, &store.Order{
-		TenantId:  "acme",
-		OrderSeq:  2,
-		Status:    store.OrderStatus_ORDER_STATUS_PENDING,
-		CreatedAt: 2500,
+		TenantId:         "acme",
+		OrderSeq:         2,
+		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
+		CreatedAt:        2500,
+		AttachmentHashes: [][]byte{attA},
+		TotalUnits:       highUint,
 	}); err != nil {
 		t.Fatalf("Insert(order 2) failed: %v", err)
 	}
@@ -1010,16 +1021,96 @@ func TestFanOutAggregateAndCompositeAggregate_PostAndOrder(t *testing.T) {
 	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAtByTenantId, fdblayer.Key{"acme"}); err != nil || got != 3500 {
 		t.Fatalf("expected OrderSumCreatedAtByTenantId(acme)=3500, got %d, err=%v", got, err)
 	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAtByStatusAttachmentHashes, fdblayer.Key{store.OrderStatus_ORDER_STATUS_PENDING, attA}); err != nil || got != 3500 {
+		t.Fatalf("expected OrderSumCreatedAtByStatusAttachmentHashes(PENDING, attA)=3500, got %d, err=%v", got, err)
+	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAtByStatusAttachmentHashes, fdblayer.Key{store.OrderStatus_ORDER_STATUS_PENDING, attB}); err != nil || got != 1000 {
+		t.Fatalf("expected OrderSumCreatedAtByStatusAttachmentHashes(PENDING, attB)=1000, got %d, err=%v", got, err)
+	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderMinTotalUnitsByTenantId, fdblayer.Key{"acme"}); err != nil || uint64(got) != 25 {
+		t.Fatalf("expected OrderMinTotalUnitsByTenantId(acme)=25, got %d, err=%v", uint64(got), err)
+	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderMaxTotalUnitsByTenantId, fdblayer.Key{"acme"}); err != nil || uint64(got) != highUint {
+		t.Fatalf("expected OrderMaxTotalUnitsByTenantId(acme)=%d, got %d, err=%v", highUint, uint64(got), err)
+	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAt, fdblayer.Key{}); err != nil || got != 3500 {
+		t.Fatalf("expected ungrouped OrderSumCreatedAt=3500, got %d, err=%v", got, err)
+	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderMinCreatedAt, fdblayer.Key{}); err != nil || got != 1000 {
+		t.Fatalf("expected ungrouped OrderMinCreatedAt=1000, got %d, err=%v", got, err)
+	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderMaxCreatedAt, fdblayer.Key{}); err != nil || got != 2500 {
+		t.Fatalf("expected ungrouped OrderMaxCreatedAt=2500, got %d, err=%v", got, err)
+	}
 
-	// 3. Coexisting manual mutation index OrderAddRetriesByTenantIdStatus on the same composite fields (tenant_id, status)
+	// Upsert order 1: keep Status=PENDING, change CreatedAt 1000 -> 1400 (+400 delta on attA), remove attB
+	if err := orderRepo.Upsert(ctx, tr, &store.Order{
+		TenantId:         "acme",
+		OrderSeq:         1,
+		Status:           store.OrderStatus_ORDER_STATUS_PENDING,
+		CreatedAt:        1400,
+		AttachmentHashes: [][]byte{attA},
+		TotalUnits:       10,
+	}); err != nil {
+		t.Fatalf("Upsert(order 1 same status) failed: %v", err)
+	}
+	if got, _ := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAtByStatusAttachmentHashes, fdblayer.Key{store.OrderStatus_ORDER_STATUS_PENDING, attA}); got != 3900 {
+		t.Fatalf("expected OrderSumCreatedAtByStatusAttachmentHashes(PENDING, attA)=3900, got %d", got)
+	}
+	if got, _ := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAtByStatusAttachmentHashes, fdblayer.Key{store.OrderStatus_ORDER_STATUS_PENDING, attB}); got != 0 {
+		t.Fatalf("expected OrderSumCreatedAtByStatusAttachmentHashes(PENDING, attB)=0, got %d", got)
+	}
+	if got, _ := orderRepo.ReadAggregate(ctx, tr, store.OrderMinTotalUnitsByTenantId, fdblayer.Key{"acme"}); uint64(got) != 10 {
+		t.Fatalf("expected OrderMinTotalUnitsByTenantId(acme)=10 after Upsert, got %d", uint64(got))
+	}
+
+	// Upsert order 1: change Status PENDING -> SHIPPED (non-repeated field changed on composite fan-out aggregate)
+	if err := orderRepo.Upsert(ctx, tr, &store.Order{
+		TenantId:         "acme",
+		OrderSeq:         1,
+		Status:           store.OrderStatus_ORDER_STATUS_SHIPPED,
+		CreatedAt:        1400,
+		AttachmentHashes: [][]byte{attA},
+		TotalUnits:       10,
+	}); err != nil {
+		t.Fatalf("Upsert(order 1 status change) failed: %v", err)
+	}
+	if got, _ := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAtByStatusAttachmentHashes, fdblayer.Key{store.OrderStatus_ORDER_STATUS_PENDING, attA}); got != 2500 {
+		t.Fatalf("expected OrderSumCreatedAtByStatusAttachmentHashes(PENDING, attA)=2500 after status move, got %d", got)
+	}
+	if got, _ := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAtByStatusAttachmentHashes, fdblayer.Key{store.OrderStatus_ORDER_STATUS_SHIPPED, attA}); got != 1400 {
+		t.Fatalf("expected OrderSumCreatedAtByStatusAttachmentHashes(SHIPPED, attA)=1400 after status move, got %d", got)
+	}
+
+	// 3. Coexisting manual mutation indexes:
+	//    - OrderAddRetriesByTenantIdStatus (non-PK composite fields: tenant_id, status)
+	//    - OrderCountAttemptsByOrderSeqTenantId (reordered composite PK fields: order_seq, tenant_id)
 	if err := orderRepo.Mutate(ctx, tr, store.OrderAddRetriesByTenantIdStatus, fdblayer.Key{"acme", store.OrderStatus_ORDER_STATUS_PENDING}, 4); err != nil {
 		t.Fatalf("Mutate(OrderAddRetriesByTenantIdStatus) failed: %v", err)
+	}
+	if err := orderRepo.Mutate(ctx, tr, store.OrderCountAttemptsByOrderSeqTenantId, fdblayer.Key{int32(1), "acme"}, 3); err != nil {
+		t.Fatalf("Mutate(OrderCountAttemptsByOrderSeqTenantId) failed: %v", err)
 	}
 	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderAddRetriesByTenantIdStatus, fdblayer.Key{"acme", store.OrderStatus_ORDER_STATUS_PENDING}); err != nil || got != 4 {
 		t.Fatalf("expected OrderAddRetriesByTenantIdStatus(acme, PENDING)=4, got %d, err=%v", got, err)
 	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderCountAttemptsByOrderSeqTenantId, fdblayer.Key{int32(1), "acme"}); err != nil || got != 3 {
+		t.Fatalf("expected OrderCountAttemptsByOrderSeqTenantId(1, acme)=3, got %d, err=%v", got, err)
+	}
 	// Automatic aggregate count on the same fields is unaffected by manual Mutate
-	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderCountByTenantIdStatus, fdblayer.Key{"acme", store.OrderStatus_ORDER_STATUS_PENDING}); err != nil || got != 2 {
-		t.Fatalf("expected OrderCountByTenantIdStatus(acme, PENDING)=2, got %d, err=%v", got, err)
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderCountByTenantIdStatus, fdblayer.Key{"acme", store.OrderStatus_ORDER_STATUS_PENDING}); err != nil || got != 1 {
+		t.Fatalf("expected OrderCountByTenantIdStatus(acme, PENDING)=1, got %d, err=%v", got, err)
+	}
+
+	// Delete(acme, 1) clears the reordered composite PK-scoped mutation index OrderCountAttemptsByOrderSeqTenantId
+	// while leaving non-PK OrderAddRetriesByTenantIdStatus intact!
+	if err := orderRepo.Delete(ctx, tr, fdblayer.Key{"acme", int32(1)}); err != nil {
+		t.Fatalf("Delete(acme, 1) failed: %v", err)
+	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderCountAttemptsByOrderSeqTenantId, fdblayer.Key{int32(1), "acme"}); err != nil || got != 0 {
+		t.Fatalf("expected OrderCountAttemptsByOrderSeqTenantId(1, acme)=0 after Delete, got %d, err=%v", got, err)
+	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderAddRetriesByTenantIdStatus, fdblayer.Key{"acme", store.OrderStatus_ORDER_STATUS_PENDING}); err != nil || got != 4 {
+		t.Fatalf("expected non-PK OrderAddRetriesByTenantIdStatus(acme, PENDING)=4 after Delete, got %d, err=%v", got, err)
 	}
 }

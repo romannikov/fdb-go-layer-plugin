@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -803,6 +804,28 @@ func TestIntegration_MutationSecondaryIndexes_Post(t *testing.T) {
 		}
 		if v, err := postRepo.ReadAggregate(ctx, tr, store.PostCountGlobalViews, fdblayer.Key{}); err != nil || v != 7 {
 			t.Fatalf("expected PostCountGlobalViews=7 after Delete('p1'), got %d, err=%v", v, err)
+		}
+		return nil
+	})
+
+	// 3. 64-bit signed integer extremes (math.MinInt64, -1, 0, math.MaxInt64) on live FDB
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		for _, v := range []int64{0, -1, math.MaxInt64, math.MinInt64} {
+			if err := postRepo.Mutate(ctx, tr, store.PostMinLatencyById, fdblayer.Key{"p-ext"}, v); err != nil {
+				return err
+			}
+			if err := postRepo.Mutate(ctx, tr, store.PostMaxLatencyById, fdblayer.Key{"p-ext"}, v); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if gotMin, err := postRepo.ReadAggregate(ctx, tr, store.PostMinLatencyById, fdblayer.Key{"p-ext"}); err != nil || gotMin != math.MinInt64 {
+			t.Fatalf("expected live FDB PostMinLatencyById=math.MinInt64, got %d, err=%v", gotMin, err)
+		}
+		if gotMax, err := postRepo.ReadAggregate(ctx, tr, store.PostMaxLatencyById, fdblayer.Key{"p-ext"}); err != nil || gotMax != math.MaxInt64 {
+			t.Fatalf("expected live FDB PostMaxLatencyById=math.MaxInt64, got %d, err=%v", gotMax, err)
 		}
 		return nil
 	})

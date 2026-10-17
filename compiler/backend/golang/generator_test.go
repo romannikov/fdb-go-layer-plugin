@@ -523,3 +523,93 @@ func TestGenerateMessage_MutationIndexes(t *testing.T) {
 		t.Errorf("did not expect non-PK mutation index PostCountTenantViewsByTenantId to be cleared on Delete:\n%s", out)
 	}
 }
+
+func TestGenerateMessage_CompositeFanOutAggregatesAndOnlyPKMutationDelete(t *testing.T) {
+	tenantID := ir.FieldSpec{ProtoName: "tenant_id", GoName: "TenantId", Kind: ir.KindString}
+	seq := ir.FieldSpec{ProtoName: "seq", GoName: "Seq", Kind: ir.KindInt64}
+	tags := ir.FieldSpec{ProtoName: "tags", GoName: "Tags", Kind: ir.KindString, IsRepeated: true}
+	score := ir.FieldSpec{ProtoName: "score", GoName: "Score", Kind: ir.KindInt64}
+
+	// 1. Composite fan-out aggregate indexes (SUM, MIN, MAX) with a PK field in the grouping key
+	fanOutSpec := ir.MessageSpec{
+		Name:             "Metric",
+		TypeID:           300,
+		GoPackageName:    "testspb",
+		Fields:           []ir.FieldSpec{tenantID, seq, tags, score},
+		PrimaryKeyFields: []ir.FieldSpec{tenantID, seq},
+		SecondaryIndexes: []ir.SecondaryIndexSpec{
+			{
+				Fields:         []ir.FieldSpec{tenantID, tags},
+				IsFanOut:       true,
+				FanOutField:    tags,
+				IndexID:        3001,
+				Aggregate:      ir.AggregateSum,
+				AggregateField: score,
+			},
+			{
+				Fields:         []ir.FieldSpec{tenantID, tags},
+				IsFanOut:       true,
+				FanOutField:    tags,
+				IndexID:        3002,
+				Aggregate:      ir.AggregateMin,
+				AggregateField: score,
+			},
+			{
+				Fields:         []ir.FieldSpec{tenantID, tags},
+				IsFanOut:       true,
+				FanOutField:    tags,
+				IndexID:        3003,
+				Aggregate:      ir.AggregateMax,
+				AggregateField: score,
+			},
+		},
+	}
+
+	var p1 bufferPrinter
+	GenerateMessage(&p1, fanOutSpec)
+	out1 := p1.sb.String()
+
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "metric.fdb.go", out1, parser.AllErrors); err != nil {
+		t.Fatalf("generated Go code for composite fan-out aggregates failed to parse: %v\n%s", err, out1)
+	}
+	for _, snippet := range []string{
+		"if old != nil && old.TenantId == entity.TenantId {",
+		"} else if entity.Score < old.Score {",
+		"} else if entity.Score > old.Score {",
+		"pkTuple[0], item",
+	} {
+		if !strings.Contains(out1, snippet) {
+			t.Errorf("expected composite fan-out aggregate code to contain %q, got:\n%s", snippet, out1)
+		}
+	}
+
+	// 2. Message with ONLY PK-scoped manual mutation indexes (0-RTT Delete without tr.Get(dataKey))
+	onlyMutSpec := ir.MessageSpec{
+		Name:             "Counter",
+		TypeID:           301,
+		GoPackageName:    "testspb",
+		Fields:           []ir.FieldSpec{tenantID, seq},
+		PrimaryKeyFields: []ir.FieldSpec{tenantID, seq},
+		SecondaryIndexes: []ir.SecondaryIndexSpec{
+			{
+				// Reordered composite PK fields (seq, tenant_id)
+				Fields:   []ir.FieldSpec{seq, tenantID},
+				IndexID:  3010,
+				Mutation: ir.MutationCount,
+			},
+		},
+	}
+
+	var p2 bufferPrinter
+	GenerateMessage(&p2, onlyMutSpec)
+	out2 := p2.sb.String()
+
+	if _, err := parser.ParseFile(fset, "counter.fdb.go", out2, parser.AllErrors); err != nil {
+		t.Fatalf("generated Go code for only-mutation message failed to parse: %v\n%s", err, out2)
+	}
+	if !strings.Contains(out2, "int64(CounterCountBySeqTenantId), pkTuple[1], pkTuple[0]}))") {
+		t.Errorf("expected reordered composite PK mutation index to pack pkTuple[1], pkTuple[0] on Delete, got:\n%s", out2)
+	}
+}
+
