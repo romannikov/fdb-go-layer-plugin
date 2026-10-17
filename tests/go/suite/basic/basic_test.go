@@ -3,6 +3,7 @@ package basic_test
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -1146,5 +1147,21 @@ func TestMutationIndexes_Post_CountAddMinMaxAndDelete(t *testing.T) {
 	}
 	if err := postRepo.Mutate(ctx, tr, store.PostCountById, fdblayer.Key{123}, 1); !errors.Is(err, fdblayer.ErrInvalidKey) {
 		t.Fatalf("expected ErrInvalidKey for non-string key on PostCountById, got %v", err)
+	}
+
+	// 6. 64-bit signed integer extremes (math.MinInt64, -1, 0, math.MaxInt64) on MIN and MAX mutations
+	for _, extreme := range []int64{0, -1, math.MaxInt64, math.MinInt64} {
+		if err := postRepo.Mutate(ctx, tr, store.PostMinLatencyById, fdblayer.Key{"post-ext"}, extreme); err != nil {
+			t.Fatalf("Mutate(PostMinLatencyById %d) failed: %v", extreme, err)
+		}
+		if err := postRepo.Mutate(ctx, tr, store.PostMaxLatencyById, fdblayer.Key{"post-ext"}, extreme); err != nil {
+			t.Fatalf("Mutate(PostMaxLatencyById %d) failed: %v", extreme, err)
+		}
+	}
+	if gotMin, err := postRepo.ReadAggregate(ctx, tr, store.PostMinLatencyById, fdblayer.Key{"post-ext"}); err != nil || gotMin != math.MinInt64 {
+		t.Fatalf("expected PostMinLatencyById=math.MinInt64, got %d, err=%v", gotMin, err)
+	}
+	if gotMax, err := postRepo.ReadAggregate(ctx, tr, store.PostMaxLatencyById, fdblayer.Key{"post-ext"}); err != nil || gotMax != math.MaxInt64 {
+		t.Fatalf("expected PostMaxLatencyById=math.MaxInt64, got %d, err=%v", gotMax, err)
 	}
 }

@@ -20,13 +20,20 @@ const OrderTypeID int64 = 100
 
 // Secondary index IDs for Order.
 const (
-	OrderByStatusCreatedAt          fdblayer.IndexID = 1001
-	OrderByReceiptHash              fdblayer.IndexID = 1002
-	OrderByAttachmentHashes         fdblayer.IndexID = 1003
-	OrderByStatusAttachmentHashes   fdblayer.IndexID = 1004
-	OrderCountByTenantIdStatus      fdblayer.IndexID = 1005
-	OrderSumCreatedAtByTenantId     fdblayer.IndexID = 1006
-	OrderAddRetriesByTenantIdStatus fdblayer.IndexID = 1007
+	OrderByStatusCreatedAt                    fdblayer.IndexID = 1001
+	OrderByReceiptHash                        fdblayer.IndexID = 1002
+	OrderByAttachmentHashes                   fdblayer.IndexID = 1003
+	OrderByStatusAttachmentHashes             fdblayer.IndexID = 1004
+	OrderCountByTenantIdStatus                fdblayer.IndexID = 1005
+	OrderSumCreatedAtByTenantId               fdblayer.IndexID = 1006
+	OrderAddRetriesByTenantIdStatus           fdblayer.IndexID = 1007
+	OrderCountAttemptsByOrderSeqTenantId      fdblayer.IndexID = 1008
+	OrderSumCreatedAtByStatusAttachmentHashes fdblayer.IndexID = 1009
+	OrderMaxTotalUnitsByTenantId              fdblayer.IndexID = 1010
+	OrderMinTotalUnitsByTenantId              fdblayer.IndexID = 1011
+	OrderSumCreatedAt                         fdblayer.IndexID = 1012
+	OrderMinCreatedAt                         fdblayer.IndexID = 1013
+	OrderMaxCreatedAt                         fdblayer.IndexID = 1014
 )
 
 // OrderRepository defines the repository interface for Order.
@@ -111,6 +118,37 @@ func (r *orderRepository) Insert(ctx context.Context, tr fdblayer.Transaction, e
 	if entity.CreatedAt != 0 {
 		tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByTenantId), entity.TenantId}), fdblayer.EncodeDeltaLE(int64(entity.CreatedAt)))
 	}
+
+	// Fan-out aggregate index
+	{
+		seen := make(map[string]struct{}, len(entity.AttachmentHashes))
+		for _, item := range entity.AttachmentHashes {
+			if _, dup := seen[string(item)]; dup {
+				continue
+			}
+			seen[string(item)] = struct{}{}
+			if entity.CreatedAt != 0 {
+				tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByStatusAttachmentHashes), int64(entity.Status), item}), fdblayer.EncodeDeltaLE(int64(entity.CreatedAt)))
+			}
+		}
+	}
+
+	// Aggregate index
+	tr.Max(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderMaxTotalUnitsByTenantId), entity.TenantId}), fdblayer.EncodeUnsignedLE(uint64(entity.TotalUnits)))
+
+	// Aggregate index
+	tr.Min(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderMinTotalUnitsByTenantId), entity.TenantId}), fdblayer.EncodeUnsignedLE(uint64(entity.TotalUnits)))
+
+	// Aggregate index
+	if entity.CreatedAt != 0 {
+		tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAt)}), fdblayer.EncodeDeltaLE(int64(entity.CreatedAt)))
+	}
+
+	// Aggregate index
+	tr.Min(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderMinCreatedAt)}), fdblayer.EncodeSignedOrderLE(int64(entity.CreatedAt)))
+
+	// Aggregate index
+	tr.Max(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderMaxCreatedAt)}), fdblayer.EncodeSignedOrderLE(int64(entity.CreatedAt)))
 
 	return nil
 }
@@ -294,6 +332,92 @@ func (r *orderRepository) Upsert(ctx context.Context, tr fdblayer.Transaction, e
 		tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByTenantId), entity.TenantId}), fdblayer.EncodeDeltaLE(delta))
 	}
 
+	// Fan-out aggregate index
+	if old != nil && old.Status == entity.Status {
+		oldSet := make(map[string]struct{}, len(old.AttachmentHashes))
+		for _, item := range old.AttachmentHashes {
+			oldSet[string(item)] = struct{}{}
+		}
+		newSet := make(map[string]struct{}, len(entity.AttachmentHashes))
+		for _, item := range entity.AttachmentHashes {
+			newSet[string(item)] = struct{}{}
+		}
+		for _, item := range old.AttachmentHashes {
+			if _, keep := newSet[string(item)]; !keep {
+				newSet[string(item)] = struct{}{}
+				if old.CreatedAt != 0 {
+					tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByStatusAttachmentHashes), int64(old.Status), item}), fdblayer.EncodeDeltaLE(-int64(old.CreatedAt)))
+				}
+			}
+		}
+		seenNew := make(map[string]struct{}, len(entity.AttachmentHashes))
+		for _, item := range entity.AttachmentHashes {
+			if _, dup := seenNew[string(item)]; dup {
+				continue
+			}
+			seenNew[string(item)] = struct{}{}
+			if _, existed := oldSet[string(item)]; !existed {
+				if entity.CreatedAt != 0 {
+					tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByStatusAttachmentHashes), int64(entity.Status), item}), fdblayer.EncodeDeltaLE(int64(entity.CreatedAt)))
+				}
+			} else if delta := int64(entity.CreatedAt) - int64(old.CreatedAt); delta != 0 {
+				tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByStatusAttachmentHashes), int64(entity.Status), item}), fdblayer.EncodeDeltaLE(delta))
+			}
+		}
+	} else {
+		if old != nil {
+			seenOld := make(map[string]struct{}, len(old.AttachmentHashes))
+			for _, item := range old.AttachmentHashes {
+				if _, dup := seenOld[string(item)]; dup {
+					continue
+				}
+				seenOld[string(item)] = struct{}{}
+				if old.CreatedAt != 0 {
+					tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByStatusAttachmentHashes), int64(old.Status), item}), fdblayer.EncodeDeltaLE(-int64(old.CreatedAt)))
+				}
+			}
+		}
+		seen := make(map[string]struct{}, len(entity.AttachmentHashes))
+		for _, item := range entity.AttachmentHashes {
+			if _, dup := seen[string(item)]; dup {
+				continue
+			}
+			seen[string(item)] = struct{}{}
+			if entity.CreatedAt != 0 {
+				tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByStatusAttachmentHashes), int64(entity.Status), item}), fdblayer.EncodeDeltaLE(int64(entity.CreatedAt)))
+			}
+		}
+	}
+
+	// Aggregate index
+	if old == nil || old.TenantId != entity.TenantId || entity.TotalUnits > old.TotalUnits {
+		tr.Max(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderMaxTotalUnitsByTenantId), entity.TenantId}), fdblayer.EncodeUnsignedLE(uint64(entity.TotalUnits)))
+	}
+
+	// Aggregate index
+	if old == nil || old.TenantId != entity.TenantId || entity.TotalUnits < old.TotalUnits {
+		tr.Min(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderMinTotalUnitsByTenantId), entity.TenantId}), fdblayer.EncodeUnsignedLE(uint64(entity.TotalUnits)))
+	}
+
+	// Aggregate index
+	if old == nil {
+		if entity.CreatedAt != 0 {
+			tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAt)}), fdblayer.EncodeDeltaLE(int64(entity.CreatedAt)))
+		}
+	} else if delta := int64(entity.CreatedAt) - int64(old.CreatedAt); delta != 0 {
+		tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAt)}), fdblayer.EncodeDeltaLE(delta))
+	}
+
+	// Aggregate index
+	if old == nil || entity.CreatedAt < old.CreatedAt {
+		tr.Min(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderMinCreatedAt)}), fdblayer.EncodeSignedOrderLE(int64(entity.CreatedAt)))
+	}
+
+	// Aggregate index
+	if old == nil || entity.CreatedAt > old.CreatedAt {
+		tr.Max(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderMaxCreatedAt)}), fdblayer.EncodeSignedOrderLE(int64(entity.CreatedAt)))
+	}
+
 	return nil
 }
 
@@ -355,7 +479,26 @@ func (r *orderRepository) Delete(ctx context.Context, tr fdblayer.Transaction, k
 		if entity.CreatedAt != 0 {
 			tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByTenantId), pkTuple[0]}), fdblayer.EncodeDeltaLE(-int64(entity.CreatedAt)))
 		}
+		// Fan-out aggregate index
+		{
+			seen := make(map[string]struct{}, len(entity.AttachmentHashes))
+			for _, item := range entity.AttachmentHashes {
+				if _, dup := seen[string(item)]; dup {
+					continue
+				}
+				seen[string(item)] = struct{}{}
+				if entity.CreatedAt != 0 {
+					tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByStatusAttachmentHashes), int64(entity.Status), item}), fdblayer.EncodeDeltaLE(-int64(entity.CreatedAt)))
+				}
+			}
+		}
+		// Aggregate index
+		if entity.CreatedAt != 0 {
+			tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAt)}), fdblayer.EncodeDeltaLE(-int64(entity.CreatedAt)))
+		}
 	}
+	// Primary-key-scoped mutation index
+	tr.Clear(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderCountAttemptsByOrderSeqTenantId), pkTuple[1], pkTuple[0]}))
 	tr.Clear(dataKey)
 
 	return nil
@@ -369,6 +512,13 @@ func (r *orderRepository) Mutate(ctx context.Context, tr fdblayer.Transaction, i
 	switch index {
 	case OrderAddRetriesByTenantIdStatus:
 		aggKey, err := fdblayer.PackAggregateKey(r.dir, OrderTypeID, index, key, []fdblayer.FieldKind{fdblayer.FieldKindString, fdblayer.FieldKindInt64})
+		if err != nil {
+			return err
+		}
+		tr.Add(aggKey, fdblayer.EncodeDeltaLE(val))
+		return nil
+	case OrderCountAttemptsByOrderSeqTenantId:
+		aggKey, err := fdblayer.PackAggregateKey(r.dir, OrderTypeID, index, key, []fdblayer.FieldKind{fdblayer.FieldKindInt64, fdblayer.FieldKindString})
 		if err != nil {
 			return err
 		}
@@ -600,6 +750,27 @@ func (r *orderRepository) ReadAggregate(ctx context.Context, tr fdblayer.Transac
 	case OrderAddRetriesByTenantIdStatus:
 		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString, fdblayer.FieldKindInt64}
 		encoding = fdblayer.AggregateEncodingDelta
+	case OrderCountAttemptsByOrderSeqTenantId:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindInt64, fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingDelta
+	case OrderSumCreatedAtByStatusAttachmentHashes:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindInt64, fdblayer.FieldKindBytes}
+		encoding = fdblayer.AggregateEncodingDelta
+	case OrderMaxTotalUnitsByTenantId:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingUintMinMax
+	case OrderMinTotalUnitsByTenantId:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingUintMinMax
+	case OrderSumCreatedAt:
+		groupSchema = []fdblayer.FieldKind{}
+		encoding = fdblayer.AggregateEncodingDelta
+	case OrderMinCreatedAt:
+		groupSchema = []fdblayer.FieldKind{}
+		encoding = fdblayer.AggregateEncodingSignedMinMax
+	case OrderMaxCreatedAt:
+		groupSchema = []fdblayer.FieldKind{}
+		encoding = fdblayer.AggregateEncodingSignedMinMax
 	default:
 		return 0, fmt.Errorf("order aggregate index %d: %w", index, fdblayer.ErrUnknownIndex)
 	}

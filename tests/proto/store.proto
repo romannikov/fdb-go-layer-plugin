@@ -171,6 +171,48 @@ message Order {
         mutation: MUTATION_ADD,
         name: "retries"
     };
+    option (annotations.secondary_index) = {
+        id: 1008,
+        fields: ["order_seq", "tenant_id"],
+        mutation: MUTATION_COUNT,
+        name: "attempts"
+    };
+    option (annotations.secondary_index) = {
+        id: 1009,
+        fields: ["status", "attachment_hashes"],
+        aggregate: AGGREGATE_SUM,
+        aggregate_field: "created_at"
+    };
+    option (annotations.secondary_index) = {
+        id: 1010,
+        fields: ["tenant_id"],
+        aggregate: AGGREGATE_MAX,
+        aggregate_field: "total_units"
+    };
+    option (annotations.secondary_index) = {
+        id: 1011,
+        fields: ["tenant_id"],
+        aggregate: AGGREGATE_MIN,
+        aggregate_field: "total_units"
+    };
+    option (annotations.secondary_index) = {
+        id: 1012,
+        fields: [],
+        aggregate: AGGREGATE_SUM,
+        aggregate_field: "created_at"
+    };
+    option (annotations.secondary_index) = {
+        id: 1013,
+        fields: [],
+        aggregate: AGGREGATE_MIN,
+        aggregate_field: "created_at"
+    };
+    option (annotations.secondary_index) = {
+        id: 1014,
+        fields: [],
+        aggregate: AGGREGATE_MAX,
+        aggregate_field: "created_at"
+    };
 
     enum Priority {
         PRIORITY_LOW = 0;
@@ -191,6 +233,7 @@ message Order {
     Priority priority = 7;
     ShippingAddress address = 8;
     repeated ShippingAddress history = 9;
+    uint64 total_units = 10;
 }
 
 message AuditLog {

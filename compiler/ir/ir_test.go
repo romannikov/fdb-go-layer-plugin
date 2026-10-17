@@ -6,10 +6,13 @@ import (
 
 	"google.golang.org/protobuf/compiler/protogen"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/pluginpb"
 
 	annotationspb "github.com/romannikov/fdb-layer/proto/fdb-layer"
+	"github.com/romannikov/fdb-layer/tests/go/store"
 )
 
 func TestProcessMessage_SkipsUnannotatedHelperMessage(t *testing.T) {
@@ -648,3 +651,86 @@ func TestBuildSecondaryIndex_Mutations(t *testing.T) {
 		})
 	}
 }
+
+func TestIndexConstSuffix_UngroupedAndPrefixDeduplication(t *testing.T) {
+	idField := FieldSpec{ProtoName: "id", GoName: "Id", Kind: KindString}
+	centsField := FieldSpec{ProtoName: "total_cents", GoName: "TotalCents", Kind: KindInt64}
+
+	cases := []struct {
+		spec SecondaryIndexSpec
+		want string
+	}{
+		// Prefix deduplication when custom name already starts with operation prefix
+		{
+			spec: SecondaryIndexSpec{Fields: []FieldSpec{idField}, Mutation: MutationCount, Name: "count_views"},
+			want: "CountViewsById",
+		},
+		{
+			spec: SecondaryIndexSpec{Fields: []FieldSpec{idField}, Mutation: MutationAdd, Name: "add_score"},
+			want: "AddScoreById",
+		},
+		// Ungrouped mutation indexes
+		{
+			spec: SecondaryIndexSpec{Fields: nil, Mutation: MutationAdd, Name: "likes"},
+			want: "AddLikes",
+		},
+		{
+			spec: SecondaryIndexSpec{Fields: nil, Mutation: MutationMin, Name: "latency"},
+			want: "MinLatency",
+		},
+		{
+			spec: SecondaryIndexSpec{Fields: nil, Mutation: MutationMax, Name: "latency"},
+			want: "MaxLatency",
+		},
+		// Ungrouped SUM / MIN / MAX aggregate indexes
+		{
+			spec: SecondaryIndexSpec{Fields: nil, Aggregate: AggregateSum, AggregateField: centsField},
+			want: "SumTotalCents",
+		},
+		{
+			spec: SecondaryIndexSpec{Fields: nil, Aggregate: AggregateMin, AggregateField: centsField},
+			want: "MinTotalCents",
+		},
+		{
+			spec: SecondaryIndexSpec{Fields: nil, Aggregate: AggregateMax, AggregateField: centsField},
+			want: "MaxTotalCents",
+		},
+	}
+
+	for _, tc := range cases {
+		if got := IndexConstSuffix(tc.spec); got != tc.want {
+			t.Errorf("IndexConstSuffix(%+v) = %q, want %q", tc.spec, got, tc.want)
+		}
+	}
+}
+
+func TestParsePlugin_StoreProtoDescriptor(t *testing.T) {
+	req := &pluginpb.CodeGeneratorRequest{
+		FileToGenerate: []string{store.File_store_proto.Path()},
+		ProtoFile: []*descriptorpb.FileDescriptorProto{
+			protodesc.ToFileDescriptorProto(descriptorpb.File_google_protobuf_descriptor_proto),
+			protodesc.ToFileDescriptorProto(annotationspb.File_fdb_layer_annotations_proto),
+			protodesc.ToFileDescriptorProto(store.File_store_proto),
+		},
+	}
+	plugin, err := protogen.Options{}.New(req)
+	if err != nil {
+		t.Fatalf("protogen.Options.New failed: %v", err)
+	}
+	msgs, err := ParsePlugin(plugin)
+	if err != nil {
+		t.Fatalf("ParsePlugin failed: %v", err)
+	}
+	if len(msgs) != 6 {
+		t.Fatalf("expected 6 annotated messages from ParsePlugin, got %d", len(msgs))
+	}
+	fileSpec, err := ParseFile(plugin.Files[len(plugin.Files)-1])
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+	annotated := fileSpec.AnnotatedMessages()
+	if len(annotated) != 6 {
+		t.Fatalf("expected 6 annotated messages in store.proto FileSpec, got %d", len(annotated))
+	}
+}
+

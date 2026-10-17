@@ -1121,6 +1121,9 @@ func TestIntegration_AggregateSecondaryIndexes_PostAndOrder(t *testing.T) {
 	postRepo := store.NewPostRepository(dir)
 	orderRepo := store.NewOrderRepository(dir)
 
+	attA := []byte{0xA1}
+	highUint := (uint64(1) << 63) + 500
+
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		if err := postRepo.Insert(ctx, tr, &store.Post{Id: "p1", Tags: []string{"go", "fdb", "go"}}); err != nil {
 			return err
@@ -1129,18 +1132,22 @@ func TestIntegration_AggregateSecondaryIndexes_PostAndOrder(t *testing.T) {
 			return err
 		}
 		if err := orderRepo.Insert(ctx, tr, &store.Order{
-			TenantId:  "t1",
-			OrderSeq:  1,
-			Status:    store.OrderStatus_ORDER_STATUS_PENDING,
-			CreatedAt: 100,
+			TenantId:         "t1",
+			OrderSeq:         1,
+			Status:           store.OrderStatus_ORDER_STATUS_PENDING,
+			CreatedAt:        100,
+			AttachmentHashes: [][]byte{attA},
+			TotalUnits:       20,
 		}); err != nil {
 			return err
 		}
 		return orderRepo.Insert(ctx, tr, &store.Order{
-			TenantId:  "t1",
-			OrderSeq:  2,
-			Status:    store.OrderStatus_ORDER_STATUS_PENDING,
-			CreatedAt: 250,
+			TenantId:         "t1",
+			OrderSeq:         2,
+			Status:           store.OrderStatus_ORDER_STATUS_PENDING,
+			CreatedAt:        250,
+			AttachmentHashes: [][]byte{attA},
+			TotalUnits:       highUint,
 		})
 	})
 
@@ -1154,15 +1161,37 @@ func TestIntegration_AggregateSecondaryIndexes_PostAndOrder(t *testing.T) {
 		if sum, err := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAtByTenantId, fdblayer.Key{"t1"}); err != nil || sum != 350 {
 			t.Fatalf("expected OrderSumCreatedAtByTenantId(t1)=350, got %d, err=%v", sum, err)
 		}
+		if fanSum, err := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAtByStatusAttachmentHashes, fdblayer.Key{store.OrderStatus_ORDER_STATUS_PENDING, attA}); err != nil || fanSum != 350 {
+			t.Fatalf("expected OrderSumCreatedAtByStatusAttachmentHashes(PENDING, attA)=350, got %d, err=%v", fanSum, err)
+		}
+		if minUnits, err := orderRepo.ReadAggregate(ctx, tr, store.OrderMinTotalUnitsByTenantId, fdblayer.Key{"t1"}); err != nil || uint64(minUnits) != 20 {
+			t.Fatalf("expected OrderMinTotalUnitsByTenantId(t1)=20, got %d, err=%v", uint64(minUnits), err)
+		}
+		if maxUnits, err := orderRepo.ReadAggregate(ctx, tr, store.OrderMaxTotalUnitsByTenantId, fdblayer.Key{"t1"}); err != nil || uint64(maxUnits) != highUint {
+			t.Fatalf("expected OrderMaxTotalUnitsByTenantId(t1)=%d, got %d, err=%v", highUint, uint64(maxUnits), err)
+		}
 		if err := orderRepo.Mutate(ctx, tr, store.OrderAddRetriesByTenantIdStatus, fdblayer.Key{"t1", store.OrderStatus_ORDER_STATUS_PENDING}, 3); err != nil {
 			return err
 		}
-		return nil
+		return orderRepo.Mutate(ctx, tr, store.OrderCountAttemptsByOrderSeqTenantId, fdblayer.Key{int32(1), "t1"}, 2)
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		if retries, err := orderRepo.ReadAggregate(ctx, tr, store.OrderAddRetriesByTenantIdStatus, fdblayer.Key{"t1", store.OrderStatus_ORDER_STATUS_PENDING}); err != nil || retries != 3 {
 			t.Fatalf("expected OrderAddRetriesByTenantIdStatus(t1, PENDING)=3, got %d, err=%v", retries, err)
+		}
+		if attempts, err := orderRepo.ReadAggregate(ctx, tr, store.OrderCountAttemptsByOrderSeqTenantId, fdblayer.Key{int32(1), "t1"}); err != nil || attempts != 2 {
+			t.Fatalf("expected OrderCountAttemptsByOrderSeqTenantId(1, t1)=2, got %d, err=%v", attempts, err)
+		}
+		return orderRepo.Delete(ctx, tr, fdblayer.Key{"t1", int32(1)})
+	})
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if attempts, err := orderRepo.ReadAggregate(ctx, tr, store.OrderCountAttemptsByOrderSeqTenantId, fdblayer.Key{int32(1), "t1"}); err != nil || attempts != 0 {
+			t.Fatalf("expected OrderCountAttemptsByOrderSeqTenantId(1, t1)=0 after Delete, got %d, err=%v", attempts, err)
+		}
+		if retries, err := orderRepo.ReadAggregate(ctx, tr, store.OrderAddRetriesByTenantIdStatus, fdblayer.Key{"t1", store.OrderStatus_ORDER_STATUS_PENDING}); err != nil || retries != 3 {
+			t.Fatalf("expected non-PK OrderAddRetriesByTenantIdStatus(t1, PENDING)=3 after Delete, got %d, err=%v", retries, err)
 		}
 		return nil
 	})
