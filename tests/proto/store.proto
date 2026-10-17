@@ -79,6 +79,35 @@ message Post {
         fields: ["tags"],
         aggregate: AGGREGATE_COUNT
     };
+    option (annotations.secondary_index) = {
+        id: 3,
+        fields: ["id"],
+        mutation: MUTATION_COUNT
+    };
+    option (annotations.secondary_index) = {
+        id: 4,
+        fields: ["id"],
+        mutation: MUTATION_ADD,
+        name: "likes"
+    };
+    option (annotations.secondary_index) = {
+        id: 5,
+        fields: ["id"],
+        mutation: MUTATION_MIN,
+        name: "latency"
+    };
+    option (annotations.secondary_index) = {
+        id: 6,
+        fields: ["id"],
+        mutation: MUTATION_MAX,
+        name: "latency"
+    };
+    option (annotations.secondary_index) = {
+        id: 7,
+        fields: [],
+        mutation: MUTATION_COUNT,
+        name: "global_views"
+    };
 
     string id = 1;
     repeated string tags = 2;
@@ -135,6 +164,12 @@ message Order {
         fields: ["tenant_id"],
         aggregate: AGGREGATE_SUM,
         aggregate_field: "created_at"
+    };
+    option (annotations.secondary_index) = {
+        id: 1007,
+        fields: ["tenant_id", "status"],
+        mutation: MUTATION_ADD,
+        name: "retries"
     };
 
     enum Priority {

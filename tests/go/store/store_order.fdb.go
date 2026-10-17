@@ -20,12 +20,13 @@ const OrderTypeID int64 = 100
 
 // Secondary index IDs for Order.
 const (
-	OrderByStatusCreatedAt        fdblayer.IndexID = 1001
-	OrderByReceiptHash            fdblayer.IndexID = 1002
-	OrderByAttachmentHashes       fdblayer.IndexID = 1003
-	OrderByStatusAttachmentHashes fdblayer.IndexID = 1004
-	OrderCountByTenantIdStatus    fdblayer.IndexID = 1005
-	OrderSumCreatedAtByTenantId   fdblayer.IndexID = 1006
+	OrderByStatusCreatedAt          fdblayer.IndexID = 1001
+	OrderByReceiptHash              fdblayer.IndexID = 1002
+	OrderByAttachmentHashes         fdblayer.IndexID = 1003
+	OrderByStatusAttachmentHashes   fdblayer.IndexID = 1004
+	OrderCountByTenantIdStatus      fdblayer.IndexID = 1005
+	OrderSumCreatedAtByTenantId     fdblayer.IndexID = 1006
+	OrderAddRetriesByTenantIdStatus fdblayer.IndexID = 1007
 )
 
 // OrderRepository defines the repository interface for Order.
@@ -360,6 +361,24 @@ func (r *orderRepository) Delete(ctx context.Context, tr fdblayer.Transaction, k
 	return nil
 }
 
+// Mutate applies an atomic mutation (ADD, COUNT, MIN, MAX) to a mutation secondary index of Order.
+func (r *orderRepository) Mutate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, key fdblayer.Key, val int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	switch index {
+	case OrderAddRetriesByTenantIdStatus:
+		aggKey, err := fdblayer.PackAggregateKey(r.dir, OrderTypeID, index, key, []fdblayer.FieldKind{fdblayer.FieldKindString, fdblayer.FieldKindInt64})
+		if err != nil {
+			return err
+		}
+		tr.Add(aggKey, fdblayer.EncodeDeltaLE(val))
+		return nil
+	default:
+		return fmt.Errorf("order mutation index %d: %w", index, fdblayer.ErrUnknownIndex)
+	}
+}
+
 // ReadRow retrieves a single Order entity by its primary key.
 func (r *orderRepository) ReadRow(ctx context.Context, tr fdblayer.Transaction, key fdblayer.Key) (*Order, error) {
 	if err := ctx.Err(); err != nil {
@@ -564,7 +583,7 @@ func (r *orderRepository) ScanIndex(ctx context.Context, tr fdblayer.Transaction
 	return result, nil
 }
 
-// ReadAggregate reads the current value of an atomic aggregate secondary index (COUNT, SUM, MIN, MAX) for the given groupKey.
+// ReadAggregate reads the current value of an atomic aggregate or mutation secondary index (COUNT, SUM/ADD, MIN, MAX) for the given groupKey.
 func (r *orderRepository) ReadAggregate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, groupKey fdblayer.Key) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -577,6 +596,9 @@ func (r *orderRepository) ReadAggregate(ctx context.Context, tr fdblayer.Transac
 		encoding = fdblayer.AggregateEncodingDelta
 	case OrderSumCreatedAtByTenantId:
 		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingDelta
+	case OrderAddRetriesByTenantIdStatus:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString, fdblayer.FieldKindInt64}
 		encoding = fdblayer.AggregateEncodingDelta
 	default:
 		return 0, fmt.Errorf("order aggregate index %d: %w", index, fdblayer.ErrUnknownIndex)

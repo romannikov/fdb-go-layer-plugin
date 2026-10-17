@@ -736,3 +736,74 @@ func TestIntegration_AggregateSecondaryIndexes_Product(t *testing.T) {
 		return nil
 	})
 }
+
+func TestIntegration_MutationSecondaryIndexes_Post(t *testing.T) {
+	ctx := context.Background()
+	db := fdb.MustOpenDefault()
+	dir, cleanup := tests.TestDir(t, db)
+	defer cleanup()
+
+	postRepo := store.NewPostRepository(dir)
+
+	// 1. Mutate without inserting the entity first (0-RTT blind atomic mutations)
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if err := postRepo.Mutate(ctx, tr, store.PostCountById, fdblayer.Key{"p1"}, 1); err != nil {
+			return err
+		}
+		if err := postRepo.Mutate(ctx, tr, store.PostCountById, fdblayer.Key{"p1"}, 3); err != nil {
+			return err
+		}
+		if err := postRepo.Mutate(ctx, tr, store.PostAddLikesById, fdblayer.Key{"p1"}, 15); err != nil {
+			return err
+		}
+		if err := postRepo.Mutate(ctx, tr, store.PostAddLikesById, fdblayer.Key{"p1"}, -4); err != nil {
+			return err
+		}
+		for _, lat := range []int64{30, -5, 95, 12} {
+			if err := postRepo.Mutate(ctx, tr, store.PostMinLatencyById, fdblayer.Key{"p1"}, lat); err != nil {
+				return err
+			}
+			if err := postRepo.Mutate(ctx, tr, store.PostMaxLatencyById, fdblayer.Key{"p1"}, lat); err != nil {
+				return err
+			}
+		}
+		return postRepo.Mutate(ctx, tr, store.PostCountGlobalViews, fdblayer.Key{}, 7)
+	})
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if v, err := postRepo.ReadAggregate(ctx, tr, store.PostCountById, fdblayer.Key{"p1"}); err != nil || v != 4 {
+			t.Fatalf("expected PostCountById('p1')=4, got %d, err=%v", v, err)
+		}
+		if v, err := postRepo.ReadAggregate(ctx, tr, store.PostAddLikesById, fdblayer.Key{"p1"}); err != nil || v != 11 {
+			t.Fatalf("expected PostAddLikesById('p1')=11, got %d, err=%v", v, err)
+		}
+		if v, err := postRepo.ReadAggregate(ctx, tr, store.PostMinLatencyById, fdblayer.Key{"p1"}); err != nil || v != -5 {
+			t.Fatalf("expected PostMinLatencyById('p1')=-5, got %d, err=%v", v, err)
+		}
+		if v, err := postRepo.ReadAggregate(ctx, tr, store.PostMaxLatencyById, fdblayer.Key{"p1"}); err != nil || v != 95 {
+			t.Fatalf("expected PostMaxLatencyById('p1')=95, got %d, err=%v", v, err)
+		}
+		if v, err := postRepo.ReadAggregate(ctx, tr, store.PostCountGlobalViews, fdblayer.Key{}); err != nil || v != 7 {
+			t.Fatalf("expected PostCountGlobalViews=7, got %d, err=%v", v, err)
+		}
+		return nil
+	})
+
+	// 2. Delete("p1") clears primary-key-scoped mutation indexes and leaves global counter intact
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return postRepo.Delete(ctx, tr, fdblayer.Key{"p1"})
+	})
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if v, err := postRepo.ReadAggregate(ctx, tr, store.PostCountById, fdblayer.Key{"p1"}); err != nil || v != 0 {
+			t.Fatalf("expected PostCountById('p1')=0 after Delete, got %d, err=%v", v, err)
+		}
+		if _, err := postRepo.ReadAggregate(ctx, tr, store.PostMaxLatencyById, fdblayer.Key{"p1"}); !errors.Is(err, fdblayer.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound for PostMaxLatencyById('p1') after Delete, got %v", err)
+		}
+		if v, err := postRepo.ReadAggregate(ctx, tr, store.PostCountGlobalViews, fdblayer.Key{}); err != nil || v != 7 {
+			t.Fatalf("expected PostCountGlobalViews=7 after Delete('p1'), got %d, err=%v", v, err)
+		}
+		return nil
+	})
+}

@@ -130,6 +130,14 @@ func (r *userRepository) Delete(ctx context.Context, tr fdblayer.Transaction, ke
 	return nil
 }
 
+// Mutate applies an atomic mutation (ADD, COUNT, MIN, MAX) to a mutation secondary index of User.
+func (r *userRepository) Mutate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, key fdblayer.Key, val int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("user mutation index %d: %w", index, fdblayer.ErrUnknownIndex)
+}
+
 // ReadRow retrieves a single User entity by its primary key.
 func (r *userRepository) ReadRow(ctx context.Context, tr fdblayer.Transaction, key fdblayer.Key) (*User, error) {
 	if err := ctx.Err(); err != nil {
@@ -328,7 +336,7 @@ func (r *userRepository) ScanIndex(ctx context.Context, tr fdblayer.Transaction,
 	return result, nil
 }
 
-// ReadAggregate reads the current value of an atomic aggregate secondary index (COUNT, SUM, MIN, MAX) for the given groupKey.
+// ReadAggregate reads the current value of an atomic aggregate or mutation secondary index (COUNT, SUM/ADD, MIN, MAX) for the given groupKey.
 func (r *userRepository) ReadAggregate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, groupKey fdblayer.Key) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err

@@ -19,8 +19,13 @@ const PostTypeID int64 = 3
 
 // Secondary index IDs for Post.
 const (
-	PostByTags      fdblayer.IndexID = 1
-	PostCountByTags fdblayer.IndexID = 2
+	PostByTags           fdblayer.IndexID = 1
+	PostCountByTags      fdblayer.IndexID = 2
+	PostCountById        fdblayer.IndexID = 3
+	PostAddLikesById     fdblayer.IndexID = 4
+	PostMinLatencyById   fdblayer.IndexID = 5
+	PostMaxLatencyById   fdblayer.IndexID = 6
+	PostCountGlobalViews fdblayer.IndexID = 7
 )
 
 // PostRepository defines the repository interface for Post.
@@ -244,9 +249,63 @@ func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, ke
 			}
 		}
 	}
+	// Primary-key-scoped mutation index
+	tr.Clear(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostCountById), pkTuple[0]}))
+	// Primary-key-scoped mutation index
+	tr.Clear(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostAddLikesById), pkTuple[0]}))
+	// Primary-key-scoped mutation index
+	tr.Clear(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostMinLatencyById), pkTuple[0]}))
+	// Primary-key-scoped mutation index
+	tr.Clear(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostMaxLatencyById), pkTuple[0]}))
 	tr.Clear(dataKey)
 
 	return nil
+}
+
+// Mutate applies an atomic mutation (ADD, COUNT, MIN, MAX) to a mutation secondary index of Post.
+func (r *postRepository) Mutate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, key fdblayer.Key, val int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	switch index {
+	case PostCountById:
+		aggKey, err := fdblayer.PackAggregateKey(r.dir, PostTypeID, index, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+		if err != nil {
+			return err
+		}
+		tr.Add(aggKey, fdblayer.EncodeDeltaLE(val))
+		return nil
+	case PostAddLikesById:
+		aggKey, err := fdblayer.PackAggregateKey(r.dir, PostTypeID, index, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+		if err != nil {
+			return err
+		}
+		tr.Add(aggKey, fdblayer.EncodeDeltaLE(val))
+		return nil
+	case PostMinLatencyById:
+		aggKey, err := fdblayer.PackAggregateKey(r.dir, PostTypeID, index, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+		if err != nil {
+			return err
+		}
+		tr.Min(aggKey, fdblayer.EncodeSignedOrderLE(val))
+		return nil
+	case PostMaxLatencyById:
+		aggKey, err := fdblayer.PackAggregateKey(r.dir, PostTypeID, index, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+		if err != nil {
+			return err
+		}
+		tr.Max(aggKey, fdblayer.EncodeSignedOrderLE(val))
+		return nil
+	case PostCountGlobalViews:
+		aggKey, err := fdblayer.PackAggregateKey(r.dir, PostTypeID, index, key, []fdblayer.FieldKind{})
+		if err != nil {
+			return err
+		}
+		tr.Add(aggKey, fdblayer.EncodeDeltaLE(val))
+		return nil
+	default:
+		return fmt.Errorf("post mutation index %d: %w", index, fdblayer.ErrUnknownIndex)
+	}
 }
 
 // ReadRow retrieves a single Post entity by its primary key.
@@ -447,7 +506,7 @@ func (r *postRepository) ScanIndex(ctx context.Context, tr fdblayer.Transaction,
 	return result, nil
 }
 
-// ReadAggregate reads the current value of an atomic aggregate secondary index (COUNT, SUM, MIN, MAX) for the given groupKey.
+// ReadAggregate reads the current value of an atomic aggregate or mutation secondary index (COUNT, SUM/ADD, MIN, MAX) for the given groupKey.
 func (r *postRepository) ReadAggregate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, groupKey fdblayer.Key) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -457,6 +516,21 @@ func (r *postRepository) ReadAggregate(ctx context.Context, tr fdblayer.Transact
 	switch index {
 	case PostCountByTags:
 		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingDelta
+	case PostCountById:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingDelta
+	case PostAddLikesById:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingDelta
+	case PostMinLatencyById:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingSignedMinMax
+	case PostMaxLatencyById:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingSignedMinMax
+	case PostCountGlobalViews:
+		groupSchema = []fdblayer.FieldKind{}
 		encoding = fdblayer.AggregateEncodingDelta
 	default:
 		return 0, fmt.Errorf("post aggregate index %d: %w", index, fdblayer.ErrUnknownIndex)

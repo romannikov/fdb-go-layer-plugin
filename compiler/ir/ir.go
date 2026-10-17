@@ -61,14 +61,15 @@ func (k FieldKind) IsValidKeyKind() bool {
 	}
 }
 
-// MutationType represents a reserved FDB atomic mutation operation in the language-neutral IR.
+// MutationType represents an FDB atomic mutation operation in the language-neutral IR.
 type MutationType int
 
 const (
-	MutationNone MutationType = 0
-	MutationAdd  MutationType = 1
-	MutationMax  MutationType = 2
-	MutationMin  MutationType = 3
+	MutationNone  MutationType = 0
+	MutationAdd   MutationType = 1
+	MutationMax   MutationType = 2
+	MutationMin   MutationType = 3
+	MutationCount MutationType = 4
 )
 
 // IndexAggregateType represents a secondary index aggregation mode in the language-neutral IR.
@@ -117,11 +118,18 @@ type SecondaryIndexSpec struct {
 	IndexID        int64
 	Aggregate      IndexAggregateType
 	AggregateField FieldSpec
+	Mutation       MutationType
+	Name           string // PascalCase optional name for mutation index constants
 }
 
 // IsAggregate returns true if the secondary index is an atomic aggregate index (COUNT, SUM, MIN, MAX).
 func (s SecondaryIndexSpec) IsAggregate() bool {
 	return s.Aggregate != AggregateNone
+}
+
+// IsMutation returns true if the secondary index is a manual atomic mutation index (ADD, MAX, MIN, COUNT).
+func (s SecondaryIndexSpec) IsMutation() bool {
+	return s.Mutation != MutationNone
 }
 
 // MessageSpec describes an FDB-persisted Protobuf message, FIFO queue, or helper message.
@@ -525,6 +533,7 @@ func buildMessageSpecInternal(
 
 	usedHashes := make(map[int64]string)
 	seenSignatures := make(map[string]int64)
+	seenConstNames := make(map[string]int64)
 	secondaryIndexes := make([]SecondaryIndexSpec, 0, len(rawIndexes))
 	for _, idx := range rawIndexes {
 		si, err := BuildSecondaryIndex(idx, fieldMap, usedHashes, msgName)
@@ -536,6 +545,12 @@ func buildMessageSpecInternal(
 			return nil, fmt.Errorf("duplicate secondary index on [%s] in message %s (IDs %d and %d)", sig, msgName, prevID, si.IndexID)
 		}
 		seenSignatures[sig] = si.IndexID
+
+		constName := msgName + IndexConstSuffix(si)
+		if prevID, dup := seenConstNames[constName]; dup {
+			return nil, fmt.Errorf("duplicate secondary index constant name %q in message %s (IDs %d and %d); specify a distinct 'name' on the mutation index", constName, msgName, prevID, si.IndexID)
+		}
+		seenConstNames[constName] = si.IndexID
 		secondaryIndexes = append(secondaryIndexes, si)
 	}
 
@@ -598,6 +613,8 @@ func extractField(field *protogen.Field, msgName string) (FieldSpec, error) {
 				mutation = MutationMax
 			case annotationspb.MutationType_MUTATION_MIN:
 				mutation = MutationMin
+			case annotationspb.MutationType_MUTATION_COUNT:
+				mutation = MutationCount
 			default:
 				mutation = MutationNone
 			}
@@ -662,6 +679,96 @@ func toPascalCase(s string) string {
 	return out.String()
 }
 
+func isValidIndexName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if i == 0 {
+			if !unicode.IsLetter(r) {
+				return false
+			}
+		} else {
+			if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// IndexConstSuffix returns the deterministic suffix for an index's Go constant name
+// (everything after the message name prefix, e.g. "IndexByEmail", "CountByDepartment",
+// "SumAmountByTenantId", "MaxLatencyById", "AddLikesById").
+func IndexConstSuffix(si SecondaryIndexSpec) string {
+	var fieldNames strings.Builder
+	for _, f := range si.Fields {
+		name := f.GoName
+		if name == "" {
+			name = toPascalCase(f.ProtoName)
+		}
+		fieldNames.WriteString(name)
+	}
+	byFields := fieldNames.String()
+
+	if si.IsMutation() {
+		var opPrefix string
+		switch si.Mutation {
+		case MutationCount:
+			opPrefix = "Count"
+		case MutationAdd:
+			opPrefix = "Add"
+		case MutationMin:
+			opPrefix = "Min"
+		case MutationMax:
+			opPrefix = "Max"
+		}
+		custom := toPascalCase(si.Name)
+		var base string
+		if custom != "" {
+			if strings.HasPrefix(custom, opPrefix) {
+				base = custom
+			} else {
+				base = opPrefix + custom
+			}
+		} else {
+			base = opPrefix
+		}
+		if byFields == "" {
+			return base
+		}
+		return base + "By" + byFields
+	}
+
+	switch si.Aggregate {
+	case AggregateCount:
+		if byFields == "" {
+			return "Count"
+		}
+		return "CountBy" + byFields
+	case AggregateSum, AggregateMin, AggregateMax:
+		var opPrefix string
+		switch si.Aggregate {
+		case AggregateSum:
+			opPrefix = "Sum"
+		case AggregateMin:
+			opPrefix = "Min"
+		case AggregateMax:
+			opPrefix = "Max"
+		}
+		aggFieldGoName := si.AggregateField.GoName
+		if aggFieldGoName == "" {
+			aggFieldGoName = toPascalCase(si.AggregateField.ProtoName)
+		}
+		if byFields == "" {
+			return opPrefix + aggFieldGoName
+		}
+		return opPrefix + aggFieldGoName + "By" + byFields
+	default:
+		return "By" + byFields
+	}
+}
+
 func fieldsSignature(fields []FieldSpec) string {
 	names := make([]string, 0, len(fields))
 	for _, f := range fields {
@@ -676,6 +783,21 @@ func fieldsSignature(fields []FieldSpec) string {
 
 func indexSignature(si SecondaryIndexSpec) string {
 	base := fieldsSignature(si.Fields)
+	if si.IsMutation() {
+		var mutOp string
+		switch si.Mutation {
+		case MutationCount:
+			mutOp = "mutation_count"
+		case MutationAdd:
+			mutOp = "mutation_add"
+		case MutationMin:
+			mutOp = "mutation_min"
+		case MutationMax:
+			mutOp = "mutation_max"
+		}
+		namePart := strings.ToLower(toPascalCase(si.Name))
+		return mutOp + "(" + namePart + "|by:" + base + ")"
+	}
 	switch si.Aggregate {
 	case AggregateCount:
 		return "count(" + base + ")"
@@ -726,7 +848,37 @@ func BuildSecondaryIndex(
 		return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s has unknown aggregate type %v", msgName, idx.GetAggregate())
 	}
 
-	if aggType == AggregateNone && len(idx.GetFields()) == 0 {
+	var mutType MutationType
+	switch idx.GetMutation() {
+	case annotationspb.MutationType_MUTATION_NONE:
+		mutType = MutationNone
+	case annotationspb.MutationType_MUTATION_ADD:
+		mutType = MutationAdd
+	case annotationspb.MutationType_MUTATION_MAX:
+		mutType = MutationMax
+	case annotationspb.MutationType_MUTATION_MIN:
+		mutType = MutationMin
+	case annotationspb.MutationType_MUTATION_COUNT:
+		mutType = MutationCount
+	default:
+		return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s has unknown mutation type %v", msgName, idx.GetMutation())
+	}
+
+	if aggType != AggregateNone && mutType != MutationNone {
+		return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s cannot specify both aggregate and mutation", msgName)
+	}
+
+	idxName := idx.GetName()
+	if idxName != "" {
+		if mutType == MutationNone {
+			return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s: option 'name' is only supported on mutation indexes", msgName)
+		}
+		if !isValidIndexName(idxName) {
+			return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s: invalid name %q (must start with a letter and contain only letters, digits, or underscores)", msgName, idxName)
+		}
+	}
+
+	if aggType == AggregateNone && mutType == MutationNone && len(idx.GetFields()) == 0 {
 		return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s must specify at least one field", msgName)
 	}
 
@@ -734,6 +886,9 @@ func BuildSecondaryIndex(
 	switch aggType {
 	case AggregateNone, AggregateCount:
 		if idx.GetAggregateField() != "" {
+			if mutType != MutationNone {
+				return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s: aggregate_field cannot be set on a mutation index", msgName)
+			}
 			return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s: aggregate_field cannot be set for %v", msgName, idx.GetAggregate())
 		}
 	case AggregateSum, AggregateMin, AggregateMax:
@@ -771,6 +926,9 @@ func BuildSecondaryIndex(
 		if !f.Kind.IsValidKeyKind() {
 			return SecondaryIndexSpec{}, fmt.Errorf("secondary index field %q in message %s has unsupported kind %v", idxFieldName, msgName, f.Kind)
 		}
+		if mutType != MutationNone && f.IsRepeated {
+			return SecondaryIndexSpec{}, fmt.Errorf("secondary index field %q in message %s cannot be repeated on a mutation index", idxFieldName, msgName)
+		}
 		idxFields = append(idxFields, f)
 	}
 
@@ -792,6 +950,8 @@ func BuildSecondaryIndex(
 		FanOutField:    fanOutField,
 		Aggregate:      aggType,
 		AggregateField: aggField,
+		Mutation:       mutType,
+		Name:           idxName,
 	}
 	signature := indexSignature(spec)
 	if idx.GetId() == 0 {

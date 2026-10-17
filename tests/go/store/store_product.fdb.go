@@ -149,12 +149,12 @@ func (r *productRepository) Upsert(ctx context.Context, tr fdblayer.Transaction,
 	}
 
 	// Aggregate index
-	if old == nil || old.Category != entity.Category || old.Price != entity.Price {
+	if old == nil || old.Category != entity.Category || entity.Price < old.Price {
 		tr.Min(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductMinPriceByCategory), entity.Category}), fdblayer.EncodeSignedOrderLE(int64(entity.Price)))
 	}
 
 	// Aggregate index
-	if old == nil || old.Category != entity.Category || old.Price != entity.Price {
+	if old == nil || old.Category != entity.Category || entity.Price > old.Price {
 		tr.Max(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductMaxPriceByCategory), entity.Category}), fdblayer.EncodeSignedOrderLE(int64(entity.Price)))
 	}
 
@@ -197,6 +197,14 @@ func (r *productRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 	tr.Clear(dataKey)
 
 	return nil
+}
+
+// Mutate applies an atomic mutation (ADD, COUNT, MIN, MAX) to a mutation secondary index of Product.
+func (r *productRepository) Mutate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, key fdblayer.Key, val int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("product mutation index %d: %w", index, fdblayer.ErrUnknownIndex)
 }
 
 // ReadRow retrieves a single Product entity by its primary key.
@@ -397,7 +405,7 @@ func (r *productRepository) ScanIndex(ctx context.Context, tr fdblayer.Transacti
 	return result, nil
 }
 
-// ReadAggregate reads the current value of an atomic aggregate secondary index (COUNT, SUM, MIN, MAX) for the given groupKey.
+// ReadAggregate reads the current value of an atomic aggregate or mutation secondary index (COUNT, SUM/ADD, MIN, MAX) for the given groupKey.
 func (r *productRepository) ReadAggregate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, groupKey fdblayer.Key) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
