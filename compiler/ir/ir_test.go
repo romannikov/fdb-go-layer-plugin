@@ -541,3 +541,110 @@ func TestBuildSecondaryIndex_Aggregates(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildSecondaryIndex_Mutations(t *testing.T) {
+	fields := []FieldSpec{
+		{ProtoName: "id", GoName: "Id", Kind: KindString},
+		{ProtoName: "tenant_id", GoName: "TenantId", Kind: KindString},
+		{ProtoName: "total_cents", GoName: "TotalCents", Kind: KindInt64},
+		{ProtoName: "tags", GoName: "Tags", Kind: KindString, IsRepeated: true},
+	}
+	fieldMap := make(map[string]FieldSpec, len(fields))
+	for _, f := range fields {
+		fieldMap[f.ProtoName] = f
+	}
+
+	msg, err := BuildMessageSpecWithTypeID("Post", fields, fieldMap, []string{"id"}, []*annotationspb.SecondaryIndex{
+		{Id: 1, Fields: []string{"id"}, Mutation: annotationspb.MutationType_MUTATION_COUNT},
+		{Id: 2, Fields: []string{"id"}, Mutation: annotationspb.MutationType_MUTATION_COUNT, Name: "views"},
+		{Id: 3, Fields: []string{"id"}, Mutation: annotationspb.MutationType_MUTATION_ADD, Name: "likes"},
+		{Id: 4, Fields: []string{"id"}, Mutation: annotationspb.MutationType_MUTATION_MIN, Name: "latency"},
+		{Id: 5, Fields: []string{"id"}, Mutation: annotationspb.MutationType_MUTATION_MAX, Name: "max_latency"},
+		{Id: 6, Fields: []string{}, Mutation: annotationspb.MutationType_MUTATION_COUNT, Name: "global_hits"},
+	}, false, 20)
+	if err != nil {
+		t.Fatalf("expected valid mutation indexes to succeed, got %v", err)
+	}
+	if len(msg.SecondaryIndexes) != 6 {
+		t.Fatalf("expected 6 indexes, got %d", len(msg.SecondaryIndexes))
+	}
+	wantSuffixes := []string{
+		"CountById",
+		"CountViewsById",
+		"AddLikesById",
+		"MinLatencyById",
+		"MaxLatencyById",
+		"CountGlobalHits",
+	}
+	for i, want := range wantSuffixes {
+		if !msg.SecondaryIndexes[i].IsMutation() || msg.SecondaryIndexes[i].IsAggregate() {
+			t.Fatalf("expected index %d to be mutation and non-aggregate", i)
+		}
+		if got := IndexConstSuffix(msg.SecondaryIndexes[i]); got != want {
+			t.Errorf("index %d: got suffix %q, want %q", i, got, want)
+		}
+	}
+
+	// Constant name collision between AGGREGATE_COUNT and unnamed MUTATION_COUNT on same fields
+	_, err = BuildMessageSpecWithTypeID("Post", fields, fieldMap, []string{"id"}, []*annotationspb.SecondaryIndex{
+		{Id: 1, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_COUNT},
+		{Id: 2, Fields: []string{"tenant_id"}, Mutation: annotationspb.MutationType_MUTATION_COUNT},
+	}, false, 20)
+	if err == nil || !strings.Contains(err.Error(), "duplicate secondary index constant name") {
+		t.Fatalf("expected constant name collision error, got %v", err)
+	}
+
+	// Coexistence succeeds when a distinct name is provided on the mutation index
+	_, err = BuildMessageSpecWithTypeID("Post", fields, fieldMap, []string{"id"}, []*annotationspb.SecondaryIndex{
+		{Id: 1, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_COUNT},
+		{Id: 2, Fields: []string{"tenant_id"}, Mutation: annotationspb.MutationType_MUTATION_COUNT, Name: "views"},
+	}, false, 20)
+	if err != nil {
+		t.Fatalf("expected named mutation index to coexist with aggregate count index, got %v", err)
+	}
+
+	invalidCases := []struct {
+		name string
+		idx  *annotationspb.SecondaryIndex
+		want string
+	}{
+		{
+			name: "both_aggregate_and_mutation",
+			idx:  &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_COUNT, Mutation: annotationspb.MutationType_MUTATION_ADD},
+			want: "cannot specify both aggregate and mutation",
+		},
+		{
+			name: "name_on_standard_index",
+			idx:  &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"id"}, Name: "custom"},
+			want: "option 'name' is only supported on mutation indexes",
+		},
+		{
+			name: "name_on_aggregate_index",
+			idx:  &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_COUNT, Name: "custom"},
+			want: "option 'name' is only supported on mutation indexes",
+		},
+		{
+			name: "invalid_name_characters",
+			idx:  &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"id"}, Mutation: annotationspb.MutationType_MUTATION_ADD, Name: "123-bad"},
+			want: "invalid name",
+		},
+		{
+			name: "aggregate_field_on_mutation",
+			idx:  &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"id"}, Mutation: annotationspb.MutationType_MUTATION_ADD, AggregateField: "total_cents"},
+			want: "aggregate_field cannot be set on a mutation index",
+		},
+		{
+			name: "repeated_field_on_mutation",
+			idx:  &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"tags"}, Mutation: annotationspb.MutationType_MUTATION_COUNT},
+			want: "cannot be repeated on a mutation index",
+		},
+	}
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := BuildSecondaryIndex(tc.idx, fieldMap, nil, "Post")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}

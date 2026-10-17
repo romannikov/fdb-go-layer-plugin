@@ -110,28 +110,7 @@ func effectiveTypeID(msg ir.MessageSpec) int64 {
 
 // IndexConstName returns the generated fdblayer.IndexID constant name for a secondary index.
 func IndexConstName(msg ir.MessageSpec, idx ir.SecondaryIndexSpec) string {
-	var b strings.Builder
-	b.WriteString(msg.Name)
-	switch idx.Aggregate {
-	case ir.AggregateCount:
-		b.WriteString("Count")
-	case ir.AggregateSum:
-		b.WriteString("Sum")
-		b.WriteString(idx.AggregateField.GoName)
-	case ir.AggregateMin:
-		b.WriteString("Min")
-		b.WriteString(idx.AggregateField.GoName)
-	case ir.AggregateMax:
-		b.WriteString("Max")
-		b.WriteString(idx.AggregateField.GoName)
-	}
-	if len(idx.Fields) > 0 {
-		b.WriteString("By")
-		for _, f := range idx.Fields {
-			b.WriteString(f.GoName)
-		}
-	}
-	return b.String()
+	return msg.Name + ir.IndexConstSuffix(idx)
 }
 
 func generateQueueRepository(g Printer, msg ir.MessageSpec) {
@@ -326,6 +305,7 @@ func generateEntityRepository(g Printer, msg ir.MessageSpec) {
 	generateInsert(g, msg)
 	generateUpsert(g, msg)
 	generateDelete(g, msg)
+	generateMutate(g, msg)
 	generateReadRow(g, msg)
 	generateReadRows(g, msg)
 	generateScan(g, msg)
@@ -408,6 +388,9 @@ func generateInsert(g Printer, msg ir.MessageSpec) {
 	pkArgs := pkTupleArgsFromEntity(msg, "entity")
 	vsPKArgs := versionstampedPKTupleArgsWithVar(msg, "writeCfg.UserVersion")
 	for _, idx := range msg.SecondaryIndexes {
+		if idx.IsMutation() {
+			continue
+		}
 		idxConst := IndexConstName(msg, idx)
 		if idx.IsAggregate() {
 			emitAggregateInsert(g, msg, idx)
@@ -458,7 +441,13 @@ func generateInsert(g Printer, msg ir.MessageSpec) {
 func generateUpsert(g Printer, msg ir.MessageSpec) {
 	lowerName := strings.ToLower(msg.Name)
 	hasVS := ir.MsgHasVersionstampPK(msg)
-	hasIdx := len(msg.SecondaryIndexes) > 0
+	hasIdx := false
+	for _, idx := range msg.SecondaryIndexes {
+		if !idx.IsMutation() {
+			hasIdx = true
+			break
+		}
+	}
 	pkArgsEntity := pkTupleArgsFromEntity(msg, "entity")
 	pkArgsOld := pkTupleArgsFromEntity(msg, "old")
 	typeIDConst := typeIDConstName(msg)
@@ -514,6 +503,9 @@ func generateUpsert(g Printer, msg ir.MessageSpec) {
 	g.P()
 
 	for _, idx := range msg.SecondaryIndexes {
+		if idx.IsMutation() {
+			continue
+		}
 		idxConst := IndexConstName(msg, idx)
 		if idx.IsAggregate() {
 			emitAggregateUpsert(g, msg, idx)
@@ -640,6 +632,18 @@ func schemaSliceExpr(fields []ir.FieldSpec) string {
 	return "[]fdblayer.FieldKind{" + strings.Join(parts, ", ") + "}"
 }
 
+func isPrimaryKeyMutationIndex(msg ir.MessageSpec, idx ir.SecondaryIndexSpec) bool {
+	if !idx.IsMutation() || len(idx.Fields) == 0 || len(idx.Fields) != len(msg.PrimaryKeyFields) {
+		return false
+	}
+	for _, f := range idx.Fields {
+		if pkPosition(msg, f.ProtoName) < 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func generateDelete(g Printer, msg ir.MessageSpec) {
 	lowerName := strings.ToLower(msg.Name)
 	typeIDConst := typeIDConstName(msg)
@@ -647,6 +651,12 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 	hasNonFanOutStandardIdx := false
 	needsPKTuple := false
 	for _, idx := range msg.SecondaryIndexes {
+		if idx.IsMutation() {
+			if isPrimaryKeyMutationIndex(msg, idx) {
+				needsPKTuple = true
+			}
+			continue
+		}
 		if idx.Aggregate == ir.AggregateMin || idx.Aggregate == ir.AggregateMax {
 			continue
 		}
@@ -694,6 +704,9 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 		g.P(`			return fmt.Errorf("failed to unmarshal existing `, lowerName, `: %w", err)`)
 		g.P("		}")
 		for _, idx := range msg.SecondaryIndexes {
+			if idx.IsMutation() {
+				continue
+			}
 			idxConst := IndexConstName(msg, idx)
 			if idx.IsAggregate() {
 				emitAggregateDelete(g, msg, idx, pkTupleVar)
@@ -722,9 +735,62 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 		}
 		g.P("	}")
 	}
+	for _, idx := range msg.SecondaryIndexes {
+		if isPrimaryKeyMutationIndex(msg, idx) {
+			g.P("	// Primary-key-scoped mutation index")
+			g.P("	tr.Clear(", aggregateKeyPackExpr(msg, idx, "", pkTupleVar), ")")
+		}
+	}
 	g.P("	tr.Clear(dataKey)")
 	g.P()
 	g.P("	return nil")
+	g.P("}")
+	g.P()
+}
+
+func generateMutate(g Printer, msg ir.MessageSpec) {
+	lowerName := strings.ToLower(msg.Name)
+	typeIDConst := typeIDConstName(msg)
+
+	var mutIndexes []ir.SecondaryIndexSpec
+	for _, idx := range msg.SecondaryIndexes {
+		if idx.IsMutation() {
+			mutIndexes = append(mutIndexes, idx)
+		}
+	}
+
+	g.P("// Mutate applies an atomic mutation (ADD, COUNT, MIN, MAX) to a mutation secondary index of ", msg.Name, ".")
+	g.P("func (r *", lowerName, "Repository) Mutate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, key fdblayer.Key, val int64) error {")
+	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("		return err")
+	g.P("	}")
+	if len(mutIndexes) == 0 {
+		g.P(`	return fmt.Errorf("`, lowerName, ` mutation index %d: %w", index, fdblayer.ErrUnknownIndex)`)
+		g.P("}")
+		g.P()
+		return
+	}
+
+	g.P("	switch index {")
+	for _, idx := range mutIndexes {
+		g.P("	case ", IndexConstName(msg, idx), ":")
+		g.P("		aggKey, err := fdblayer.PackAggregateKey(r.dir, ", typeIDConst, ", index, key, ", schemaSliceExpr(idx.Fields), ")")
+		g.P("		if err != nil {")
+		g.P("			return err")
+		g.P("		}")
+		switch idx.Mutation {
+		case ir.MutationCount, ir.MutationAdd:
+			g.P("		tr.Add(aggKey, fdblayer.EncodeDeltaLE(val))")
+		case ir.MutationMin:
+			g.P("		tr.Min(aggKey, fdblayer.EncodeSignedOrderLE(val))")
+		case ir.MutationMax:
+			g.P("		tr.Max(aggKey, fdblayer.EncodeSignedOrderLE(val))")
+		}
+		g.P("		return nil")
+	}
+	g.P("	default:")
+	g.P(`		return fmt.Errorf("`, lowerName, ` mutation index %d: %w", index, fdblayer.ErrUnknownIndex)`)
+	g.P("	}")
 	g.P("}")
 	g.P()
 }
@@ -923,7 +989,7 @@ func generateScanIndex(g Printer, msg ir.MessageSpec) {
 
 	var scanIndexes []ir.SecondaryIndexSpec
 	for _, idx := range msg.SecondaryIndexes {
-		if !idx.IsAggregate() {
+		if !idx.IsAggregate() && !idx.IsMutation() {
 			scanIndexes = append(scanIndexes, idx)
 		}
 	}
@@ -1052,12 +1118,12 @@ func generateReadAggregate(g Printer, msg ir.MessageSpec) {
 
 	var aggIndexes []ir.SecondaryIndexSpec
 	for _, idx := range msg.SecondaryIndexes {
-		if idx.IsAggregate() {
+		if idx.IsAggregate() || idx.IsMutation() {
 			aggIndexes = append(aggIndexes, idx)
 		}
 	}
 
-	g.P("// ReadAggregate reads the current value of an atomic aggregate secondary index (COUNT, SUM, MIN, MAX) for the given groupKey.")
+	g.P("// ReadAggregate reads the current value of an atomic aggregate or mutation secondary index (COUNT, SUM/ADD, MIN, MAX) for the given groupKey.")
 	g.P("func (r *", lowerName, "Repository) ReadAggregate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, groupKey fdblayer.Key) (int64, error) {")
 	g.P("	if err := ctx.Err(); err != nil {")
 	g.P("		return 0, err")
@@ -1075,14 +1141,23 @@ func generateReadAggregate(g Printer, msg ir.MessageSpec) {
 	for _, idx := range aggIndexes {
 		g.P("	case ", IndexConstName(msg, idx), ":")
 		g.P("		groupSchema = ", schemaSliceExpr(idx.Fields))
-		switch idx.Aggregate {
-		case ir.AggregateCount, ir.AggregateSum:
-			g.P("		encoding = fdblayer.AggregateEncodingDelta")
-		case ir.AggregateMin, ir.AggregateMax:
-			if idx.AggregateField.IsUnsigned {
-				g.P("		encoding = fdblayer.AggregateEncodingUintMinMax")
-			} else {
+		if idx.IsMutation() {
+			switch idx.Mutation {
+			case ir.MutationCount, ir.MutationAdd:
+				g.P("		encoding = fdblayer.AggregateEncodingDelta")
+			case ir.MutationMin, ir.MutationMax:
 				g.P("		encoding = fdblayer.AggregateEncodingSignedMinMax")
+			}
+		} else {
+			switch idx.Aggregate {
+			case ir.AggregateCount, ir.AggregateSum:
+				g.P("		encoding = fdblayer.AggregateEncodingDelta")
+			case ir.AggregateMin, ir.AggregateMax:
+				if idx.AggregateField.IsUnsigned {
+					g.P("		encoding = fdblayer.AggregateEncodingUintMinMax")
+				} else {
+					g.P("		encoding = fdblayer.AggregateEncodingSignedMinMax")
+				}
 			}
 		}
 	}
@@ -1178,6 +1253,9 @@ func JoinFieldNames(fields []ir.FieldSpec) string {
 // HasBytesImports returns true if the message requires "bytes" for index comparisons.
 func HasBytesImports(msg ir.MessageSpec) bool {
 	for _, idx := range msg.SecondaryIndexes {
+		if idx.IsMutation() {
+			continue
+		}
 		for _, f := range idx.Fields {
 			if f.Kind == ir.KindBytes && !f.IsRepeated {
 				return true
@@ -1491,9 +1569,13 @@ func emitAggregateUpsert(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpe
 					aggF := idx.AggregateField.GoName
 					g.P("			} else if delta := int64(entity.", aggF, ") - int64(old.", aggF, "); delta != 0 {")
 					g.P("				tr.Add(", keyEntity, ", fdblayer.EncodeDeltaLE(delta))")
-				} else if idx.Aggregate == ir.AggregateMin || idx.Aggregate == ir.AggregateMax {
+				} else if idx.Aggregate == ir.AggregateMin {
 					aggF := idx.AggregateField.GoName
-					g.P("			} else if old.", aggF, " != entity.", aggF, " {")
+					g.P("			} else if entity.", aggF, " < old.", aggF, " {")
+					emitAggregateMutationForKey(g, idx, keyEntity, "entity", false, "\t\t\t\t")
+				} else if idx.Aggregate == ir.AggregateMax {
+					aggF := idx.AggregateField.GoName
+					g.P("			} else if entity.", aggF, " > old.", aggF, " {")
 					emitAggregateMutationForKey(g, idx, keyEntity, "entity", false, "\t\t\t\t")
 				}
 				g.P("			}")
@@ -1565,9 +1647,13 @@ func emitAggregateUpsert(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpe
 		g.P("	}")
 	case ir.AggregateMin, ir.AggregateMax:
 		aggF := idx.AggregateField.GoName
-		cond := fmt.Sprintf("old == nil || old.%s != entity.%s", aggF, aggF)
+		cmpOp := "<"
+		if idx.Aggregate == ir.AggregateMax {
+			cmpOp = ">"
+		}
+		cond := fmt.Sprintf("old == nil || entity.%s %s old.%s", aggF, cmpOp, aggF)
 		if hasGroupFields {
-			cond = fmt.Sprintf("old == nil || %s || old.%s != entity.%s", groupDiff, aggF, aggF)
+			cond = fmt.Sprintf("old == nil || %s || entity.%s %s old.%s", groupDiff, aggF, cmpOp, aggF)
 		}
 		g.P("	if ", cond, " {")
 		emitAggregateMutationForKey(g, idx, keyEntity, "entity", false, "\t\t")

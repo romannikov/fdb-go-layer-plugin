@@ -1154,6 +1154,16 @@ func TestIntegration_AggregateSecondaryIndexes_PostAndOrder(t *testing.T) {
 		if sum, err := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAtByTenantId, fdblayer.Key{"t1"}); err != nil || sum != 350 {
 			t.Fatalf("expected OrderSumCreatedAtByTenantId(t1)=350, got %d, err=%v", sum, err)
 		}
+		if err := orderRepo.Mutate(ctx, tr, store.OrderAddRetriesByTenantIdStatus, fdblayer.Key{"t1", store.OrderStatus_ORDER_STATUS_PENDING}, 3); err != nil {
+			return err
+		}
+		return nil
+	})
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if retries, err := orderRepo.ReadAggregate(ctx, tr, store.OrderAddRetriesByTenantIdStatus, fdblayer.Key{"t1", store.OrderStatus_ORDER_STATUS_PENDING}); err != nil || retries != 3 {
+			t.Fatalf("expected OrderAddRetriesByTenantIdStatus(t1, PENDING)=3, got %d, err=%v", retries, err)
+		}
 		return nil
 	})
 }

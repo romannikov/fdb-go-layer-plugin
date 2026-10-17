@@ -151,12 +151,16 @@ type Repository[T any] interface {
 	Insert(ctx context.Context, tr Transaction, entity T, opts ...WriteOption) error
 	Upsert(ctx context.Context, tr Transaction, entity T, opts ...WriteOption) error
 	Delete(ctx context.Context, tr Transaction, key Key) error
+	Mutate(ctx context.Context, tr Transaction, index IndexID, key Key, val int64) error
 
 	ReadRow(ctx context.Context, tr Transaction, key Key) (T, error)
 	ReadRows(ctx context.Context, tr Transaction, keys []Key) ([]T, error)
 
 	Scan(ctx context.Context, tr Transaction, kr KeyRange, opts ...ScanOption) (*Page[T], error)
 	ScanIndex(ctx context.Context, tr Transaction, index IndexID, kr KeyRange, opts ...ScanOption) (*Page[T], error)
+	// ReadAggregate reads the current value of an aggregate or mutation secondary index.
+	// Note: for uint64/fixed64 aggregate_field types, values > math.MaxInt64 are returned as
+	// int64(u) in two's complement; callers may cast the result back via uint64(val).
 	ReadAggregate(ctx context.Context, tr Transaction, index IndexID, groupKey Key) (int64, error)
 }
 

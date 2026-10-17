@@ -746,8 +746,8 @@ func TestFanOutIndex_UpsertAndDeleteDeduplicateRepeatedTags(t *testing.T) {
 	if err := postRepo.Delete(ctx, tr, fdblayer.Key{"p_dup"}); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
-	if len(tr.ClearCalls) != 3 {
-		t.Fatalf("expected 3 ClearCalls (1 primary + 2 unique tags) on Delete with duplicate tags, got %d", len(tr.ClearCalls))
+	if len(tr.ClearCalls) != 7 {
+		t.Fatalf("expected 7 ClearCalls (1 primary + 2 unique tags + 4 PK-scoped mutation indexes) on Delete with duplicate tags, got %d", len(tr.ClearCalls))
 	}
 }
 
@@ -1009,5 +1009,17 @@ func TestFanOutAggregateAndCompositeAggregate_PostAndOrder(t *testing.T) {
 	}
 	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAtByTenantId, fdblayer.Key{"acme"}); err != nil || got != 3500 {
 		t.Fatalf("expected OrderSumCreatedAtByTenantId(acme)=3500, got %d, err=%v", got, err)
+	}
+
+	// 3. Coexisting manual mutation index OrderAddRetriesByTenantIdStatus on the same composite fields (tenant_id, status)
+	if err := orderRepo.Mutate(ctx, tr, store.OrderAddRetriesByTenantIdStatus, fdblayer.Key{"acme", store.OrderStatus_ORDER_STATUS_PENDING}, 4); err != nil {
+		t.Fatalf("Mutate(OrderAddRetriesByTenantIdStatus) failed: %v", err)
+	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderAddRetriesByTenantIdStatus, fdblayer.Key{"acme", store.OrderStatus_ORDER_STATUS_PENDING}); err != nil || got != 4 {
+		t.Fatalf("expected OrderAddRetriesByTenantIdStatus(acme, PENDING)=4, got %d, err=%v", got, err)
+	}
+	// Automatic aggregate count on the same fields is unaffected by manual Mutate
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderCountByTenantIdStatus, fdblayer.Key{"acme", store.OrderStatus_ORDER_STATUS_PENDING}); err != nil || got != 2 {
+		t.Fatalf("expected OrderCountByTenantIdStatus(acme, PENDING)=2, got %d, err=%v", got, err)
 	}
 }

@@ -1028,3 +1028,123 @@ func TestAggregateIndexes_Product_CountSumMinMax(t *testing.T) {
 		t.Fatalf("expected ErrInvalidKey for wrong element type in groupKey, got %v", err)
 	}
 }
+
+func TestMutationIndexes_Post_CountAddMinMaxAndDelete(t *testing.T) {
+	ctx := context.Background()
+	tr, dir, _ := tests.Setup()
+	postRepo := store.NewPostRepository(dir)
+
+	// 1. Empty state: COUNT and ADD return (0, nil); MIN and MAX return ErrNotFound.
+	if got, err := postRepo.ReadAggregate(ctx, tr, store.PostCountById, fdblayer.Key{"post-1"}); err != nil || got != 0 {
+		t.Fatalf("expected PostCountById=0 before Mutate, got %d, err=%v", got, err)
+	}
+	if got, err := postRepo.ReadAggregate(ctx, tr, store.PostAddLikesById, fdblayer.Key{"post-1"}); err != nil || got != 0 {
+		t.Fatalf("expected PostAddLikesById=0 before Mutate, got %d, err=%v", got, err)
+	}
+	if _, err := postRepo.ReadAggregate(ctx, tr, store.PostMinLatencyById, fdblayer.Key{"post-1"}); !errors.Is(err, fdblayer.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for PostMinLatencyById before Mutate, got %v", err)
+	}
+	if _, err := postRepo.ReadAggregate(ctx, tr, store.PostMaxLatencyById, fdblayer.Key{"post-1"}); !errors.Is(err, fdblayer.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for PostMaxLatencyById before Mutate, got %v", err)
+	}
+	if got, err := postRepo.ReadAggregate(ctx, tr, store.PostCountGlobalViews, fdblayer.Key{}); err != nil || got != 0 {
+		t.Fatalf("expected PostCountGlobalViews=0 before Mutate, got %d, err=%v", got, err)
+	}
+
+	// 2. Insert and Upsert do NOT touch manual mutation indexes.
+	if err := postRepo.Insert(ctx, tr, &store.Post{Id: "post-1", Tags: []string{"go"}}); err != nil {
+		t.Fatalf("Insert(post-1) failed: %v", err)
+	}
+	if err := postRepo.Upsert(ctx, tr, &store.Post{Id: "post-1", Tags: []string{"go", "fdb"}}); err != nil {
+		t.Fatalf("Upsert(post-1) failed: %v", err)
+	}
+	if got, _ := postRepo.ReadAggregate(ctx, tr, store.PostCountById, fdblayer.Key{"post-1"}); got != 0 {
+		t.Fatalf("expected Insert/Upsert not to modify PostCountById, got %d", got)
+	}
+
+	// 3. Mutate applies 0-RTT atomic operations (Add, Min, Max).
+	tr.ResetLog()
+	if err := postRepo.Mutate(ctx, tr, store.PostCountById, fdblayer.Key{"post-1"}, 1); err != nil {
+		t.Fatalf("Mutate(PostCountById) failed: %v", err)
+	}
+	if err := postRepo.Mutate(ctx, tr, store.PostCountById, fdblayer.Key{"post-1"}, 2); err != nil {
+		t.Fatalf("Mutate(PostCountById) failed: %v", err)
+	}
+	if err := postRepo.Mutate(ctx, tr, store.PostAddLikesById, fdblayer.Key{"post-1"}, 10); err != nil {
+		t.Fatalf("Mutate(PostAddLikesById +10) failed: %v", err)
+	}
+	if err := postRepo.Mutate(ctx, tr, store.PostAddLikesById, fdblayer.Key{"post-1"}, -3); err != nil {
+		t.Fatalf("Mutate(PostAddLikesById -3) failed: %v", err)
+	}
+	for _, lat := range []int64{45, -12, 120, 8} {
+		if err := postRepo.Mutate(ctx, tr, store.PostMinLatencyById, fdblayer.Key{"post-1"}, lat); err != nil {
+			t.Fatalf("Mutate(PostMinLatencyById %d) failed: %v", lat, err)
+		}
+		if err := postRepo.Mutate(ctx, tr, store.PostMaxLatencyById, fdblayer.Key{"post-1"}, lat); err != nil {
+			t.Fatalf("Mutate(PostMaxLatencyById %d) failed: %v", lat, err)
+		}
+	}
+	if err := postRepo.Mutate(ctx, tr, store.PostCountGlobalViews, fdblayer.Key{}, 5); err != nil {
+		t.Fatalf("Mutate(PostCountGlobalViews) failed: %v", err)
+	}
+	if len(tr.AddCalls) != 5 || len(tr.MinCalls) != 4 || len(tr.MaxCalls) != 4 {
+		t.Fatalf("expected 5 AddCalls, 4 MinCalls, 4 MaxCalls during Mutate, got Add=%d Min=%d Max=%d", len(tr.AddCalls), len(tr.MinCalls), len(tr.MaxCalls))
+	}
+
+	if got, err := postRepo.ReadAggregate(ctx, tr, store.PostCountById, fdblayer.Key{"post-1"}); err != nil || got != 3 {
+		t.Fatalf("expected PostCountById=3, got %d, err=%v", got, err)
+	}
+	if got, err := postRepo.ReadAggregate(ctx, tr, store.PostAddLikesById, fdblayer.Key{"post-1"}); err != nil || got != 7 {
+		t.Fatalf("expected PostAddLikesById=7, got %d, err=%v", got, err)
+	}
+	if got, err := postRepo.ReadAggregate(ctx, tr, store.PostMinLatencyById, fdblayer.Key{"post-1"}); err != nil || got != -12 {
+		t.Fatalf("expected PostMinLatencyById=-12, got %d, err=%v", got, err)
+	}
+	if got, err := postRepo.ReadAggregate(ctx, tr, store.PostMaxLatencyById, fdblayer.Key{"post-1"}); err != nil || got != 120 {
+		t.Fatalf("expected PostMaxLatencyById=120, got %d, err=%v", got, err)
+	}
+	if got, err := postRepo.ReadAggregate(ctx, tr, store.PostCountGlobalViews, fdblayer.Key{}); err != nil || got != 5 {
+		t.Fatalf("expected PostCountGlobalViews=5, got %d, err=%v", got, err)
+	}
+
+	// 4. Delete clears primary-key-scoped mutation indexes (PostCountById, PostAddLikesById, PostMinLatencyById, PostMaxLatencyById)
+	//    while leaving shared/global mutation indexes (PostCountGlobalViews) intact.
+	if err := postRepo.Delete(ctx, tr, fdblayer.Key{"post-1"}); err != nil {
+		t.Fatalf("Delete(post-1) failed: %v", err)
+	}
+	if got, err := postRepo.ReadAggregate(ctx, tr, store.PostCountById, fdblayer.Key{"post-1"}); err != nil || got != 0 {
+		t.Fatalf("expected PostCountById=0 after Delete, got %d, err=%v", got, err)
+	}
+	if got, err := postRepo.ReadAggregate(ctx, tr, store.PostAddLikesById, fdblayer.Key{"post-1"}); err != nil || got != 0 {
+		t.Fatalf("expected PostAddLikesById=0 after Delete, got %d, err=%v", got, err)
+	}
+	if _, err := postRepo.ReadAggregate(ctx, tr, store.PostMinLatencyById, fdblayer.Key{"post-1"}); !errors.Is(err, fdblayer.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for PostMinLatencyById after Delete, got %v", err)
+	}
+	if _, err := postRepo.ReadAggregate(ctx, tr, store.PostMaxLatencyById, fdblayer.Key{"post-1"}); !errors.Is(err, fdblayer.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for PostMaxLatencyById after Delete, got %v", err)
+	}
+	if got, err := postRepo.ReadAggregate(ctx, tr, store.PostCountGlobalViews, fdblayer.Key{}); err != nil || got != 5 {
+		t.Fatalf("expected global PostCountGlobalViews=5 to remain intact after Delete, got %d, err=%v", got, err)
+	}
+
+	// 5. Validation errors:
+	//    - Calling Mutate on a standard or automatic aggregate index returns ErrUnknownIndex
+	if err := postRepo.Mutate(ctx, tr, store.PostByTags, fdblayer.Key{"go"}, 1); !errors.Is(err, fdblayer.ErrUnknownIndex) {
+		t.Fatalf("expected ErrUnknownIndex when calling Mutate with standard index, got %v", err)
+	}
+	if err := postRepo.Mutate(ctx, tr, store.PostCountByTags, fdblayer.Key{"go"}, 1); !errors.Is(err, fdblayer.ErrUnknownIndex) {
+		t.Fatalf("expected ErrUnknownIndex when calling Mutate with automatic aggregate index, got %v", err)
+	}
+	//    - Calling ScanIndex with a mutation index returns ErrUnknownIndex
+	if _, err := postRepo.ScanIndex(ctx, tr, store.PostCountById, fdblayer.Prefix("post-1")); !errors.Is(err, fdblayer.ErrUnknownIndex) {
+		t.Fatalf("expected ErrUnknownIndex when calling ScanIndex with mutation index, got %v", err)
+	}
+	//    - Calling Mutate with wrong key length or wrong element type returns ErrInvalidKey
+	if err := postRepo.Mutate(ctx, tr, store.PostCountById, fdblayer.Key{}, 1); !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey for empty key on PostCountById, got %v", err)
+	}
+	if err := postRepo.Mutate(ctx, tr, store.PostCountById, fdblayer.Key{123}, 1); !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey for non-string key on PostCountById, got %v", err)
+	}
+}

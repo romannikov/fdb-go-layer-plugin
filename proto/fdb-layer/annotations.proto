@@ -49,12 +49,20 @@ enum IndexAggregateType {
   AGGREGATE_NONE = 0;   // Standard / Fan-Out secondary index
   AGGREGATE_COUNT = 1;  // Maintains atomic int64 count grouped by `fields`
   AGGREGATE_SUM = 2;    // Maintains atomic int64 sum of `aggregate_field` grouped by `fields`
-  AGGREGATE_MIN = 3;    // Maintains atomic min of `aggregate_field` grouped by `fields`
-  AGGREGATE_MAX = 4;    // Maintains atomic max of `aggregate_field` grouped by `fields`
+  AGGREGATE_MIN = 3;    // Maintains atomic all-time min watermark of `aggregate_field` grouped by `fields`
+  AGGREGATE_MAX = 4;    // Maintains atomic all-time max watermark of `aggregate_field` grouped by `fields`
+}
+
+enum MutationType {
+  MUTATION_NONE = 0;
+  MUTATION_ADD = 1;    // Atomic signed int64 addition (updated via Mutate)
+  MUTATION_MAX = 2;    // Atomic signed int64 maximum watermark (updated via Mutate)
+  MUTATION_MIN = 3;    // Atomic signed int64 minimum watermark (updated via Mutate)
+  MUTATION_COUNT = 4;  // Atomic signed int64 counter (updated via Mutate)
 }
 
 message SecondaryIndex {
-  // Indexed field names in tuple sort order (or grouping field names for aggregate indexes; may be empty for ungrouped aggregates).
+  // Indexed field names in tuple sort order (or grouping field names for aggregate/mutation indexes; may be empty for ungrouped aggregates/mutations).
   repeated string fields = 1;
 
   // Mandatory explicit index ID (> 0). Compilation fails if id is 0 or duplicated within a message.
@@ -69,23 +77,21 @@ message SecondaryIndex {
   // [NOT IMPLEMENTED YET] Omit index entry when any indexed field has its zero/empty value.
   bool sparse = 5;
 
-  // Atomic aggregate index type (COUNT, SUM, MIN, MAX grouped by `fields`).
+  // Atomic aggregate index type (COUNT, SUM, MIN, MAX grouped by `fields`, maintained automatically on Insert/Upsert/Delete).
   IndexAggregateType aggregate = 6;
 
   // Target integer field name for AGGREGATE_SUM, AGGREGATE_MIN, or AGGREGATE_MAX.
   string aggregate_field = 7;
-}
 
-// [NOT IMPLEMENTED YET]
-enum MutationType {
-  MUTATION_NONE = 0;
-  MUTATION_ADD = 1;  // [NOT IMPLEMENTED YET]
-  MUTATION_MAX = 2;  // [NOT IMPLEMENTED YET]
-  MUTATION_MIN = 3;  // [NOT IMPLEMENTED YET]
+  // Manual atomic mutation index type (ADD, MAX, MIN, COUNT keyed by `fields`, updated explicitly via Mutate).
+  MutationType mutation = 8;
+
+  // Optional name for disambiguating generated IndexID constants on mutation indexes (e.g. "views" -> <Msg>CountViewsBy<Fields>).
+  string name = 9;
 }
 
 extend google.protobuf.FieldOptions {
-  // [NOT IMPLEMENTED YET] Atomic field mutation type.
+  // [NOT IMPLEMENTED YET] Field-level atomic mutation type (use SecondaryIndex.mutation instead).
   MutationType mutation = 50003;
 
   // Marks a bytes primary key field as populated by FDB versionstamp.

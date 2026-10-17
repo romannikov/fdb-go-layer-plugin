@@ -450,3 +450,76 @@ func TestGenerateMessage_AggregateIndexes(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateMessage_MutationIndexes(t *testing.T) {
+	id := ir.FieldSpec{ProtoName: "id", GoName: "Id", Kind: ir.KindString}
+	tenantID := ir.FieldSpec{ProtoName: "tenant_id", GoName: "TenantId", Kind: ir.KindString}
+
+	spec := ir.MessageSpec{
+		Name:             "Post",
+		TypeID:           200,
+		GoPackageName:    "testspb",
+		Fields:           []ir.FieldSpec{id, tenantID},
+		PrimaryKeyFields: []ir.FieldSpec{id},
+		SecondaryIndexes: []ir.SecondaryIndexSpec{
+			{
+				Fields:   []ir.FieldSpec{id},
+				IndexID:  2001,
+				Mutation: ir.MutationCount,
+			},
+			{
+				Fields:   []ir.FieldSpec{id},
+				IndexID:  2002,
+				Mutation: ir.MutationAdd,
+				Name:     "likes",
+			},
+			{
+				Fields:   []ir.FieldSpec{id},
+				IndexID:  2003,
+				Mutation: ir.MutationMin,
+				Name:     "latency",
+			},
+			{
+				Fields:   []ir.FieldSpec{id},
+				IndexID:  2004,
+				Mutation: ir.MutationMax,
+				Name:     "latency",
+			},
+			{
+				Fields:   []ir.FieldSpec{tenantID},
+				IndexID:  2005,
+				Mutation: ir.MutationCount,
+				Name:     "tenant_views",
+			},
+		},
+	}
+
+	var p bufferPrinter
+	GenerateMessage(&p, spec)
+	out := p.sb.String()
+
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "post.fdb.go", out, parser.AllErrors); err != nil {
+		t.Fatalf("generated Go code with mutation indexes failed to parse: %v\n%s", err, out)
+	}
+
+	for _, expectedSnippet := range []string{
+		"PostCountById fdblayer.IndexID = 2001",
+		"PostAddLikesById fdblayer.IndexID = 2002",
+		"PostMinLatencyById fdblayer.IndexID = 2003",
+		"PostMaxLatencyById fdblayer.IndexID = 2004",
+		"PostCountTenantViewsByTenantId fdblayer.IndexID = 2005",
+		"func (r *postRepository) Mutate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, key fdblayer.Key, val int64) error",
+		"tr.Add(aggKey, fdblayer.EncodeDeltaLE(val))",
+		"tr.Min(aggKey, fdblayer.EncodeSignedOrderLE(val))",
+		"tr.Max(aggKey, fdblayer.EncodeSignedOrderLE(val))",
+		"tr.Clear(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostCountById), pkTuple[0]}))",
+	} {
+		if !strings.Contains(out, expectedSnippet) {
+			t.Errorf("expected generated Go code to contain %q, got:\n%s", expectedSnippet, out)
+		}
+	}
+	if strings.Contains(out, "PostCountTenantViewsByTenantId), pkTuple") {
+		t.Errorf("did not expect non-PK mutation index PostCountTenantViewsByTenantId to be cleared on Delete:\n%s", out)
+	}
+}

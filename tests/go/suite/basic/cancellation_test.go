@@ -64,4 +64,10 @@ func TestContextCancellation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on ReadAggregate with cancelled context")
 	}
+
+	// Test Mutate
+	err = userRepo.Mutate(ctx, tr, store.UserByEmail, fdblayer.Key{"cancel@test.com"}, 1)
+	if err == nil {
+		t.Fatal("expected error on Mutate with cancelled context")
+	}
 }
