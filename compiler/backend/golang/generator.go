@@ -385,8 +385,6 @@ func generateInsert(g Printer, msg ir.MessageSpec) {
 	}
 	g.P()
 
-	pkArgs := pkTupleArgsFromEntity(msg, "entity")
-	vsPKArgs := versionstampedPKTupleArgsWithVar(msg, "writeCfg.UserVersion")
 	for _, idx := range msg.SecondaryIndexes {
 		if idx.IsMutation() {
 			continue
@@ -417,17 +415,18 @@ func generateInsert(g Printer, msg ir.MessageSpec) {
 				}
 			}
 		} else {
+			allFields := indexKeyFields(msg, idx)
 			g.P("	// Standard index")
 			if hasVS {
 				g.P("	{")
-				g.P("		idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{", typeIDConst, ", fdblayer.IndexNamespace, int64(", idxConst, "), ", indexFieldTupleArgs(idx.Fields, "entity"), ", ", vsPKArgs, "})")
+				g.P("		idxKey, err := dir.PackWithVersionstamp(tuple.Tuple{", typeIDConst, ", fdblayer.IndexNamespace, int64(", idxConst, "), ", versionstampedFieldsTupleArgsWithVar(allFields, "entity", "writeCfg.UserVersion"), "})")
 				g.P("		if err != nil {")
 				g.P("			return err")
 				g.P("		}")
 				g.P("		tr.SetVersionstampedKey(idxKey, []byte{})")
 				g.P("	}")
 			} else {
-				g.P("	tr.Set(dir.Pack(tuple.Tuple{", typeIDConst, ", fdblayer.IndexNamespace, int64(", idxConst, "), ", indexFieldTupleArgs(idx.Fields, "entity"), ", ", pkArgs, "}), []byte{})")
+				g.P("	tr.Set(dir.Pack(tuple.Tuple{", typeIDConst, ", fdblayer.IndexNamespace, int64(", idxConst, "), ", indexFieldTupleArgs(allFields, "entity"), "}), []byte{})")
 			}
 		}
 		g.P()
@@ -449,7 +448,6 @@ func generateUpsert(g Printer, msg ir.MessageSpec) {
 		}
 	}
 	pkArgsEntity := pkTupleArgsFromEntity(msg, "entity")
-	pkArgsOld := pkTupleArgsFromEntity(msg, "old")
 	typeIDConst := typeIDConstName(msg)
 	vsFieldName := versionstampFieldName(msg)
 
@@ -566,17 +564,26 @@ func generateUpsert(g Printer, msg ir.MessageSpec) {
 				}
 			}
 		} else {
+			allFields := indexKeyFields(msg, idx)
 			var diffParts []string
 			for _, f := range idx.Fields {
-				diffParts = append(diffParts, FieldNotEqual("old."+f.GoName, "entity."+f.GoName, f))
+				if pkPosition(msg, f) < 0 {
+					diffParts = append(diffParts, FieldNotEqual("old."+f.GoName, "entity."+f.GoName, f))
+				}
 			}
 			g.P("	// Standard index")
-			g.P("	if old == nil || ", strings.Join(diffParts, " || "), " {")
-			g.P("		if old != nil {")
-			g.P("			tr.Clear(dir.Pack(tuple.Tuple{", typeIDConst, ", fdblayer.IndexNamespace, int64(", idxConst, "), ", indexFieldTupleArgs(idx.Fields, "old"), ", ", pkArgsOld, "}))")
-			g.P("		}")
-			g.P("		tr.Set(dir.Pack(tuple.Tuple{", typeIDConst, ", fdblayer.IndexNamespace, int64(", idxConst, "), ", indexFieldTupleArgs(idx.Fields, "entity"), ", ", pkArgsEntity, "}), []byte{})")
-			g.P("	}")
+			if len(diffParts) == 0 {
+				g.P("	if old == nil {")
+				g.P("		tr.Set(dir.Pack(tuple.Tuple{", typeIDConst, ", fdblayer.IndexNamespace, int64(", idxConst, "), ", indexFieldTupleArgs(allFields, "entity"), "}), []byte{})")
+				g.P("	}")
+			} else {
+				g.P("	if old == nil || ", strings.Join(diffParts, " || "), " {")
+				g.P("		if old != nil {")
+				g.P("			tr.Clear(dir.Pack(tuple.Tuple{", typeIDConst, ", fdblayer.IndexNamespace, int64(", idxConst, "), ", indexFieldTupleArgs(allFields, "old"), "}))")
+				g.P("		}")
+				g.P("		tr.Set(dir.Pack(tuple.Tuple{", typeIDConst, ", fdblayer.IndexNamespace, int64(", idxConst, "), ", indexFieldTupleArgs(allFields, "entity"), "}), []byte{})")
+				g.P("	}")
+			}
 		}
 		g.P()
 	}
@@ -584,14 +591,6 @@ func generateUpsert(g Printer, msg ir.MessageSpec) {
 	g.P("	return nil")
 	g.P("}")
 	g.P()
-}
-
-func pkTupleVarsList(pkLen int, tupleVar string) string {
-	parts := make([]string, 0, pkLen)
-	for i := 0; i < pkLen; i++ {
-		parts = append(parts, fmt.Sprintf("%s[%d]", tupleVar, i))
-	}
-	return strings.Join(parts, ", ")
 }
 
 func fieldKindExpr(f ir.FieldSpec) string {
@@ -637,7 +636,7 @@ func isPrimaryKeyMutationIndex(msg ir.MessageSpec, idx ir.SecondaryIndexSpec) bo
 		return false
 	}
 	for _, f := range idx.Fields {
-		if pkPosition(msg, f.ProtoName) < 0 {
+		if pkPosition(msg, f) < 0 {
 			return false
 		}
 	}
@@ -648,7 +647,6 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 	lowerName := strings.ToLower(msg.Name)
 	typeIDConst := typeIDConstName(msg)
 	hasDeleteIdx := false
-	hasNonFanOutStandardIdx := false
 	needsPKTuple := false
 	for _, idx := range msg.SecondaryIndexes {
 		if idx.IsMutation() {
@@ -663,18 +661,14 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 		hasDeleteIdx = true
 		if !idx.IsAggregate() {
 			needsPKTuple = true
-			if !idx.IsFanOut {
-				hasNonFanOutStandardIdx = true
-			}
 		} else {
 			for _, f := range idx.Fields {
-				if pkPosition(msg, f.ProtoName) >= 0 {
+				if pkPosition(msg, f) >= 0 {
 					needsPKTuple = true
 				}
 			}
 		}
 	}
-	pkLen := len(msg.PrimaryKeyFields)
 	pkSchema := schemaSliceExpr(msg.PrimaryKeyFields)
 	pkTupleVar := "_"
 	if needsPKTuple {
@@ -693,10 +687,6 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 	g.P("		return err")
 	g.P("	}")
 	if hasDeleteIdx {
-		pkSuffix := ""
-		if hasNonFanOutStandardIdx {
-			pkSuffix = pkTupleVarsList(pkLen, "pkTuple")
-		}
 		g.P("	value := tr.Get(dataKey).MustGet()")
 		g.P("	if value != nil {")
 		g.P("		entity := &", msg.Name, "{}")
@@ -729,8 +719,9 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 					}
 				}
 			} else {
+				allFields := indexKeyFields(msg, idx)
 				g.P("		// Standard index")
-				g.P("		tr.Clear(dir.Pack(tuple.Tuple{", typeIDConst, ", fdblayer.IndexNamespace, int64(", idxConst, "), ", indexFieldTupleArgsWithPKFallback(msg, idx.Fields, "entity", "pkTuple"), ", ", pkSuffix, "}))")
+				g.P("		tr.Clear(dir.Pack(tuple.Tuple{", typeIDConst, ", fdblayer.IndexNamespace, int64(", idxConst, "), ", indexFieldTupleArgsWithPKFallback(msg, allFields, "entity", "pkTuple"), "}))")
 			}
 		}
 		g.P("	}")
@@ -985,7 +976,6 @@ func generateScanIndex(g Printer, msg ir.MessageSpec) {
 	lowerName := strings.ToLower(msg.Name)
 	hasVS := ir.MsgHasVersionstampPK(msg)
 	typeIDConst := typeIDConstName(msg)
-	pkLen := len(msg.PrimaryKeyFields)
 
 	var scanIndexes []ir.SecondaryIndexSpec
 	for _, idx := range msg.SecondaryIndexes {
@@ -1007,13 +997,14 @@ func generateScanIndex(g Printer, msg ir.MessageSpec) {
 	}
 
 	g.P("	var idxSchema []fdblayer.FieldKind")
+	g.P("	var pkOffsets []int")
 	g.P("	switch index {")
 	for _, idx := range scanIndexes {
-		combined := make([]ir.FieldSpec, 0, len(idx.Fields)+len(msg.PrimaryKeyFields))
-		combined = append(combined, idx.Fields...)
-		combined = append(combined, msg.PrimaryKeyFields...)
+		combined := indexKeyFields(msg, idx)
+		offsets := ir.IndexPKTupleOffsets(msg.PrimaryKeyFields, idx.Fields)
 		g.P("	case ", IndexConstName(msg, idx), ":")
 		g.P("		idxSchema = ", schemaSliceExpr(combined))
+		g.P("		pkOffsets = ", intSliceExpr(offsets))
 	}
 	g.P("	default:")
 	g.P(`		return nil, fmt.Errorf("`, lowerName, ` index %d: %w", index, fdblayer.ErrUnknownIndex)`)
@@ -1038,7 +1029,7 @@ func generateScanIndex(g Printer, msg ir.MessageSpec) {
 	g.P("		rangeOpts.Limit = scanCfg.Limit + 1")
 	g.P("	}")
 	g.P("	kvs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: rangeBegin, End: rangeEnd}, rangeOpts).GetSliceOrPanic()")
-	g.P("	pkIndexStart := 3 + len(idxSchema) - ", pkLen)
+	g.P("	expectedTupleLen := 3 + len(idxSchema)")
 	g.P("	if scanCfg.Limit > 0 && len(kvs) > scanCfg.Limit {")
 	g.P("		nextTpl, err := dir.Unpack(kvs[scanCfg.Limit].Key)")
 	g.P("		if err != nil {")
@@ -1062,17 +1053,18 @@ func generateScanIndex(g Printer, msg ir.MessageSpec) {
 	g.P("		if err != nil {")
 	g.P("			return nil, err")
 	g.P("		}")
-	g.P("		if len(tpl) <= pkIndexStart {")
+	g.P("		if len(tpl) < expectedTupleLen {")
 	g.P("			continue")
 	g.P("		}")
-	g.P("		pkTuple := tpl[pkIndexStart:]")
-	if hasVS {
-		g.P("		pkTuples[i] = pkTuple")
-	}
-	g.P("		keyTpl := make(tuple.Tuple, 2+len(pkTuple))")
+	g.P("		keyTpl := make(tuple.Tuple, 2+len(pkOffsets))")
 	g.P("		keyTpl[0] = ", typeIDConst)
 	g.P("		keyTpl[1] = fdblayer.DataNamespace")
-	g.P("		copy(keyTpl[2:], pkTuple)")
+	g.P("		for j, off := range pkOffsets {")
+	g.P("			keyTpl[2+j] = tpl[off]")
+	g.P("		}")
+	if hasVS {
+		g.P("		pkTuples[i] = keyTpl[2:]")
+	}
 	g.P("		futures[i] = tr.Get(dir.Pack(keyTpl))")
 	g.P("	}")
 	iterVar := "_"
@@ -1257,6 +1249,9 @@ func HasBytesImports(msg ir.MessageSpec) bool {
 			continue
 		}
 		for _, f := range idx.Fields {
+			if !idx.IsAggregate() && !idx.IsFanOut && pkPosition(msg, f) >= 0 {
+				continue
+			}
 			if f.Kind == ir.KindBytes && !f.IsRepeated {
 				return true
 			}
@@ -1333,6 +1328,22 @@ func MapKeyExpr(expr string, f ir.FieldSpec) string {
 	return expr
 }
 
+func indexKeyFields(msg ir.MessageSpec, idx ir.SecondaryIndexSpec) []ir.FieldSpec {
+	trailing := ir.IndexTrailingPKFields(msg.PrimaryKeyFields, idx.Fields)
+	combined := make([]ir.FieldSpec, 0, len(idx.Fields)+len(trailing))
+	combined = append(combined, idx.Fields...)
+	combined = append(combined, trailing...)
+	return combined
+}
+
+func intSliceExpr(vals []int) string {
+	parts := make([]string, 0, len(vals))
+	for _, v := range vals {
+		parts = append(parts, fmt.Sprintf("%d", v))
+	}
+	return "[]int{" + strings.Join(parts, ", ") + "}"
+}
+
 func pkTupleArgsFromEntity(msg ir.MessageSpec, varName string) string {
 	parts := make([]string, 0, len(msg.PrimaryKeyFields))
 	for _, f := range msg.PrimaryKeyFields {
@@ -1342,12 +1353,16 @@ func pkTupleArgsFromEntity(msg ir.MessageSpec, varName string) string {
 }
 
 func versionstampedPKTupleArgsWithVar(msg ir.MessageSpec, userVersionExpr string) string {
-	parts := make([]string, 0, len(msg.PrimaryKeyFields))
-	for _, f := range msg.PrimaryKeyFields {
+	return versionstampedFieldsTupleArgsWithVar(msg.PrimaryKeyFields, "entity", userVersionExpr)
+}
+
+func versionstampedFieldsTupleArgsWithVar(fields []ir.FieldSpec, varName string, userVersionExpr string) string {
+	parts := make([]string, 0, len(fields))
+	for _, f := range fields {
 		if f.IsVersionstamp {
 			parts = append(parts, "tuple.IncompleteVersionstamp("+userVersionExpr+")")
 		} else {
-			parts = append(parts, PackField("entity."+f.GoName, f))
+			parts = append(parts, PackField(varName+"."+f.GoName, f))
 		}
 	}
 	return strings.Join(parts, ", ")
@@ -1361,9 +1376,20 @@ func indexFieldTupleArgs(fields []ir.FieldSpec, varName string) string {
 	return strings.Join(parts, ", ")
 }
 
-func pkPosition(msg ir.MessageSpec, protoName string) int {
+func fieldIdentity(f ir.FieldSpec) string {
+	if f.ProtoName != "" {
+		return f.ProtoName
+	}
+	return f.GoName
+}
+
+func pkPosition(msg ir.MessageSpec, f ir.FieldSpec) int {
+	id := fieldIdentity(f)
+	if id == "" {
+		return -1
+	}
 	for i, pkf := range msg.PrimaryKeyFields {
-		if pkf.ProtoName == protoName {
+		if fieldIdentity(pkf) == id {
 			return i
 		}
 	}
@@ -1373,7 +1399,7 @@ func pkPosition(msg ir.MessageSpec, protoName string) int {
 func indexFieldTupleArgsWithPKFallback(msg ir.MessageSpec, fields []ir.FieldSpec, varName string, pkTupleVar string) string {
 	parts := make([]string, 0, len(fields))
 	for _, f := range fields {
-		if pkPos := pkPosition(msg, f.ProtoName); pkPos >= 0 && pkTupleVar != "" && pkTupleVar != "_" {
+		if pkPos := pkPosition(msg, f); pkPos >= 0 && pkTupleVar != "" && pkTupleVar != "_" {
 			parts = append(parts, fmt.Sprintf("%s[%d]", pkTupleVar, pkPos))
 		} else {
 			parts = append(parts, PackField(fmt.Sprintf("%s.%s", varName, f.GoName), f))
@@ -1392,15 +1418,15 @@ func emitFanOutIndexWrite(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSp
 	for j, sf := range idx.Fields {
 		if j == repeatedIdx {
 			g.P(indent, "\t", PackField("item", sf), ",")
-		} else if pkPos := pkPosition(msg, sf.ProtoName); pkPos >= 0 && pkTupleVar != "" {
+		} else if pkPos := pkPosition(msg, sf); pkPos >= 0 && pkTupleVar != "" {
 			g.P(indent, "\t", fmt.Sprintf("%s[%d],", pkTupleVar, pkPos))
 		} else {
 			g.P(indent, "\t", PackField(varName+"."+sf.GoName, sf), ",")
 		}
 	}
-	for pkIdx, pkf := range msg.PrimaryKeyFields {
-		if pkTupleVar != "" {
-			g.P(indent, "\t", fmt.Sprintf("%s[%d],", pkTupleVar, pkIdx))
+	for _, pkf := range ir.IndexTrailingPKFields(msg.PrimaryKeyFields, idx.Fields) {
+		if pkPos := pkPosition(msg, pkf); pkPos >= 0 && pkTupleVar != "" {
+			g.P(indent, "\t", fmt.Sprintf("%s[%d],", pkTupleVar, pkPos))
 		} else {
 			g.P(indent, "\t", PackField(varName+"."+pkf.GoName, pkf), ",")
 		}
@@ -1422,7 +1448,7 @@ func emitVersionstampedFanOutIndexWrite(g Printer, msg ir.MessageSpec, idx ir.Se
 			g.P(indent, "\t", PackField(varName+"."+sf.GoName, sf), ",")
 		}
 	}
-	for _, pkf := range msg.PrimaryKeyFields {
+	for _, pkf := range ir.IndexTrailingPKFields(msg.PrimaryKeyFields, idx.Fields) {
 		if pkf.IsVersionstamp {
 			g.P(indent, "\t", "tuple.IncompleteVersionstamp(", userVersionVar, "),")
 		} else {
@@ -1453,7 +1479,7 @@ func fanOutAggregateKeyPackExpr(msg ir.MessageSpec, idx ir.SecondaryIndexSpec, r
 	for j, sf := range idx.Fields {
 		if j == repeatedIdx {
 			parts = append(parts, PackField("item", sf))
-		} else if pkPos := pkPosition(msg, sf.ProtoName); pkPos >= 0 && pkTupleVar != "" && pkTupleVar != "_" {
+		} else if pkPos := pkPosition(msg, sf); pkPos >= 0 && pkTupleVar != "" && pkTupleVar != "_" {
 			parts = append(parts, fmt.Sprintf("%s[%d]", pkTupleVar, pkPos))
 		} else {
 			parts = append(parts, PackField(varName+"."+sf.GoName, sf))

@@ -808,7 +808,9 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_InsertUpsertDelete(t *testing.T)
 	//    - 1 key for (receipt_hash) [id=1002]
 	//    - 2 keys for fan-out (attachment_hashes) [id=1003]
 	//    - 2 keys for composite fan-out (status, attachment_hashes) [id=1004]
-	//    Total = 6 index keys.
+	//    - 1 key for (tenant_id, status, created_at) [id=1015]
+	//    - 1 key for (order_seq, tenant_id) [id=1016]
+	//    Total = 8 index keys.
 	if err := orderRepo.Insert(ctx, tr, &store.Order{
 		TenantId:         "t1",
 		OrderSeq:         7,
@@ -819,8 +821,8 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_InsertUpsertDelete(t *testing.T)
 	}); err != nil {
 		t.Fatalf("Insert failed: %v", err)
 	}
-	if got := countOrderIndexKeys(); got != 6 {
-		t.Fatalf("expected 6 index keys after Insert, got %d", got)
+	if got := countOrderIndexKeys(); got != 8 {
+		t.Fatalf("expected 8 index keys after Insert, got %d", got)
 	}
 	if res, err := orderRepo.ScanIndex(ctx, tr, store.OrderByStatusAttachmentHashes, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING, hashA)); err != nil || len(res.Items) != 1 {
 		t.Fatalf("expected 1 order for (PENDING, hashA), got %+v, err=%v", res, err)
@@ -841,8 +843,8 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_InsertUpsertDelete(t *testing.T)
 	}); err != nil {
 		t.Fatalf("Upsert (same status) failed: %v", err)
 	}
-	if got := countOrderIndexKeys(); got != 6 {
-		t.Fatalf("expected 6 index keys after Upsert (same status), got %d", got)
+	if got := countOrderIndexKeys(); got != 8 {
+		t.Fatalf("expected 8 index keys after Upsert (same status), got %d", got)
 	}
 	if res, _ := orderRepo.ScanIndex(ctx, tr, store.OrderByStatusAttachmentHashes, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING, hashA)); len(res.Items) != 0 {
 		t.Fatalf("expected (PENDING, hashA) cleared after Upsert, got %+v", res)
@@ -864,8 +866,8 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_InsertUpsertDelete(t *testing.T)
 	}); err != nil {
 		t.Fatalf("Upsert (changed status) failed: %v", err)
 	}
-	if got := countOrderIndexKeys(); got != 6 {
-		t.Fatalf("expected 6 index keys after Upsert (changed status), got %d", got)
+	if got := countOrderIndexKeys(); got != 8 {
+		t.Fatalf("expected 8 index keys after Upsert (changed status), got %d", got)
 	}
 	if res, _ := orderRepo.ScanIndex(ctx, tr, store.OrderByStatusAttachmentHashes, fdblayer.Prefix(store.OrderStatus_ORDER_STATUS_PENDING, hashC)); len(res.Items) != 0 {
 		t.Fatalf("stale composite fan-out key (PENDING, hashC) was not cleared when status changed: %+v", res)
@@ -877,7 +879,7 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_InsertUpsertDelete(t *testing.T)
 		t.Fatalf("missing composite fan-out key (SHIPPED, hashD) after status change: %+v", res)
 	}
 
-	// 4. Upsert with empty AttachmentHashes (nil): all fan-out keys must be cleared, leaving only the 2 standard index keys.
+	// 4. Upsert with empty AttachmentHashes (nil): all fan-out keys must be cleared, leaving only the 4 standard index keys.
 	if err := orderRepo.Upsert(ctx, tr, &store.Order{
 		TenantId:         "t1",
 		OrderSeq:         7,
@@ -888,8 +890,8 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_InsertUpsertDelete(t *testing.T)
 	}); err != nil {
 		t.Fatalf("Upsert (empty fan-out) failed: %v", err)
 	}
-	if got := countOrderIndexKeys(); got != 2 {
-		t.Fatalf("expected 2 standard index keys after clearing fan-out slice, got %d", got)
+	if got := countOrderIndexKeys(); got != 4 {
+		t.Fatalf("expected 4 standard index keys after clearing fan-out slice, got %d", got)
 	}
 
 	// 5. Delete must clear all remaining index keys, leaving 0 keys in IndexNamespace.
@@ -914,8 +916,8 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_InsertUpsertDelete(t *testing.T)
 	}); err != nil {
 		t.Fatalf("Upsert failed: %v", err)
 	}
-	if got := countOrderIndexKeys(); got != 6 {
-		t.Fatalf("expected 6 index keys after Upsert, got %d", got)
+	if got := countOrderIndexKeys(); got != 8 {
+		t.Fatalf("expected 8 index keys after Upsert, got %d", got)
 	}
 
 	// Simulate a stored protobuf value whose PK fields were omitted from the serialized body.
@@ -1112,5 +1114,68 @@ func TestFanOutAggregateAndCompositeAggregate_PostAndOrder(t *testing.T) {
 	}
 	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderAddRetriesByTenantIdStatus, fdblayer.Key{"acme", store.OrderStatus_ORDER_STATUS_PENDING}); err != nil || got != 4 {
 		t.Fatalf("expected non-PK OrderAddRetriesByTenantIdStatus(acme, PENDING)=4 after Delete, got %d, err=%v", got, err)
+	}
+}
+
+func TestComplexIndex_DeduplicatedPKInCompositeSecondaryIndex(t *testing.T) {
+	ctx := context.Background()
+	tr, dir, _ := tests.Setup()
+	orderRepo := store.NewOrderRepository(dir)
+
+	for _, o := range []*store.Order{
+		{TenantId: "acme", OrderSeq: 10, Status: store.OrderStatus_ORDER_STATUS_PENDING, CreatedAt: 1000},
+		{TenantId: "acme", OrderSeq: 20, Status: store.OrderStatus_ORDER_STATUS_PENDING, CreatedAt: 2000},
+		{TenantId: "beta", OrderSeq: 10, Status: store.OrderStatus_ORDER_STATUS_PENDING, CreatedAt: 1500},
+	} {
+		if err := orderRepo.Insert(ctx, tr, o); err != nil {
+			t.Fatalf("Insert(%v) failed: %v", o, err)
+		}
+	}
+
+	// 1. Partial PK overlap index: OrderByTenantIdStatusCreatedAt (["tenant_id", "status", "created_at"] + trailing ["order_seq"])
+	p1, err := orderRepo.ScanIndex(ctx, tr, store.OrderByTenantIdStatusCreatedAt, fdblayer.Prefix("acme", store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.WithLimit(1))
+	if err != nil || len(p1.Items) != 1 || p1.Items[0].OrderSeq != 10 || !p1.HasMore {
+		t.Fatalf("ScanIndex(OrderByTenantIdStatusCreatedAt) page1 unexpected: %+v, err=%v", p1, err)
+	}
+	// Cursor should have 4 elements (tenant_id, status, created_at, order_seq), NOT 5!
+	if len(p1.NextCursor) != 4 {
+		t.Fatalf("expected deduplicated 4-element cursor for OrderByTenantIdStatusCreatedAt, got %d elements: %v", len(p1.NextCursor), p1.NextCursor)
+	}
+	p2, err := orderRepo.ScanIndex(ctx, tr, store.OrderByTenantIdStatusCreatedAt, fdblayer.Prefix("acme", store.OrderStatus_ORDER_STATUS_PENDING), fdblayer.WithCursor(p1.NextCursor))
+	if err != nil || len(p2.Items) != 1 || p2.Items[0].OrderSeq != 20 || p2.HasMore {
+		t.Fatalf("ScanIndex(OrderByTenantIdStatusCreatedAt) page2 unexpected: %+v, err=%v", p2, err)
+	}
+
+	// 2. Full reordered PK overlap index: OrderByOrderSeqTenantId (["order_seq", "tenant_id"] + 0 trailing PK fields)
+	seq10, err := orderRepo.ScanIndex(ctx, tr, store.OrderByOrderSeqTenantId, fdblayer.Prefix(int32(10)), fdblayer.WithLimit(1))
+	if err != nil || len(seq10.Items) != 1 || seq10.Items[0].TenantId != "acme" || !seq10.HasMore {
+		t.Fatalf("ScanIndex(OrderByOrderSeqTenantId, 10) page1 unexpected: %+v, err=%v", seq10, err)
+	}
+	// Cursor should have 2 elements (order_seq, tenant_id), NOT 4!
+	if len(seq10.NextCursor) != 2 {
+		t.Fatalf("expected deduplicated 2-element cursor for OrderByOrderSeqTenantId, got %d elements: %v", len(seq10.NextCursor), seq10.NextCursor)
+	}
+	seq10Page2, err := orderRepo.ScanIndex(ctx, tr, store.OrderByOrderSeqTenantId, fdblayer.Prefix(int32(10)), fdblayer.WithCursor(seq10.NextCursor))
+	if err != nil || len(seq10Page2.Items) != 1 || seq10Page2.Items[0].TenantId != "beta" || seq10Page2.HasMore {
+		t.Fatalf("ScanIndex(OrderByOrderSeqTenantId, 10) page2 unexpected: %+v, err=%v", seq10Page2, err)
+	}
+
+	// 3. Upsert & Delete clean up deduplicated index keys properly
+	if err := orderRepo.Upsert(ctx, tr, &store.Order{
+		TenantId:  "acme",
+		OrderSeq:  10,
+		Status:    store.OrderStatus_ORDER_STATUS_SHIPPED,
+		CreatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Upsert(acme, 10) failed: %v", err)
+	}
+	if shipped, err := orderRepo.ScanIndex(ctx, tr, store.OrderByTenantIdStatusCreatedAt, fdblayer.Prefix("acme", store.OrderStatus_ORDER_STATUS_SHIPPED)); err != nil || len(shipped.Items) != 1 || shipped.Items[0].OrderSeq != 10 {
+		t.Fatalf("expected 1 shipped order after Upsert, got %+v, err=%v", shipped, err)
+	}
+	if err := orderRepo.Delete(ctx, tr, fdblayer.Key{"acme", int32(10)}); err != nil {
+		t.Fatalf("Delete(acme, 10) failed: %v", err)
+	}
+	if afterDel, err := orderRepo.ScanIndex(ctx, tr, store.OrderByOrderSeqTenantId, fdblayer.Prefix(int32(10))); err != nil || len(afterDel.Items) != 1 || afterDel.Items[0].TenantId != "beta" {
+		t.Fatalf("expected only beta order after deleting (acme, 10), got %+v, err=%v", afterDel, err)
 	}
 }

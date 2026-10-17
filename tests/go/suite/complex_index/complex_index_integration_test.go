@@ -1155,6 +1155,12 @@ func TestIntegration_AggregateSecondaryIndexes_PostAndOrder(t *testing.T) {
 		if cnt, err := postRepo.ReadAggregate(ctx, tr, store.PostCountByTags, fdblayer.Key{"go"}); err != nil || cnt != 2 {
 			t.Fatalf("expected PostCountByTags('go')=2, got %d, err=%v", cnt, err)
 		}
+		if byTenantStatus, err := orderRepo.ScanIndex(ctx, tr, store.OrderByTenantIdStatusCreatedAt, fdblayer.Prefix("t1", store.OrderStatus_ORDER_STATUS_PENDING)); err != nil || len(byTenantStatus.Items) != 2 || byTenantStatus.Items[0].OrderSeq != 1 || byTenantStatus.Items[1].OrderSeq != 2 {
+			t.Fatalf("expected 2 orders from OrderByTenantIdStatusCreatedAt, got %+v, err=%v", byTenantStatus, err)
+		}
+		if bySeq, err := orderRepo.ScanIndex(ctx, tr, store.OrderByOrderSeqTenantId, fdblayer.Prefix(int32(2))); err != nil || len(bySeq.Items) != 1 || bySeq.Items[0].TenantId != "t1" {
+			t.Fatalf("expected order (t1, 2) from OrderByOrderSeqTenantId, got %+v, err=%v", bySeq, err)
+		}
 		if cnt, err := orderRepo.ReadAggregate(ctx, tr, store.OrderCountByTenantIdStatus, fdblayer.Key{"t1", store.OrderStatus_ORDER_STATUS_PENDING}); err != nil || cnt != 2 {
 			t.Fatalf("expected OrderCountByTenantIdStatus(t1, PENDING)=2, got %d, err=%v", cnt, err)
 		}

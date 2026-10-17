@@ -213,6 +213,14 @@ message Order {
         aggregate: AGGREGATE_MAX,
         aggregate_field: "created_at"
     };
+    option (annotations.secondary_index) = {
+        id: 1015,
+        fields: ["tenant_id", "status", "created_at"]
+    };
+    option (annotations.secondary_index) = {
+        id: 1016,
+        fields: ["order_seq", "tenant_id"]
+    };
 
     enum Priority {
         PRIORITY_LOW = 0;

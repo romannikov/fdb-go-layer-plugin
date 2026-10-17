@@ -734,3 +734,41 @@ func TestParsePlugin_StoreProtoDescriptor(t *testing.T) {
 	}
 }
 
+func TestIndexTrailingPKFieldsAndPKTupleOffsets(t *testing.T) {
+	sheetID := FieldSpec{ProtoName: "spreadsheet_id", GoName: "SpreadsheetId", Kind: KindString}
+	tabID := FieldSpec{ProtoName: "sheet_id", GoName: "SheetId", Kind: KindString}
+	row := FieldSpec{ProtoName: "row", GoName: "Row", Kind: KindInt32}
+	col := FieldSpec{ProtoName: "col", GoName: "Col", Kind: KindInt32}
+	status := FieldSpec{ProtoName: "status", GoName: "Status", Kind: KindString}
+
+	pk := []FieldSpec{sheetID, tabID, row, col}
+
+	// 1. Full PK overlap in different order: [spreadsheet_id, sheet_id, col, row]
+	idxFull := []FieldSpec{sheetID, tabID, col, row}
+	if trailing := IndexTrailingPKFields(pk, idxFull); len(trailing) != 0 {
+		t.Fatalf("expected 0 trailing PK fields for full PK overlap, got %+v", trailing)
+	}
+	wantFullOffsets := []int{3, 4, 6, 5}
+	gotFullOffsets := IndexPKTupleOffsets(pk, idxFull)
+	for i := range wantFullOffsets {
+		if gotFullOffsets[i] != wantFullOffsets[i] {
+			t.Fatalf("IndexPKTupleOffsets(full) = %v, want %v", gotFullOffsets, wantFullOffsets)
+		}
+	}
+
+	// 2. Partial PK overlap: [spreadsheet_id, status, col] -> trailing PK fields: [sheet_id, row]
+	idxPartial := []FieldSpec{sheetID, status, col}
+	trailingPartial := IndexTrailingPKFields(pk, idxPartial)
+	if len(trailingPartial) != 2 || trailingPartial[0].ProtoName != "sheet_id" || trailingPartial[1].ProtoName != "row" {
+		t.Fatalf("unexpected trailing PK fields for partial overlap: %+v", trailingPartial)
+	}
+	// Tuple layout: (TypeID, 1, IndexID, spreadsheet_id[3], status[4], col[5], sheet_id[6], row[7])
+	wantPartialOffsets := []int{3, 6, 7, 5}
+	gotPartialOffsets := IndexPKTupleOffsets(pk, idxPartial)
+	for i := range wantPartialOffsets {
+		if gotPartialOffsets[i] != wantPartialOffsets[i] {
+			t.Fatalf("IndexPKTupleOffsets(partial) = %v, want %v", gotPartialOffsets, wantPartialOffsets)
+		}
+	}
+}
+

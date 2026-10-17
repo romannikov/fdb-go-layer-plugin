@@ -34,6 +34,8 @@ const (
 	OrderSumCreatedAt                         fdblayer.IndexID = 1012
 	OrderMinCreatedAt                         fdblayer.IndexID = 1013
 	OrderMaxCreatedAt                         fdblayer.IndexID = 1014
+	OrderByTenantIdStatusCreatedAt            fdblayer.IndexID = 1015
+	OrderByOrderSeqTenantId                   fdblayer.IndexID = 1016
 )
 
 // OrderRepository defines the repository interface for Order.
@@ -149,6 +151,12 @@ func (r *orderRepository) Insert(ctx context.Context, tr fdblayer.Transaction, e
 
 	// Aggregate index
 	tr.Max(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderMaxCreatedAt)}), fdblayer.EncodeSignedOrderLE(int64(entity.CreatedAt)))
+
+	// Standard index
+	tr.Set(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderByTenantIdStatusCreatedAt), entity.TenantId, int64(entity.Status), int64(entity.CreatedAt), int64(entity.OrderSeq)}), []byte{})
+
+	// Standard index
+	tr.Set(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderByOrderSeqTenantId), int64(entity.OrderSeq), entity.TenantId}), []byte{})
 
 	return nil
 }
@@ -418,6 +426,19 @@ func (r *orderRepository) Upsert(ctx context.Context, tr fdblayer.Transaction, e
 		tr.Max(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderMaxCreatedAt)}), fdblayer.EncodeSignedOrderLE(int64(entity.CreatedAt)))
 	}
 
+	// Standard index
+	if old == nil || old.Status != entity.Status || old.CreatedAt != entity.CreatedAt {
+		if old != nil {
+			tr.Clear(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderByTenantIdStatusCreatedAt), old.TenantId, int64(old.Status), int64(old.CreatedAt), int64(old.OrderSeq)}))
+		}
+		tr.Set(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderByTenantIdStatusCreatedAt), entity.TenantId, int64(entity.Status), int64(entity.CreatedAt), int64(entity.OrderSeq)}), []byte{})
+	}
+
+	// Standard index
+	if old == nil {
+		tr.Set(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderByOrderSeqTenantId), int64(entity.OrderSeq), entity.TenantId}), []byte{})
+	}
+
 	return nil
 }
 
@@ -496,6 +517,10 @@ func (r *orderRepository) Delete(ctx context.Context, tr fdblayer.Transaction, k
 		if entity.CreatedAt != 0 {
 			tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAt)}), fdblayer.EncodeDeltaLE(-int64(entity.CreatedAt)))
 		}
+		// Standard index
+		tr.Clear(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderByTenantIdStatusCreatedAt), pkTuple[0], int64(entity.Status), int64(entity.CreatedAt), pkTuple[1]}))
+		// Standard index
+		tr.Clear(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderByOrderSeqTenantId), pkTuple[1], pkTuple[0]}))
 	}
 	// Primary-key-scoped mutation index
 	tr.Clear(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderCountAttemptsByOrderSeqTenantId), pkTuple[1], pkTuple[0]}))
@@ -650,15 +675,26 @@ func (r *orderRepository) ScanIndex(ctx context.Context, tr fdblayer.Transaction
 		return nil, err
 	}
 	var idxSchema []fdblayer.FieldKind
+	var pkOffsets []int
 	switch index {
 	case OrderByStatusCreatedAt:
 		idxSchema = []fdblayer.FieldKind{fdblayer.FieldKindInt64, fdblayer.FieldKindInt64, fdblayer.FieldKindString, fdblayer.FieldKindInt64}
+		pkOffsets = []int{5, 6}
 	case OrderByReceiptHash:
 		idxSchema = []fdblayer.FieldKind{fdblayer.FieldKindBytes, fdblayer.FieldKindString, fdblayer.FieldKindInt64}
+		pkOffsets = []int{4, 5}
 	case OrderByAttachmentHashes:
 		idxSchema = []fdblayer.FieldKind{fdblayer.FieldKindBytes, fdblayer.FieldKindString, fdblayer.FieldKindInt64}
+		pkOffsets = []int{4, 5}
 	case OrderByStatusAttachmentHashes:
 		idxSchema = []fdblayer.FieldKind{fdblayer.FieldKindInt64, fdblayer.FieldKindBytes, fdblayer.FieldKindString, fdblayer.FieldKindInt64}
+		pkOffsets = []int{5, 6}
+	case OrderByTenantIdStatusCreatedAt:
+		idxSchema = []fdblayer.FieldKind{fdblayer.FieldKindString, fdblayer.FieldKindInt64, fdblayer.FieldKindInt64, fdblayer.FieldKindInt64}
+		pkOffsets = []int{3, 6}
+	case OrderByOrderSeqTenantId:
+		idxSchema = []fdblayer.FieldKind{fdblayer.FieldKindInt64, fdblayer.FieldKindString}
+		pkOffsets = []int{4, 3}
 	default:
 		return nil, fmt.Errorf("order index %d: %w", index, fdblayer.ErrUnknownIndex)
 	}
@@ -682,7 +718,7 @@ func (r *orderRepository) ScanIndex(ctx context.Context, tr fdblayer.Transaction
 		rangeOpts.Limit = scanCfg.Limit + 1
 	}
 	kvs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: rangeBegin, End: rangeEnd}, rangeOpts).GetSliceOrPanic()
-	pkIndexStart := 3 + len(idxSchema) - 2
+	expectedTupleLen := 3 + len(idxSchema)
 	if scanCfg.Limit > 0 && len(kvs) > scanCfg.Limit {
 		nextTpl, err := dir.Unpack(kvs[scanCfg.Limit].Key)
 		if err != nil {
@@ -703,14 +739,15 @@ func (r *orderRepository) ScanIndex(ctx context.Context, tr fdblayer.Transaction
 		if err != nil {
 			return nil, err
 		}
-		if len(tpl) <= pkIndexStart {
+		if len(tpl) < expectedTupleLen {
 			continue
 		}
-		pkTuple := tpl[pkIndexStart:]
-		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
+		keyTpl := make(tuple.Tuple, 2+len(pkOffsets))
 		keyTpl[0] = OrderTypeID
 		keyTpl[1] = fdblayer.DataNamespace
-		copy(keyTpl[2:], pkTuple)
+		for j, off := range pkOffsets {
+			keyTpl[2+j] = tpl[off]
+		}
 		futures[i] = tr.Get(dir.Pack(keyTpl))
 	}
 	for _, future := range futures {
