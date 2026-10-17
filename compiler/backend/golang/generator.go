@@ -112,9 +112,24 @@ func effectiveTypeID(msg ir.MessageSpec) int64 {
 func IndexConstName(msg ir.MessageSpec, idx ir.SecondaryIndexSpec) string {
 	var b strings.Builder
 	b.WriteString(msg.Name)
-	b.WriteString("By")
-	for _, f := range idx.Fields {
-		b.WriteString(f.GoName)
+	switch idx.Aggregate {
+	case ir.AggregateCount:
+		b.WriteString("Count")
+	case ir.AggregateSum:
+		b.WriteString("Sum")
+		b.WriteString(idx.AggregateField.GoName)
+	case ir.AggregateMin:
+		b.WriteString("Min")
+		b.WriteString(idx.AggregateField.GoName)
+	case ir.AggregateMax:
+		b.WriteString("Max")
+		b.WriteString(idx.AggregateField.GoName)
+	}
+	if len(idx.Fields) > 0 {
+		b.WriteString("By")
+		for _, f := range idx.Fields {
+			b.WriteString(f.GoName)
+		}
 	}
 	return b.String()
 }
@@ -315,6 +330,7 @@ func generateEntityRepository(g Printer, msg ir.MessageSpec) {
 	generateReadRows(g, msg)
 	generateScan(g, msg)
 	generateScanIndex(g, msg)
+	generateReadAggregate(g, msg)
 }
 
 func generateTypesAndInterface(g Printer, msg ir.MessageSpec) {
@@ -393,7 +409,9 @@ func generateInsert(g Printer, msg ir.MessageSpec) {
 	vsPKArgs := versionstampedPKTupleArgsWithVar(msg, "writeCfg.UserVersion")
 	for _, idx := range msg.SecondaryIndexes {
 		idxConst := IndexConstName(msg, idx)
-		if idx.IsFanOut {
+		if idx.IsAggregate() {
+			emitAggregateInsert(g, msg, idx)
+		} else if idx.IsFanOut {
 			g.P("	// Fan-out index")
 			for i, f := range idx.Fields {
 				if f.IsRepeated {
@@ -497,7 +515,9 @@ func generateUpsert(g Printer, msg ir.MessageSpec) {
 
 	for _, idx := range msg.SecondaryIndexes {
 		idxConst := IndexConstName(msg, idx)
-		if idx.IsFanOut {
+		if idx.IsAggregate() {
+			emitAggregateUpsert(g, msg, idx)
+		} else if idx.IsFanOut {
 			g.P("	// Fan-out index")
 			for i, f := range idx.Fields {
 				if f.IsRepeated {
@@ -623,11 +643,31 @@ func schemaSliceExpr(fields []ir.FieldSpec) string {
 func generateDelete(g Printer, msg ir.MessageSpec) {
 	lowerName := strings.ToLower(msg.Name)
 	typeIDConst := typeIDConstName(msg)
-	hasIdx := len(msg.SecondaryIndexes) > 0
+	hasDeleteIdx := false
+	hasNonFanOutStandardIdx := false
+	needsPKTuple := false
+	for _, idx := range msg.SecondaryIndexes {
+		if idx.Aggregate == ir.AggregateMin || idx.Aggregate == ir.AggregateMax {
+			continue
+		}
+		hasDeleteIdx = true
+		if !idx.IsAggregate() {
+			needsPKTuple = true
+			if !idx.IsFanOut {
+				hasNonFanOutStandardIdx = true
+			}
+		} else {
+			for _, f := range idx.Fields {
+				if pkPosition(msg, f.ProtoName) >= 0 {
+					needsPKTuple = true
+				}
+			}
+		}
+	}
 	pkLen := len(msg.PrimaryKeyFields)
 	pkSchema := schemaSliceExpr(msg.PrimaryKeyFields)
 	pkTupleVar := "_"
-	if hasIdx {
+	if needsPKTuple {
 		pkTupleVar = "pkTuple"
 	}
 
@@ -642,8 +682,11 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 	g.P("	if err != nil {")
 	g.P("		return err")
 	g.P("	}")
-	if hasIdx {
-		pkSuffix := pkTupleVarsList(pkLen, "pkTuple")
+	if hasDeleteIdx {
+		pkSuffix := ""
+		if hasNonFanOutStandardIdx {
+			pkSuffix = pkTupleVarsList(pkLen, "pkTuple")
+		}
 		g.P("	value := tr.Get(dataKey).MustGet()")
 		g.P("	if value != nil {")
 		g.P("		entity := &", msg.Name, "{}")
@@ -652,7 +695,9 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 		g.P("		}")
 		for _, idx := range msg.SecondaryIndexes {
 			idxConst := IndexConstName(msg, idx)
-			if idx.IsFanOut {
+			if idx.IsAggregate() {
+				emitAggregateDelete(g, msg, idx, pkTupleVar)
+			} else if idx.IsFanOut {
 				g.P("		// Fan-out index")
 				for i, f := range idx.Fields {
 					if f.IsRepeated {
@@ -876,12 +921,19 @@ func generateScanIndex(g Printer, msg ir.MessageSpec) {
 	typeIDConst := typeIDConstName(msg)
 	pkLen := len(msg.PrimaryKeyFields)
 
+	var scanIndexes []ir.SecondaryIndexSpec
+	for _, idx := range msg.SecondaryIndexes {
+		if !idx.IsAggregate() {
+			scanIndexes = append(scanIndexes, idx)
+		}
+	}
+
 	g.P("// ScanIndex performs a paginated range or prefix scan over a secondary index of ", msg.Name, ".")
 	g.P("func (r *", lowerName, "Repository) ScanIndex(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, kr fdblayer.KeyRange, opts ...fdblayer.ScanOption) (*fdblayer.Page[*", msg.Name, "], error) {")
 	g.P("	if err := ctx.Err(); err != nil {")
 	g.P("		return nil, err")
 	g.P("	}")
-	if len(msg.SecondaryIndexes) == 0 {
+	if len(scanIndexes) == 0 {
 		g.P(`	return nil, fmt.Errorf("`, lowerName, ` index %d: %w", index, fdblayer.ErrUnknownIndex)`)
 		g.P("}")
 		g.P()
@@ -890,7 +942,7 @@ func generateScanIndex(g Printer, msg ir.MessageSpec) {
 
 	g.P("	var idxSchema []fdblayer.FieldKind")
 	g.P("	switch index {")
-	for _, idx := range msg.SecondaryIndexes {
+	for _, idx := range scanIndexes {
 		combined := make([]ir.FieldSpec, 0, len(idx.Fields)+len(msg.PrimaryKeyFields))
 		combined = append(combined, idx.Fields...)
 		combined = append(combined, msg.PrimaryKeyFields...)
@@ -990,6 +1042,60 @@ func generateScanIndex(g Printer, msg ir.MessageSpec) {
 	g.P("		result.Items = append(result.Items, entity)")
 	g.P("	}")
 	g.P("	return result, nil")
+	g.P("}")
+	g.P()
+}
+
+func generateReadAggregate(g Printer, msg ir.MessageSpec) {
+	lowerName := strings.ToLower(msg.Name)
+	typeIDConst := typeIDConstName(msg)
+
+	var aggIndexes []ir.SecondaryIndexSpec
+	for _, idx := range msg.SecondaryIndexes {
+		if idx.IsAggregate() {
+			aggIndexes = append(aggIndexes, idx)
+		}
+	}
+
+	g.P("// ReadAggregate reads the current value of an atomic aggregate secondary index (COUNT, SUM, MIN, MAX) for the given groupKey.")
+	g.P("func (r *", lowerName, "Repository) ReadAggregate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, groupKey fdblayer.Key) (int64, error) {")
+	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("		return 0, err")
+	g.P("	}")
+	if len(aggIndexes) == 0 {
+		g.P(`	return 0, fmt.Errorf("`, lowerName, ` aggregate index %d: %w", index, fdblayer.ErrUnknownIndex)`)
+		g.P("}")
+		g.P()
+		return
+	}
+
+	g.P("	var groupSchema []fdblayer.FieldKind")
+	g.P("	var encoding fdblayer.AggregateEncoding")
+	g.P("	switch index {")
+	for _, idx := range aggIndexes {
+		g.P("	case ", IndexConstName(msg, idx), ":")
+		g.P("		groupSchema = ", schemaSliceExpr(idx.Fields))
+		switch idx.Aggregate {
+		case ir.AggregateCount, ir.AggregateSum:
+			g.P("		encoding = fdblayer.AggregateEncodingDelta")
+		case ir.AggregateMin, ir.AggregateMax:
+			if idx.AggregateField.IsUnsigned {
+				g.P("		encoding = fdblayer.AggregateEncodingUintMinMax")
+			} else {
+				g.P("		encoding = fdblayer.AggregateEncodingSignedMinMax")
+			}
+		}
+	}
+	g.P("	default:")
+	g.P(`		return 0, fmt.Errorf("`, lowerName, ` aggregate index %d: %w", index, fdblayer.ErrUnknownIndex)`)
+	g.P("	}")
+	g.P()
+	g.P("	aggKey, err := fdblayer.PackAggregateKey(r.dir, ", typeIDConst, ", index, groupKey, groupSchema)")
+	g.P("	if err != nil {")
+	g.P("		return 0, err")
+	g.P("	}")
+	g.P("	raw := tr.Get(aggKey).MustGet()")
+	g.P(`	return fdblayer.DecodeAggregateValue(raw, encoding, "`, lowerName, `")`)
 	g.P("}")
 	g.P()
 }
@@ -1189,7 +1295,7 @@ func pkPosition(msg ir.MessageSpec, protoName string) int {
 func indexFieldTupleArgsWithPKFallback(msg ir.MessageSpec, fields []ir.FieldSpec, varName string, pkTupleVar string) string {
 	parts := make([]string, 0, len(fields))
 	for _, f := range fields {
-		if pkPos := pkPosition(msg, f.ProtoName); pkPos >= 0 && pkTupleVar != "" {
+		if pkPos := pkPosition(msg, f.ProtoName); pkPos >= 0 && pkTupleVar != "" && pkTupleVar != "_" {
 			parts = append(parts, fmt.Sprintf("%s[%d]", pkTupleVar, pkPos))
 		} else {
 			parts = append(parts, PackField(fmt.Sprintf("%s.%s", varName, f.GoName), f))
@@ -1250,4 +1356,252 @@ func emitVersionstampedFanOutIndexWrite(g Printer, msg ir.MessageSpec, idx ir.Se
 	g.P(indent, "	return err")
 	g.P(indent, "}")
 	g.P(indent, "tr.SetVersionstampedKey(idxKey, []byte{})")
+}
+
+func aggregateKeyPackExpr(msg ir.MessageSpec, idx ir.SecondaryIndexSpec, varName string, pkTupleVar string) string {
+	typeIDConst := typeIDConstName(msg)
+	idxConst := IndexConstName(msg, idx)
+	if len(idx.Fields) == 0 {
+		return fmt.Sprintf("dir.Pack(tuple.Tuple{%s, fdblayer.IndexNamespace, int64(%s)})", typeIDConst, idxConst)
+	}
+	return fmt.Sprintf("dir.Pack(tuple.Tuple{%s, fdblayer.IndexNamespace, int64(%s), %s})",
+		typeIDConst, idxConst, indexFieldTupleArgsWithPKFallback(msg, idx.Fields, varName, pkTupleVar))
+}
+
+func fanOutAggregateKeyPackExpr(msg ir.MessageSpec, idx ir.SecondaryIndexSpec, repeatedIdx int, varName string, pkTupleVar string) string {
+	typeIDConst := typeIDConstName(msg)
+	idxConst := IndexConstName(msg, idx)
+	parts := make([]string, 0, len(idx.Fields))
+	for j, sf := range idx.Fields {
+		if j == repeatedIdx {
+			parts = append(parts, PackField("item", sf))
+		} else if pkPos := pkPosition(msg, sf.ProtoName); pkPos >= 0 && pkTupleVar != "" && pkTupleVar != "_" {
+			parts = append(parts, fmt.Sprintf("%s[%d]", pkTupleVar, pkPos))
+		} else {
+			parts = append(parts, PackField(varName+"."+sf.GoName, sf))
+		}
+	}
+	return fmt.Sprintf("dir.Pack(tuple.Tuple{%s, fdblayer.IndexNamespace, int64(%s), %s})",
+		typeIDConst, idxConst, strings.Join(parts, ", "))
+}
+
+func encodeMinMaxValueExpr(valExpr string, aggField ir.FieldSpec) string {
+	if aggField.IsUnsigned {
+		return "fdblayer.EncodeUnsignedLE(uint64(" + valExpr + "))"
+	}
+	return "fdblayer.EncodeSignedOrderLE(int64(" + valExpr + "))"
+}
+
+func emitAggregateMutationForKey(g Printer, idx ir.SecondaryIndexSpec, keyExpr string, varName string, negate bool, indent string) {
+	switch idx.Aggregate {
+	case ir.AggregateCount:
+		delta := "1"
+		if negate {
+			delta = "-1"
+		}
+		g.P(indent, "tr.Add(", keyExpr, ", fdblayer.EncodeDeltaLE(", delta, "))")
+	case ir.AggregateSum:
+		aggF := idx.AggregateField.GoName
+		sign := ""
+		if negate {
+			sign = "-"
+		}
+		g.P(indent, "if ", varName, ".", aggF, " != 0 {")
+		g.P(indent, "	tr.Add(", keyExpr, ", fdblayer.EncodeDeltaLE(", sign, "int64(", varName, ".", aggF, ")))")
+		g.P(indent, "}")
+	case ir.AggregateMin:
+		if !negate {
+			g.P(indent, "tr.Min(", keyExpr, ", ", encodeMinMaxValueExpr(varName+"."+idx.AggregateField.GoName, idx.AggregateField), ")")
+		}
+	case ir.AggregateMax:
+		if !negate {
+			g.P(indent, "tr.Max(", keyExpr, ", ", encodeMinMaxValueExpr(varName+"."+idx.AggregateField.GoName, idx.AggregateField), ")")
+		}
+	}
+}
+
+func emitAggregateInsert(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec) {
+	if idx.IsFanOut {
+		g.P("	// Fan-out aggregate index")
+		for i, f := range idx.Fields {
+			if f.IsRepeated {
+				mapType := MapKeyType(f)
+				mapExpr := MapKeyExpr("item", f)
+				keyExpr := fanOutAggregateKeyPackExpr(msg, idx, i, "entity", "")
+				g.P("	{")
+				g.P("		seen := make(map[", mapType, "]struct{}, len(entity.", f.GoName, "))")
+				g.P("		for _, item := range entity.", f.GoName, " {")
+				g.P("			if _, dup := seen[", mapExpr, "]; dup {")
+				g.P("				continue")
+				g.P("			}")
+				g.P("			seen[", mapExpr, "] = struct{}{}")
+				emitAggregateMutationForKey(g, idx, keyExpr, "entity", false, "\t\t\t")
+				g.P("		}")
+				g.P("	}")
+			}
+		}
+		return
+	}
+
+	keyExpr := aggregateKeyPackExpr(msg, idx, "entity", "")
+	g.P("	// Aggregate index")
+	emitAggregateMutationForKey(g, idx, keyExpr, "entity", false, "\t")
+}
+
+func emitAggregateUpsert(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec) {
+	if idx.IsFanOut {
+		g.P("	// Fan-out aggregate index")
+		for i, f := range idx.Fields {
+			if f.IsRepeated {
+				cond := "old != nil"
+				if HasNonRepeatedFields(idx.Fields) {
+					cond += " && " + NonRepeatedFieldsEqual(idx.Fields)
+				}
+				mapType := MapKeyType(f)
+				mapExpr := MapKeyExpr("item", f)
+				keyOld := fanOutAggregateKeyPackExpr(msg, idx, i, "old", "")
+				keyEntity := fanOutAggregateKeyPackExpr(msg, idx, i, "entity", "")
+
+				g.P("	if ", cond, " {")
+				g.P("		oldSet := make(map[", mapType, "]struct{}, len(old.", f.GoName, "))")
+				g.P("		for _, item := range old.", f.GoName, " {")
+				g.P("			oldSet[", mapExpr, "] = struct{}{}")
+				g.P("		}")
+				if idx.Aggregate == ir.AggregateCount || idx.Aggregate == ir.AggregateSum {
+					g.P("		newSet := make(map[", mapType, "]struct{}, len(entity.", f.GoName, "))")
+					g.P("		for _, item := range entity.", f.GoName, " {")
+					g.P("			newSet[", mapExpr, "] = struct{}{}")
+					g.P("		}")
+					g.P("		for _, item := range old.", f.GoName, " {")
+					g.P("			if _, keep := newSet[", mapExpr, "]; !keep {")
+					g.P("				newSet[", mapExpr, "] = struct{}{}")
+					emitAggregateMutationForKey(g, idx, keyOld, "old", true, "\t\t\t\t")
+					g.P("			}")
+					g.P("		}")
+				}
+				g.P("		seenNew := make(map[", mapType, "]struct{}, len(entity.", f.GoName, "))")
+				g.P("		for _, item := range entity.", f.GoName, " {")
+				g.P("			if _, dup := seenNew[", mapExpr, "]; dup {")
+				g.P("				continue")
+				g.P("			}")
+				g.P("			seenNew[", mapExpr, "] = struct{}{}")
+				g.P("			if _, existed := oldSet[", mapExpr, "]; !existed {")
+				emitAggregateMutationForKey(g, idx, keyEntity, "entity", false, "\t\t\t\t")
+				if idx.Aggregate == ir.AggregateSum {
+					aggF := idx.AggregateField.GoName
+					g.P("			} else if delta := int64(entity.", aggF, ") - int64(old.", aggF, "); delta != 0 {")
+					g.P("				tr.Add(", keyEntity, ", fdblayer.EncodeDeltaLE(delta))")
+				} else if idx.Aggregate == ir.AggregateMin || idx.Aggregate == ir.AggregateMax {
+					aggF := idx.AggregateField.GoName
+					g.P("			} else if old.", aggF, " != entity.", aggF, " {")
+					emitAggregateMutationForKey(g, idx, keyEntity, "entity", false, "\t\t\t\t")
+				}
+				g.P("			}")
+				g.P("		}")
+				g.P("	} else {")
+				if (idx.Aggregate == ir.AggregateCount || idx.Aggregate == ir.AggregateSum) && HasNonRepeatedFields(idx.Fields) {
+					g.P("		if old != nil {")
+					g.P("			seenOld := make(map[", mapType, "]struct{}, len(old.", f.GoName, "))")
+					g.P("			for _, item := range old.", f.GoName, " {")
+					g.P("				if _, dup := seenOld[", mapExpr, "]; dup {")
+					g.P("					continue")
+					g.P("				}")
+					g.P("				seenOld[", mapExpr, "] = struct{}{}")
+					emitAggregateMutationForKey(g, idx, keyOld, "old", true, "\t\t\t\t")
+					g.P("			}")
+					g.P("		}")
+				}
+				g.P("		seen := make(map[", mapType, "]struct{}, len(entity.", f.GoName, "))")
+				g.P("		for _, item := range entity.", f.GoName, " {")
+				g.P("			if _, dup := seen[", mapExpr, "]; dup {")
+				g.P("				continue")
+				g.P("			}")
+				g.P("			seen[", mapExpr, "] = struct{}{}")
+				emitAggregateMutationForKey(g, idx, keyEntity, "entity", false, "\t\t\t")
+				g.P("		}")
+				g.P("	}")
+			}
+		}
+		return
+	}
+
+	var diffParts []string
+	for _, f := range idx.Fields {
+		diffParts = append(diffParts, FieldNotEqual("old."+f.GoName, "entity."+f.GoName, f))
+	}
+	hasGroupFields := len(diffParts) > 0
+	groupDiff := strings.Join(diffParts, " || ")
+	keyOld := aggregateKeyPackExpr(msg, idx, "old", "")
+	keyEntity := aggregateKeyPackExpr(msg, idx, "entity", "")
+
+	g.P("	// Aggregate index")
+	switch idx.Aggregate {
+	case ir.AggregateCount:
+		g.P("	if old == nil {")
+		g.P("		tr.Add(", keyEntity, ", fdblayer.EncodeDeltaLE(1))")
+		if hasGroupFields {
+			g.P("	} else if ", groupDiff, " {")
+			g.P("		tr.Add(", keyOld, ", fdblayer.EncodeDeltaLE(-1))")
+			g.P("		tr.Add(", keyEntity, ", fdblayer.EncodeDeltaLE(1))")
+		}
+		g.P("	}")
+	case ir.AggregateSum:
+		aggF := idx.AggregateField.GoName
+		g.P("	if old == nil {")
+		g.P("		if entity.", aggF, " != 0 {")
+		g.P("			tr.Add(", keyEntity, ", fdblayer.EncodeDeltaLE(int64(entity.", aggF, ")))")
+		g.P("		}")
+		if hasGroupFields {
+			g.P("	} else if ", groupDiff, " {")
+			g.P("		if old.", aggF, " != 0 {")
+			g.P("			tr.Add(", keyOld, ", fdblayer.EncodeDeltaLE(-int64(old.", aggF, ")))")
+			g.P("		}")
+			g.P("		if entity.", aggF, " != 0 {")
+			g.P("			tr.Add(", keyEntity, ", fdblayer.EncodeDeltaLE(int64(entity.", aggF, ")))")
+			g.P("		}")
+		}
+		g.P("	} else if delta := int64(entity.", aggF, ") - int64(old.", aggF, "); delta != 0 {")
+		g.P("		tr.Add(", keyEntity, ", fdblayer.EncodeDeltaLE(delta))")
+		g.P("	}")
+	case ir.AggregateMin, ir.AggregateMax:
+		aggF := idx.AggregateField.GoName
+		cond := fmt.Sprintf("old == nil || old.%s != entity.%s", aggF, aggF)
+		if hasGroupFields {
+			cond = fmt.Sprintf("old == nil || %s || old.%s != entity.%s", groupDiff, aggF, aggF)
+		}
+		g.P("	if ", cond, " {")
+		emitAggregateMutationForKey(g, idx, keyEntity, "entity", false, "\t\t")
+		g.P("	}")
+	}
+}
+
+func emitAggregateDelete(g Printer, msg ir.MessageSpec, idx ir.SecondaryIndexSpec, pkTupleVar string) {
+	if idx.Aggregate == ir.AggregateMin || idx.Aggregate == ir.AggregateMax {
+		return
+	}
+	if idx.IsFanOut {
+		g.P("		// Fan-out aggregate index")
+		for i, f := range idx.Fields {
+			if f.IsRepeated {
+				mapType := MapKeyType(f)
+				mapExpr := MapKeyExpr("item", f)
+				keyExpr := fanOutAggregateKeyPackExpr(msg, idx, i, "entity", pkTupleVar)
+				g.P("		{")
+				g.P("			seen := make(map[", mapType, "]struct{}, len(entity.", f.GoName, "))")
+				g.P("			for _, item := range entity.", f.GoName, " {")
+				g.P("				if _, dup := seen[", mapExpr, "]; dup {")
+				g.P("					continue")
+				g.P("				}")
+				g.P("				seen[", mapExpr, "] = struct{}{}")
+				emitAggregateMutationForKey(g, idx, keyExpr, "entity", true, "\t\t\t\t")
+				g.P("			}")
+				g.P("		}")
+			}
+		}
+		return
+	}
+
+	keyExpr := aggregateKeyPackExpr(msg, idx, "entity", pkTupleVar)
+	g.P("		// Aggregate index")
+	emitAggregateMutationForKey(g, idx, keyExpr, "entity", true, "\t\t")
 }

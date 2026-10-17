@@ -896,3 +896,135 @@ func TestReversePagination_EmbeddedNulBytesInKeys(t *testing.T) {
 		t.Fatalf("unexpected reverse ScanIndex page 3: %+v, err=%v", idxP3, err)
 	}
 }
+
+func TestAggregateIndexes_Product_CountSumMinMax(t *testing.T) {
+	ctx := context.Background()
+	tr, dir, _ := tests.Setup()
+	repo := store.NewProductRepository(dir)
+
+	// 1. Empty state: COUNT and SUM return (0, nil); MIN and MAX return ErrNotFound.
+	if got, err := repo.ReadAggregate(ctx, tr, store.ProductCountByCategory, fdblayer.Key{"books"}); err != nil || got != 0 {
+		t.Fatalf("expected COUNT=0 for empty group, got %d, err=%v", got, err)
+	}
+	if got, err := repo.ReadAggregate(ctx, tr, store.ProductCount, fdblayer.Key{}); err != nil || got != 0 {
+		t.Fatalf("expected ungrouped COUNT=0 for empty table, got %d, err=%v", got, err)
+	}
+	if got, err := repo.ReadAggregate(ctx, tr, store.ProductSumPriceByCategory, fdblayer.Key{"books"}); err != nil || got != 0 {
+		t.Fatalf("expected SUM=0 for empty group, got %d, err=%v", got, err)
+	}
+	if _, err := repo.ReadAggregate(ctx, tr, store.ProductMinPriceByCategory, fdblayer.Key{"books"}); !errors.Is(err, fdblayer.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for MIN on empty group, got %v", err)
+	}
+	if _, err := repo.ReadAggregate(ctx, tr, store.ProductMaxPriceByCategory, fdblayer.Key{"books"}); !errors.Is(err, fdblayer.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for MAX on empty group, got %v", err)
+	}
+
+	// 2. Insert 3 products in "books" (including negative, zero, and positive prices) and 1 in "games".
+	for _, p := range []*store.Product{
+		{Id: "b1", Name: "Discount Coupon", Category: "books", Price: -15},
+		{Id: "b2", Name: "Free Pamphlet", Category: "books", Price: 0},
+		{Id: "b3", Name: "Hardcover", Category: "books", Price: 40},
+		{Id: "g1", Name: "Board Game", Category: "games", Price: 60},
+	} {
+		if err := repo.Insert(ctx, tr, p); err != nil {
+			t.Fatalf("Insert(%s) failed: %v", p.Id, err)
+		}
+	}
+
+	if got, err := repo.ReadAggregate(ctx, tr, store.ProductCountByCategory, fdblayer.Key{"books"}); err != nil || got != 3 {
+		t.Fatalf("expected books COUNT=3, got %d, err=%v", got, err)
+	}
+	if got, err := repo.ReadAggregate(ctx, tr, store.ProductCount, fdblayer.Key{}); err != nil || got != 4 {
+		t.Fatalf("expected total ProductCount=4, got %d, err=%v", got, err)
+	}
+	if got, err := repo.ReadAggregate(ctx, tr, store.ProductSumPriceByCategory, fdblayer.Key{"books"}); err != nil || got != 25 {
+		t.Fatalf("expected books SUM=25 (-15 + 0 + 40), got %d, err=%v", got, err)
+	}
+	if got, err := repo.ReadAggregate(ctx, tr, store.ProductMinPriceByCategory, fdblayer.Key{"books"}); err != nil || got != -15 {
+		t.Fatalf("expected books MIN=-15, got %d, err=%v", got, err)
+	}
+	if got, err := repo.ReadAggregate(ctx, tr, store.ProductMaxPriceByCategory, fdblayer.Key{"books"}); err != nil || got != 40 {
+		t.Fatalf("expected books MAX=40, got %d, err=%v", got, err)
+	}
+
+	// 3. Upsert with unchanged Category and unchanged Price must emit 0 atomic mutations.
+	tr.ResetLog()
+	if err := repo.Upsert(ctx, tr, &store.Product{Id: "b3", Name: "Hardcover Revised", Category: "books", Price: 40}); err != nil {
+		t.Fatalf("Upsert(b3 unchanged) failed: %v", err)
+	}
+	if len(tr.AddCalls) != 0 || len(tr.MinCalls) != 0 || len(tr.MaxCalls) != 0 {
+		t.Fatalf("expected 0 atomic mutations on unchanged Upsert, got Add=%d Min=%d Max=%d", len(tr.AddCalls), len(tr.MinCalls), len(tr.MaxCalls))
+	}
+
+	// 4. Upsert with unchanged Category and changed Price (40 -> 55): delta (+15) applied to SUM, MIN/MAX updated, COUNT untouched.
+	tr.ResetLog()
+	if err := repo.Upsert(ctx, tr, &store.Product{Id: "b3", Name: "Collector Edition", Category: "books", Price: 55}); err != nil {
+		t.Fatalf("Upsert(b3 price change) failed: %v", err)
+	}
+	if len(tr.AddCalls) != 1 {
+		t.Fatalf("expected exactly 1 Add call (SUM delta) when only price changed, got %d", len(tr.AddCalls))
+	}
+	if got, err := repo.ReadAggregate(ctx, tr, store.ProductCountByCategory, fdblayer.Key{"books"}); err != nil || got != 3 {
+		t.Fatalf("expected books COUNT=3, got %d, err=%v", got, err)
+	}
+	if got, err := repo.ReadAggregate(ctx, tr, store.ProductSumPriceByCategory, fdblayer.Key{"books"}); err != nil || got != 40 {
+		t.Fatalf("expected books SUM=40 (-15 + 0 + 55), got %d, err=%v", got, err)
+	}
+	if got, err := repo.ReadAggregate(ctx, tr, store.ProductMaxPriceByCategory, fdblayer.Key{"books"}); err != nil || got != 55 {
+		t.Fatalf("expected books MAX=55, got %d, err=%v", got, err)
+	}
+
+	// 5. Upsert moving b3 from "books" to "games" with Price 70:
+	//    books COUNT: 3 -> 2, books SUM: 40 -> -15
+	//    games COUNT: 1 -> 2, games SUM: 60 -> 130, games MAX: 60 -> 70
+	if err := repo.Upsert(ctx, tr, &store.Product{Id: "b3", Name: "Collector Edition", Category: "games", Price: 70}); err != nil {
+		t.Fatalf("Upsert(b3 category move) failed: %v", err)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductCountByCategory, fdblayer.Key{"books"}); got != 2 {
+		t.Fatalf("expected books COUNT=2 after move, got %d", got)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductSumPriceByCategory, fdblayer.Key{"books"}); got != -15 {
+		t.Fatalf("expected books SUM=-15 after move, got %d", got)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductCountByCategory, fdblayer.Key{"games"}); got != 2 {
+		t.Fatalf("expected games COUNT=2 after move, got %d", got)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductSumPriceByCategory, fdblayer.Key{"games"}); got != 130 {
+		t.Fatalf("expected games SUM=130 after move, got %d", got)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductMaxPriceByCategory, fdblayer.Key{"games"}); got != 70 {
+		t.Fatalf("expected games MAX=70 after move, got %d", got)
+	}
+
+	// 6. Delete b1 (Price -15 in "books"):
+	//    books COUNT: 2 -> 1, books SUM: -15 -> 0, total ProductCount: 4 -> 3
+	if err := repo.Delete(ctx, tr, fdblayer.Key{"b1"}); err != nil {
+		t.Fatalf("Delete(b1) failed: %v", err)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductCountByCategory, fdblayer.Key{"books"}); got != 1 {
+		t.Fatalf("expected books COUNT=1 after Delete, got %d", got)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductSumPriceByCategory, fdblayer.Key{"books"}); got != 0 {
+		t.Fatalf("expected books SUM=0 after Delete, got %d", got)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductCount, fdblayer.Key{}); got != 3 {
+		t.Fatalf("expected total ProductCount=3 after Delete, got %d", got)
+	}
+
+	// 7. Error validation:
+	//    - Passing non-aggregate index to ReadAggregate returns ErrUnknownIndex
+	if _, err := repo.ReadAggregate(ctx, tr, store.ProductByCategory, fdblayer.Key{"books"}); !errors.Is(err, fdblayer.ErrUnknownIndex) {
+		t.Fatalf("expected ErrUnknownIndex when calling ReadAggregate with standard index, got %v", err)
+	}
+	//    - Passing aggregate index to ScanIndex returns ErrUnknownIndex
+	if _, err := repo.ScanIndex(ctx, tr, store.ProductCountByCategory, fdblayer.Prefix("books")); !errors.Is(err, fdblayer.ErrUnknownIndex) {
+		t.Fatalf("expected ErrUnknownIndex when calling ScanIndex with aggregate index, got %v", err)
+	}
+	//    - Wrong groupKey length or element type returns ErrInvalidKey
+	if _, err := repo.ReadAggregate(ctx, tr, store.ProductCountByCategory, fdblayer.Key{}); !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey for empty groupKey on grouped aggregate, got %v", err)
+	}
+	if _, err := repo.ReadAggregate(ctx, tr, store.ProductCountByCategory, fdblayer.Key{123}); !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey for wrong element type in groupKey, got %v", err)
+	}
+}

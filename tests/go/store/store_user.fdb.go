@@ -327,3 +327,11 @@ func (r *userRepository) ScanIndex(ctx context.Context, tr fdblayer.Transaction,
 	}
 	return result, nil
 }
+
+// ReadAggregate reads the current value of an atomic aggregate secondary index (COUNT, SUM, MIN, MAX) for the given groupKey.
+func (r *userRepository) ReadAggregate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, groupKey fdblayer.Key) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return 0, fmt.Errorf("user aggregate index %d: %w", index, fdblayer.ErrUnknownIndex)
+}

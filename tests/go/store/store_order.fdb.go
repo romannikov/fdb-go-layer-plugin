@@ -24,6 +24,8 @@ const (
 	OrderByReceiptHash            fdblayer.IndexID = 1002
 	OrderByAttachmentHashes       fdblayer.IndexID = 1003
 	OrderByStatusAttachmentHashes fdblayer.IndexID = 1004
+	OrderCountByTenantIdStatus    fdblayer.IndexID = 1005
+	OrderSumCreatedAtByTenantId   fdblayer.IndexID = 1006
 )
 
 // OrderRepository defines the repository interface for Order.
@@ -99,6 +101,14 @@ func (r *orderRepository) Insert(ctx context.Context, tr fdblayer.Transaction, e
 				int64(entity.OrderSeq),
 			}), []byte{})
 		}
+	}
+
+	// Aggregate index
+	tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderCountByTenantIdStatus), entity.TenantId, int64(entity.Status)}), fdblayer.EncodeDeltaLE(1))
+
+	// Aggregate index
+	if entity.CreatedAt != 0 {
+		tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByTenantId), entity.TenantId}), fdblayer.EncodeDeltaLE(int64(entity.CreatedAt)))
 	}
 
 	return nil
@@ -259,6 +269,30 @@ func (r *orderRepository) Upsert(ctx context.Context, tr fdblayer.Transaction, e
 		}
 	}
 
+	// Aggregate index
+	if old == nil {
+		tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderCountByTenantIdStatus), entity.TenantId, int64(entity.Status)}), fdblayer.EncodeDeltaLE(1))
+	} else if old.TenantId != entity.TenantId || old.Status != entity.Status {
+		tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderCountByTenantIdStatus), old.TenantId, int64(old.Status)}), fdblayer.EncodeDeltaLE(-1))
+		tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderCountByTenantIdStatus), entity.TenantId, int64(entity.Status)}), fdblayer.EncodeDeltaLE(1))
+	}
+
+	// Aggregate index
+	if old == nil {
+		if entity.CreatedAt != 0 {
+			tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByTenantId), entity.TenantId}), fdblayer.EncodeDeltaLE(int64(entity.CreatedAt)))
+		}
+	} else if old.TenantId != entity.TenantId {
+		if old.CreatedAt != 0 {
+			tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByTenantId), old.TenantId}), fdblayer.EncodeDeltaLE(-int64(old.CreatedAt)))
+		}
+		if entity.CreatedAt != 0 {
+			tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByTenantId), entity.TenantId}), fdblayer.EncodeDeltaLE(int64(entity.CreatedAt)))
+		}
+	} else if delta := int64(entity.CreatedAt) - int64(old.CreatedAt); delta != 0 {
+		tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByTenantId), entity.TenantId}), fdblayer.EncodeDeltaLE(delta))
+	}
+
 	return nil
 }
 
@@ -313,6 +347,12 @@ func (r *orderRepository) Delete(ctx context.Context, tr fdblayer.Transaction, k
 					pkTuple[1],
 				}))
 			}
+		}
+		// Aggregate index
+		tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderCountByTenantIdStatus), pkTuple[0], int64(entity.Status)}), fdblayer.EncodeDeltaLE(-1))
+		// Aggregate index
+		if entity.CreatedAt != 0 {
+			tr.Add(dir.Pack(tuple.Tuple{OrderTypeID, fdblayer.IndexNamespace, int64(OrderSumCreatedAtByTenantId), pkTuple[0]}), fdblayer.EncodeDeltaLE(-int64(entity.CreatedAt)))
 		}
 	}
 	tr.Clear(dataKey)
@@ -522,4 +562,30 @@ func (r *orderRepository) ScanIndex(ctx context.Context, tr fdblayer.Transaction
 		result.Items = append(result.Items, entity)
 	}
 	return result, nil
+}
+
+// ReadAggregate reads the current value of an atomic aggregate secondary index (COUNT, SUM, MIN, MAX) for the given groupKey.
+func (r *orderRepository) ReadAggregate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, groupKey fdblayer.Key) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	var groupSchema []fdblayer.FieldKind
+	var encoding fdblayer.AggregateEncoding
+	switch index {
+	case OrderCountByTenantIdStatus:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString, fdblayer.FieldKindInt64}
+		encoding = fdblayer.AggregateEncodingDelta
+	case OrderSumCreatedAtByTenantId:
+		groupSchema = []fdblayer.FieldKind{fdblayer.FieldKindString}
+		encoding = fdblayer.AggregateEncodingDelta
+	default:
+		return 0, fmt.Errorf("order aggregate index %d: %w", index, fdblayer.ErrUnknownIndex)
+	}
+
+	aggKey, err := fdblayer.PackAggregateKey(r.dir, OrderTypeID, index, groupKey, groupSchema)
+	if err != nil {
+		return 0, err
+	}
+	raw := tr.Get(aggKey).MustGet()
+	return fdblayer.DecodeAggregateValue(raw, encoding, "order")
 }

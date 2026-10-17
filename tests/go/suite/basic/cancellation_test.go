@@ -58,4 +58,10 @@ func TestContextCancellation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on ScanIndex with cancelled context")
 	}
+
+	// Test ReadAggregate
+	_, err = userRepo.ReadAggregate(ctx, tr, store.UserByEmail, fdblayer.Key{"cancel@test.com"})
+	if err == nil {
+		t.Fatal("expected error on ReadAggregate with cancelled context")
+	}
 }

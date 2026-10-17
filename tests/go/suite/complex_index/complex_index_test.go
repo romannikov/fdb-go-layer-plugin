@@ -788,7 +788,13 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_InsertUpsertDelete(t *testing.T)
 		if err != nil {
 			t.Fatalf("PrefixRange failed: %v", err)
 		}
-		return len(tr.GetRangeSlice(prefix, fdb.RangeOptions{}))
+		count := 0
+		for _, kv := range tr.GetRangeSlice(prefix, fdb.RangeOptions{}) {
+			if len(kv.Value) == 0 {
+				count++
+			}
+		}
+		return count
 	}
 
 	hashA := []byte{0x0A}
@@ -930,5 +936,78 @@ func TestSecondaryAndFanOutIndexKeysNeverMissed_InsertUpsertDelete(t *testing.T)
 	}
 	if got := countOrderIndexKeys(); got != 0 {
 		t.Fatalf("expected 0 index keys after Delete of PK-stripped payload, got %d", got)
+	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderCountByTenantIdStatus, fdblayer.Key{"t2", store.OrderStatus_ORDER_STATUS_PENDING}); err != nil || got != 0 {
+		t.Fatalf("expected OrderCountByTenantIdStatus=0 after Delete of PK-stripped payload, got %d, err=%v", got, err)
+	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAtByTenantId, fdblayer.Key{"t2"}); err != nil || got != 0 {
+		t.Fatalf("expected OrderSumCreatedAtByTenantId=0 after Delete of PK-stripped payload, got %d, err=%v", got, err)
+	}
+}
+
+func TestFanOutAggregateAndCompositeAggregate_PostAndOrder(t *testing.T) {
+	ctx := context.Background()
+	tr, dir, _ := tests.Setup()
+	postRepo := store.NewPostRepository(dir)
+	orderRepo := store.NewOrderRepository(dir)
+
+	// 1. Fan-out aggregate COUNT on Post.Tags (with duplicate tags in input slice)
+	if err := postRepo.Insert(ctx, tr, &store.Post{Id: "p1", Tags: []string{"go", "fdb", "go"}}); err != nil {
+		t.Fatalf("Insert(p1) failed: %v", err)
+	}
+	if err := postRepo.Insert(ctx, tr, &store.Post{Id: "p2", Tags: []string{"go", "storage"}}); err != nil {
+		t.Fatalf("Insert(p2) failed: %v", err)
+	}
+	if got, err := postRepo.ReadAggregate(ctx, tr, store.PostCountByTags, fdblayer.Key{"go"}); err != nil || got != 2 {
+		t.Fatalf("expected PostCountByTags('go')=2, got %d, err=%v", got, err)
+	}
+	if got, err := postRepo.ReadAggregate(ctx, tr, store.PostCountByTags, fdblayer.Key{"fdb"}); err != nil || got != 1 {
+		t.Fatalf("expected PostCountByTags('fdb')=1, got %d, err=%v", got, err)
+	}
+
+	// Upsert p1: remove "fdb", keep "go", add "cloud"
+	if err := postRepo.Upsert(ctx, tr, &store.Post{Id: "p1", Tags: []string{"go", "cloud", "cloud"}}); err != nil {
+		t.Fatalf("Upsert(p1) failed: %v", err)
+	}
+	if got, _ := postRepo.ReadAggregate(ctx, tr, store.PostCountByTags, fdblayer.Key{"fdb"}); got != 0 {
+		t.Fatalf("expected PostCountByTags('fdb')=0 after Upsert, got %d", got)
+	}
+	if got, _ := postRepo.ReadAggregate(ctx, tr, store.PostCountByTags, fdblayer.Key{"go"}); got != 2 {
+		t.Fatalf("expected PostCountByTags('go')=2 after Upsert, got %d", got)
+	}
+	if got, _ := postRepo.ReadAggregate(ctx, tr, store.PostCountByTags, fdblayer.Key{"cloud"}); got != 1 {
+		t.Fatalf("expected PostCountByTags('cloud')=1 after Upsert, got %d", got)
+	}
+
+	// Delete p2
+	if err := postRepo.Delete(ctx, tr, fdblayer.Key{"p2"}); err != nil {
+		t.Fatalf("Delete(p2) failed: %v", err)
+	}
+	if got, _ := postRepo.ReadAggregate(ctx, tr, store.PostCountByTags, fdblayer.Key{"go"}); got != 1 {
+		t.Fatalf("expected PostCountByTags('go')=1 after Delete(p2), got %d", got)
+	}
+
+	// 2. Composite group key (tenant_id, status enum) on OrderCountByTenantIdStatus and OrderSumCreatedAtByTenantId
+	if err := orderRepo.Insert(ctx, tr, &store.Order{
+		TenantId:  "acme",
+		OrderSeq:  1,
+		Status:    store.OrderStatus_ORDER_STATUS_PENDING,
+		CreatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Insert(order 1) failed: %v", err)
+	}
+	if err := orderRepo.Insert(ctx, tr, &store.Order{
+		TenantId:  "acme",
+		OrderSeq:  2,
+		Status:    store.OrderStatus_ORDER_STATUS_PENDING,
+		CreatedAt: 2500,
+	}); err != nil {
+		t.Fatalf("Insert(order 2) failed: %v", err)
+	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderCountByTenantIdStatus, fdblayer.Key{"acme", store.OrderStatus_ORDER_STATUS_PENDING}); err != nil || got != 2 {
+		t.Fatalf("expected OrderCountByTenantIdStatus(acme, PENDING)=2, got %d, err=%v", got, err)
+	}
+	if got, err := orderRepo.ReadAggregate(ctx, tr, store.OrderSumCreatedAtByTenantId, fdblayer.Key{"acme"}); err != nil || got != 3500 {
+		t.Fatalf("expected OrderSumCreatedAtByTenantId(acme)=3500, got %d, err=%v", got, err)
 	}
 }

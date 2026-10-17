@@ -30,6 +30,34 @@ message Product {
         id: 1,
         fields: ["category"]
     };
+    option (annotations.secondary_index) = {
+        id: 2,
+        fields: ["category"],
+        aggregate: AGGREGATE_COUNT
+    };
+    option (annotations.secondary_index) = {
+        id: 3,
+        fields: ["category"],
+        aggregate: AGGREGATE_SUM,
+        aggregate_field: "price"
+    };
+    option (annotations.secondary_index) = {
+        id: 4,
+        fields: ["category"],
+        aggregate: AGGREGATE_MIN,
+        aggregate_field: "price"
+    };
+    option (annotations.secondary_index) = {
+        id: 5,
+        fields: ["category"],
+        aggregate: AGGREGATE_MAX,
+        aggregate_field: "price"
+    };
+    option (annotations.secondary_index) = {
+        id: 6,
+        fields: [],
+        aggregate: AGGREGATE_COUNT
+    };
 
     string id = 1;
     string name = 2;
@@ -45,6 +73,11 @@ message Post {
     option (annotations.secondary_index) = {
         id: 1,
         fields: ["tags"]
+    };
+    option (annotations.secondary_index) = {
+        id: 2,
+        fields: ["tags"],
+        aggregate: AGGREGATE_COUNT
     };
 
     string id = 1;
@@ -91,6 +124,17 @@ message Order {
     option (annotations.secondary_index) = {
         id: 1004,
         fields: ["status", "attachment_hashes"]
+    };
+    option (annotations.secondary_index) = {
+        id: 1005,
+        fields: ["tenant_id", "status"],
+        aggregate: AGGREGATE_COUNT
+    };
+    option (annotations.secondary_index) = {
+        id: 1006,
+        fields: ["tenant_id"],
+        aggregate: AGGREGATE_SUM,
+        aggregate_field: "created_at"
     };
 
     enum Priority {

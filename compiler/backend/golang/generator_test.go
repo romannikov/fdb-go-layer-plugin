@@ -367,3 +367,86 @@ func TestBackend_GenerateFile(t *testing.T) {
 		t.Fatalf("generated file failed to parse: %v", err)
 	}
 }
+
+func TestGenerateMessage_AggregateIndexes(t *testing.T) {
+	id := ir.FieldSpec{ProtoName: "id", GoName: "Id", Kind: ir.KindString}
+	tenantID := ir.FieldSpec{ProtoName: "tenant_id", GoName: "TenantId", Kind: ir.KindString}
+	status := ir.FieldSpec{ProtoName: "status", GoName: "Status", Kind: ir.KindString}
+	totalCents := ir.FieldSpec{ProtoName: "total_cents", GoName: "TotalCents", Kind: ir.KindInt64}
+	itemsCount := ir.FieldSpec{ProtoName: "items_count", GoName: "ItemsCount", Kind: ir.KindUint32, IsUnsigned: true}
+	tags := ir.FieldSpec{ProtoName: "tags", GoName: "Tags", Kind: ir.KindString, IsRepeated: true}
+
+	spec := ir.MessageSpec{
+		Name:             "Order",
+		TypeID:           100,
+		GoPackageName:    "testspb",
+		Fields:           []ir.FieldSpec{id, tenantID, status, totalCents, itemsCount, tags},
+		PrimaryKeyFields: []ir.FieldSpec{id},
+		SecondaryIndexes: []ir.SecondaryIndexSpec{
+			{
+				Fields:    []ir.FieldSpec{tenantID, status},
+				IndexID:   1001,
+				Aggregate: ir.AggregateCount,
+			},
+			{
+				Fields:    nil,
+				IndexID:   1002,
+				Aggregate: ir.AggregateCount,
+			},
+			{
+				Fields:         []ir.FieldSpec{tenantID},
+				IndexID:        1003,
+				Aggregate:      ir.AggregateSum,
+				AggregateField: totalCents,
+			},
+			{
+				Fields:         []ir.FieldSpec{tenantID},
+				IndexID:        1004,
+				Aggregate:      ir.AggregateMin,
+				AggregateField: totalCents,
+			},
+			{
+				Fields:         []ir.FieldSpec{tenantID},
+				IndexID:        1005,
+				Aggregate:      ir.AggregateMax,
+				AggregateField: itemsCount,
+			},
+			{
+				Fields:         []ir.FieldSpec{tags},
+				IsFanOut:       true,
+				FanOutField:    tags,
+				IndexID:        1006,
+				Aggregate:      ir.AggregateSum,
+				AggregateField: totalCents,
+			},
+		},
+	}
+
+	var p bufferPrinter
+	GenerateMessage(&p, spec)
+	out := p.sb.String()
+
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "order.fdb.go", out, parser.AllErrors); err != nil {
+		t.Fatalf("generated Go code with aggregate indexes failed to parse: %v\n%s", err, out)
+	}
+
+	for _, expectedSnippet := range []string{
+		"OrderCountByTenantIdStatus fdblayer.IndexID = 1001",
+		"OrderCount fdblayer.IndexID = 1002",
+		"OrderSumTotalCentsByTenantId fdblayer.IndexID = 1003",
+		"OrderMinTotalCentsByTenantId fdblayer.IndexID = 1004",
+		"OrderMaxItemsCountByTenantId fdblayer.IndexID = 1005",
+		"OrderSumTotalCentsByTags fdblayer.IndexID = 1006",
+		"func (r *orderRepository) ReadAggregate(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, groupKey fdblayer.Key) (int64, error)",
+		"fdblayer.EncodeDeltaLE(1)",
+		"fdblayer.EncodeDeltaLE(-1)",
+		"fdblayer.EncodeSignedOrderLE(int64(entity.TotalCents))",
+		"fdblayer.EncodeUnsignedLE(uint64(entity.ItemsCount))",
+		"fdblayer.DecodeAggregateValue(raw, encoding, \"order\")",
+	} {
+		if !strings.Contains(out, expectedSnippet) {
+			t.Errorf("expected generated Go code to contain %q, got:\n%s", expectedSnippet, out)
+		}
+	}
+}

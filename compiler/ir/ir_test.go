@@ -182,8 +182,6 @@ func TestUnimplementedOptions_Rejected(t *testing.T) {
 		{"unique", &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"email"}, Unique: true}},
 		{"storing", &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"email"}, Storing: []string{"email"}}},
 		{"sparse", &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"email"}, Sparse: true}},
-		{"aggregate", &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"email"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_COUNT}},
-		{"aggregate_field", &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"email"}, AggregateField: "email"}},
 	}
 	for _, tc := range unimplementedIdxCases {
 		t.Run("index_"+tc.name, func(t *testing.T) {
@@ -435,5 +433,111 @@ func TestNilGuards(t *testing.T) {
 	si, err := BuildSecondaryIndex(&annotationspb.SecondaryIndex{Id: 1, Fields: []string{"email"}}, fieldMap, nil, "User")
 	if err != nil || si.IndexID != 1 {
 		t.Fatalf("expected BuildSecondaryIndex with nil usedHashes to succeed, got si=%+v, err=%v", si, err)
+	}
+}
+
+func TestBuildSecondaryIndex_Aggregates(t *testing.T) {
+	fields := []FieldSpec{
+		{ProtoName: "id", GoName: "Id", Kind: KindString},
+		{ProtoName: "tenant_id", GoName: "TenantId", Kind: KindString},
+		{ProtoName: "status", GoName: "Status", Kind: KindString},
+		{ProtoName: "total_cents", GoName: "TotalCents", Kind: KindInt64},
+		{ProtoName: "items_count", GoName: "ItemsCount", Kind: KindUint32, IsUnsigned: true},
+		{ProtoName: "weights", GoName: "Weights", Kind: KindInt64, IsRepeated: true},
+	}
+	fieldMap := make(map[string]FieldSpec, len(fields))
+	for _, f := range fields {
+		fieldMap[f.ProtoName] = f
+	}
+
+	// Valid coexistence of standard and aggregate indexes on overlapping grouping fields (and ungrouped)
+	msg, err := BuildMessageSpecWithTypeID("Order", fields, fieldMap, []string{"id"}, []*annotationspb.SecondaryIndex{
+		{Id: 1, Fields: []string{"tenant_id", "status"}},
+		{Id: 2, Fields: []string{"tenant_id", "status"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_COUNT},
+		{Id: 3, Fields: []string{}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_COUNT},
+		{Id: 4, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_SUM, AggregateField: "total_cents"},
+		{Id: 5, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_MIN, AggregateField: "total_cents"},
+		{Id: 6, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_MAX, AggregateField: "total_cents"},
+		{Id: 7, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_SUM, AggregateField: "items_count"},
+	}, false, 10)
+	if err != nil {
+		t.Fatalf("expected valid aggregate indexes to succeed, got %v", err)
+	}
+	if len(msg.SecondaryIndexes) != 7 {
+		t.Fatalf("expected 7 indexes, got %d", len(msg.SecondaryIndexes))
+	}
+	if msg.SecondaryIndexes[0].IsAggregate() {
+		t.Fatal("expected index 0 to be non-aggregate")
+	}
+	if !msg.SecondaryIndexes[1].IsAggregate() || msg.SecondaryIndexes[1].Aggregate != AggregateCount {
+		t.Fatalf("expected index 1 to be AggregateCount, got %+v", msg.SecondaryIndexes[1])
+	}
+	if msg.SecondaryIndexes[3].Aggregate != AggregateSum || msg.SecondaryIndexes[3].AggregateField.GoName != "TotalCents" {
+		t.Fatalf("unexpected sum index spec: %+v", msg.SecondaryIndexes[3])
+	}
+
+	// Duplicate aggregate index rejected
+	_, err = BuildMessageSpecWithTypeID("Order", fields, fieldMap, []string{"id"}, []*annotationspb.SecondaryIndex{
+		{Id: 1, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_SUM, AggregateField: "total_cents"},
+		{Id: 2, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_SUM, AggregateField: "total_cents"},
+	}, false, 10)
+	if err == nil || !strings.Contains(err.Error(), "duplicate secondary index") {
+		t.Fatalf("expected duplicate aggregate index error, got %v", err)
+	}
+
+	// Invalid aggregate configurations
+	invalidCases := []struct {
+		name string
+		idx  *annotationspb.SecondaryIndex
+		want string
+	}{
+		{
+			name: "aggregate_field_on_none",
+			idx:  &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"tenant_id"}, AggregateField: "total_cents"},
+			want: "aggregate_field cannot be set",
+		},
+		{
+			name: "aggregate_field_on_count",
+			idx:  &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_COUNT, AggregateField: "total_cents"},
+			want: "aggregate_field cannot be set",
+		},
+		{
+			name: "missing_aggregate_field_on_sum",
+			idx:  &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_SUM},
+			want: "aggregate_field is required",
+		},
+		{
+			name: "missing_aggregate_field_on_min",
+			idx:  &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_MIN},
+			want: "aggregate_field is required",
+		},
+		{
+			name: "missing_aggregate_field_on_max",
+			idx:  &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_MAX},
+			want: "aggregate_field is required",
+		},
+		{
+			name: "unknown_aggregate_field",
+			idx:  &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_SUM, AggregateField: "nonexistent"},
+			want: "not found",
+		},
+		{
+			name: "repeated_aggregate_field",
+			idx:  &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_SUM, AggregateField: "weights"},
+			want: "cannot be repeated",
+		},
+		{
+			name: "non_integer_aggregate_field",
+			idx:  &annotationspb.SecondaryIndex{Id: 1, Fields: []string{"tenant_id"}, Aggregate: annotationspb.IndexAggregateType_AGGREGATE_SUM, AggregateField: "status"},
+			want: "must be an integer type",
+		},
+	}
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := BuildSecondaryIndex(tc.idx, fieldMap, nil, "Order")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error containing %q, got %v", tc.want, err)
+			}
+		})
 	}
 }

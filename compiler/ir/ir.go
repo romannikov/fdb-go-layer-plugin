@@ -71,6 +71,17 @@ const (
 	MutationMin  MutationType = 3
 )
 
+// IndexAggregateType represents a secondary index aggregation mode in the language-neutral IR.
+type IndexAggregateType int
+
+const (
+	AggregateNone  IndexAggregateType = 0
+	AggregateCount IndexAggregateType = 1
+	AggregateSum   IndexAggregateType = 2
+	AggregateMin   IndexAggregateType = 3
+	AggregateMax   IndexAggregateType = 4
+)
+
 // EnumValueSpec describes a single value in a Protobuf enum.
 type EnumValueSpec struct {
 	ProtoName string // Original UPPER_SNAKE_CASE name in .proto
@@ -100,10 +111,17 @@ type FieldSpec struct {
 
 // SecondaryIndexSpec describes a secondary index on a message.
 type SecondaryIndexSpec struct {
-	Fields      []FieldSpec
-	IsFanOut    bool
-	FanOutField FieldSpec
-	IndexID     int64
+	Fields         []FieldSpec
+	IsFanOut       bool
+	FanOutField    FieldSpec
+	IndexID        int64
+	Aggregate      IndexAggregateType
+	AggregateField FieldSpec
+}
+
+// IsAggregate returns true if the secondary index is an atomic aggregate index (COUNT, SUM, MIN, MAX).
+func (s SecondaryIndexSpec) IsAggregate() bool {
+	return s.Aggregate != AggregateNone
 }
 
 // MessageSpec describes an FDB-persisted Protobuf message, FIFO queue, or helper message.
@@ -513,7 +531,7 @@ func buildMessageSpecInternal(
 		if err != nil {
 			return nil, err
 		}
-		sig := fieldsSignature(si.Fields)
+		sig := indexSignature(si)
 		if prevID, dup := seenSignatures[sig]; dup {
 			return nil, fmt.Errorf("duplicate secondary index on [%s] in message %s (IDs %d and %d)", sig, msgName, prevID, si.IndexID)
 		}
@@ -656,6 +674,22 @@ func fieldsSignature(fields []FieldSpec) string {
 	return strings.Join(names, ",")
 }
 
+func indexSignature(si SecondaryIndexSpec) string {
+	base := fieldsSignature(si.Fields)
+	switch si.Aggregate {
+	case AggregateCount:
+		return "count(" + base + ")"
+	case AggregateSum:
+		return "sum(" + strings.ToLower(si.AggregateField.ProtoName) + "|by:" + base + ")"
+	case AggregateMin:
+		return "min(" + strings.ToLower(si.AggregateField.ProtoName) + "|by:" + base + ")"
+	case AggregateMax:
+		return "max(" + strings.ToLower(si.AggregateField.ProtoName) + "|by:" + base + ")"
+	default:
+		return base
+	}
+}
+
 // BuildSecondaryIndex validates and constructs a SecondaryIndexSpec.
 func BuildSecondaryIndex(
 	idx *annotationspb.SecondaryIndex,
@@ -663,7 +697,7 @@ func BuildSecondaryIndex(
 	usedHashes map[int64]string,
 	msgName string,
 ) (SecondaryIndexSpec, error) {
-	if idx == nil || len(idx.GetFields()) == 0 {
+	if idx == nil {
 		return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s must specify at least one field", msgName)
 	}
 	if idx.GetUnique() {
@@ -675,11 +709,49 @@ func BuildSecondaryIndex(
 	if idx.GetSparse() {
 		return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s: option 'sparse' is reserved and not implemented yet", msgName)
 	}
-	if idx.GetAggregate() != annotationspb.IndexAggregateType_AGGREGATE_NONE {
-		return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s: option 'aggregate' is reserved and not implemented yet", msgName)
+
+	var aggType IndexAggregateType
+	switch idx.GetAggregate() {
+	case annotationspb.IndexAggregateType_AGGREGATE_NONE:
+		aggType = AggregateNone
+	case annotationspb.IndexAggregateType_AGGREGATE_COUNT:
+		aggType = AggregateCount
+	case annotationspb.IndexAggregateType_AGGREGATE_SUM:
+		aggType = AggregateSum
+	case annotationspb.IndexAggregateType_AGGREGATE_MIN:
+		aggType = AggregateMin
+	case annotationspb.IndexAggregateType_AGGREGATE_MAX:
+		aggType = AggregateMax
+	default:
+		return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s has unknown aggregate type %v", msgName, idx.GetAggregate())
 	}
-	if idx.GetAggregateField() != "" {
-		return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s: option 'aggregate_field' is reserved and not implemented yet", msgName)
+
+	if aggType == AggregateNone && len(idx.GetFields()) == 0 {
+		return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s must specify at least one field", msgName)
+	}
+
+	var aggField FieldSpec
+	switch aggType {
+	case AggregateNone, AggregateCount:
+		if idx.GetAggregateField() != "" {
+			return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s: aggregate_field cannot be set for %v", msgName, idx.GetAggregate())
+		}
+	case AggregateSum, AggregateMin, AggregateMax:
+		aggFieldName := idx.GetAggregateField()
+		if aggFieldName == "" {
+			return SecondaryIndexSpec{}, fmt.Errorf("secondary index in message %s: aggregate_field is required for %v", msgName, idx.GetAggregate())
+		}
+		f, ok := fieldMap[aggFieldName]
+		if !ok {
+			return SecondaryIndexSpec{}, fmt.Errorf("secondary index aggregate_field %q not found in message %s", aggFieldName, msgName)
+		}
+		if f.IsRepeated {
+			return SecondaryIndexSpec{}, fmt.Errorf("secondary index aggregate_field %q in message %s cannot be repeated", aggFieldName, msgName)
+		}
+		if !f.Kind.IsInteger() {
+			return SecondaryIndexSpec{}, fmt.Errorf("secondary index aggregate_field %q in message %s must be an integer type, got %v", aggFieldName, msgName, f.Kind)
+		}
+		aggField = f
 	}
 
 	seenFields := make(map[string]bool, len(idx.GetFields()))
@@ -714,11 +786,19 @@ func BuildSecondaryIndex(
 		}
 	}
 
-	signature := fieldsSignature(idxFields)
+	spec := SecondaryIndexSpec{
+		Fields:         idxFields,
+		IsFanOut:       isFanOut,
+		FanOutField:    fanOutField,
+		Aggregate:      aggType,
+		AggregateField: aggField,
+	}
+	signature := indexSignature(spec)
 	if idx.GetId() == 0 {
 		return SecondaryIndexSpec{}, fmt.Errorf("secondary index on [%s] in message %s requires an explicit non-zero id", signature, msgName)
 	}
 	indexID := int64(idx.GetId())
+	spec.IndexID = indexID
 
 	if existingSig, ok := usedHashes[indexID]; ok {
 		return SecondaryIndexSpec{}, fmt.Errorf("secondary index ID collision detected in message %s: indices with fields %q and %q share the same ID %d", msgName, signature, existingSig, indexID)
@@ -727,12 +807,7 @@ func BuildSecondaryIndex(
 		usedHashes[indexID] = signature
 	}
 
-	return SecondaryIndexSpec{
-		Fields:      idxFields,
-		IsFanOut:    isFanOut,
-		FanOutField: fanOutField,
-		IndexID:     indexID,
-	}, nil
+	return spec, nil
 }
 
 // ReorderQueuePrimaryKeyFields reorders queue primary keys to:
