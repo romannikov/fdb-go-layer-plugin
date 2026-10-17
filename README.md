@@ -1,4 +1,4 @@
-# FoundationDB Protobuf Layer (`fdb-layer`)
+# FoundationDB Protobuf Layer (`fdb-record-layer`)
 
 A `protoc` compiler and runtime library that generates FoundationDB data access layer code from shared Protobuf annotations. It simplifies building applications on top of FoundationDB by handling the boilerplate of mapping Protobuf messages to keys, secondary indexes, atomic aggregations, and FIFO queues.
 
