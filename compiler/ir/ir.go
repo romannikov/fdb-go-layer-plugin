@@ -112,14 +112,61 @@ type FieldSpec struct {
 
 // SecondaryIndexSpec describes a secondary index on a message.
 type SecondaryIndexSpec struct {
-	Fields         []FieldSpec
-	IsFanOut       bool
-	FanOutField    FieldSpec
-	IndexID        int64
-	Aggregate      IndexAggregateType
-	AggregateField FieldSpec
-	Mutation       MutationType
-	Name           string // PascalCase optional name for mutation index constants
+	Fields           []FieldSpec
+	TrailingPKFields []FieldSpec // PK fields not already present in Fields (for standard/fan-out indexes)
+	PKTupleOffsets   []int       // Unpacked index tuple offset (>= 3) for each message PK field
+	IsFanOut         bool
+	FanOutField      FieldSpec
+	IndexID          int64
+	Aggregate        IndexAggregateType
+	AggregateField   FieldSpec
+	Mutation         MutationType
+	Name             string // PascalCase optional name for mutation index constants
+}
+
+func fieldIdentity(f FieldSpec) string {
+	if f.ProtoName != "" {
+		return f.ProtoName
+	}
+	return f.GoName
+}
+
+// IndexTrailingPKFields returns the primary key fields that do not already appear in indexFields,
+// preserving their declaration order in primaryKeyFields.
+func IndexTrailingPKFields(primaryKeyFields, indexFields []FieldSpec) []FieldSpec {
+	inIndex := make(map[string]bool, len(indexFields))
+	for _, f := range indexFields {
+		inIndex[fieldIdentity(f)] = true
+	}
+	var trailing []FieldSpec
+	for _, pkf := range primaryKeyFields {
+		if !inIndex[fieldIdentity(pkf)] {
+			trailing = append(trailing, pkf)
+		}
+	}
+	return trailing
+}
+
+// IndexPKTupleOffsets returns, for each primary key field in primaryKeyFields, its element index
+// in the unpacked FDB index key tuple:
+//
+//	(TypeID, IndexNamespace, IndexID, indexFields..., trailingPKFields...)
+func IndexPKTupleOffsets(primaryKeyFields, indexFields []FieldSpec) []int {
+	idxPos := make(map[string]int, len(indexFields))
+	for i, f := range indexFields {
+		idxPos[fieldIdentity(f)] = 3 + i
+	}
+	trailingIdx := 0
+	offsets := make([]int, len(primaryKeyFields))
+	for j, pkf := range primaryKeyFields {
+		if pos, ok := idxPos[fieldIdentity(pkf)]; ok {
+			offsets[j] = pos
+		} else {
+			offsets[j] = 3 + len(indexFields) + trailingIdx
+			trailingIdx++
+		}
+	}
+	return offsets
 }
 
 // IsAggregate returns true if the secondary index is an atomic aggregate index (COUNT, SUM, MIN, MAX).
@@ -551,6 +598,10 @@ func buildMessageSpecInternal(
 			return nil, fmt.Errorf("duplicate secondary index constant name %q in message %s (IDs %d and %d); specify a distinct 'name' on the mutation index", constName, msgName, prevID, si.IndexID)
 		}
 		seenConstNames[constName] = si.IndexID
+		if !si.IsAggregate() && !si.IsMutation() {
+			si.TrailingPKFields = IndexTrailingPKFields(primaryKeyFields, si.Fields)
+			si.PKTupleOffsets = IndexPKTupleOffsets(primaryKeyFields, si.Fields)
+		}
 		secondaryIndexes = append(secondaryIndexes, si)
 	}
 

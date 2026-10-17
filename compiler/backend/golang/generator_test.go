@@ -613,3 +613,126 @@ func TestGenerateMessage_CompositeFanOutAggregatesAndOnlyPKMutationDelete(t *tes
 	}
 }
 
+func TestGenerateMessage_DeduplicatedPKInSecondaryIndex(t *testing.T) {
+	spreadsheetID := ir.FieldSpec{ProtoName: "spreadsheet_id", GoName: "SpreadsheetId", Kind: ir.KindString}
+	sheetID := ir.FieldSpec{ProtoName: "sheet_id", GoName: "SheetId", Kind: ir.KindString}
+	row := ir.FieldSpec{ProtoName: "row", GoName: "Row", Kind: ir.KindInt32}
+	col := ir.FieldSpec{ProtoName: "col", GoName: "Col", Kind: ir.KindInt32}
+	val := ir.FieldSpec{ProtoName: "val", GoName: "Val", Kind: ir.KindString}
+
+	cellSpec := ir.MessageSpec{
+		Name:             "Cell",
+		TypeID:           400,
+		GoPackageName:    "testspb",
+		Fields:           []ir.FieldSpec{spreadsheetID, sheetID, row, col, val},
+		PrimaryKeyFields: []ir.FieldSpec{spreadsheetID, sheetID, row, col},
+		SecondaryIndexes: []ir.SecondaryIndexSpec{
+			{
+				// All 4 PK fields are already in the index in column-major order
+				Fields:  []ir.FieldSpec{spreadsheetID, sheetID, col, row},
+				IndexID: 4001,
+			},
+		},
+	}
+
+	var p bufferPrinter
+	GenerateMessage(&p, cellSpec)
+	out := p.sb.String()
+
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "cell.fdb.go", out, parser.AllErrors); err != nil {
+		t.Fatalf("generated Go code for Cell failed to parse: %v\n%s", err, out)
+	}
+
+	for _, expected := range []string{
+		"tr.Set(dir.Pack(tuple.Tuple{CellTypeID, fdblayer.IndexNamespace, int64(CellBySpreadsheetIdSheetIdColRow), entity.SpreadsheetId, entity.SheetId, int64(entity.Col), int64(entity.Row)}), []byte{})",
+		"tr.Clear(dir.Pack(tuple.Tuple{CellTypeID, fdblayer.IndexNamespace, int64(CellBySpreadsheetIdSheetIdColRow), pkTuple[0], pkTuple[1], pkTuple[3], pkTuple[2]}))",
+		"pkOffsets = []int{3, 4, 6, 5}",
+	} {
+		if !strings.Contains(out, expected) {
+			t.Errorf("expected generated Cell code to contain %q, got:\n%s", expected, out)
+		}
+	}
+}
+
+func TestHasBytesImports_PKBytesFieldAndGoNameFallback(t *testing.T) {
+	pkBytes := ir.FieldSpec{ProtoName: "pk_bytes", GoName: "PkBytes", Kind: ir.KindBytes}
+	status := ir.FieldSpec{ProtoName: "status", GoName: "Status", Kind: ir.KindString}
+	nonPKBytes := ir.FieldSpec{ProtoName: "hash", GoName: "Hash", Kind: ir.KindBytes}
+
+	// Standard index containing a bytes PK field and a string field does not emit bytes.Equal
+	stdPKBytesSpec := ir.MessageSpec{
+		Name:             "BlobRecord",
+		TypeID:           500,
+		GoPackageName:    "testspb",
+		Fields:           []ir.FieldSpec{pkBytes, status},
+		PrimaryKeyFields: []ir.FieldSpec{pkBytes},
+		SecondaryIndexes: []ir.SecondaryIndexSpec{
+			{
+				Fields:  []ir.FieldSpec{status, pkBytes},
+				IndexID: 5001,
+			},
+		},
+	}
+	if HasBytesImports(stdPKBytesSpec) {
+		t.Errorf("expected HasBytesImports to be false when only a PK bytes field is in a standard index")
+	}
+	var p1 bufferPrinter
+	GenerateMessage(&p1, stdPKBytesSpec)
+	if strings.Contains(p1.sb.String(), `"bytes"`) {
+		t.Errorf("expected generated code not to import \"bytes\", got:\n%s", p1.sb.String())
+	}
+
+	// Standard index containing a non-PK bytes field DOES require "bytes"
+	stdNonPKBytesSpec := stdPKBytesSpec
+	stdNonPKBytesSpec.SecondaryIndexes = []ir.SecondaryIndexSpec{
+		{
+			Fields:  []ir.FieldSpec{nonPKBytes},
+			IndexID: 5002,
+		},
+	}
+	if !HasBytesImports(stdNonPKBytesSpec) {
+		t.Errorf("expected HasBytesImports to be true when a non-PK bytes field is in a standard index")
+	}
+
+	// Aggregate index containing a PK bytes field DOES require "bytes"
+	aggPKBytesSpec := stdPKBytesSpec
+	aggPKBytesSpec.SecondaryIndexes = []ir.SecondaryIndexSpec{
+		{
+			Fields:    []ir.FieldSpec{pkBytes},
+			IndexID:   5003,
+			Aggregate: ir.AggregateCount,
+		},
+	}
+	if !HasBytesImports(aggPKBytesSpec) {
+		t.Errorf("expected HasBytesImports to be true when a PK bytes field is in an aggregate index")
+	}
+
+	// GoName fallback when ProtoName is empty
+	goOnlyID := ir.FieldSpec{GoName: "Id", Kind: ir.KindString}
+	goOnlyStatus := ir.FieldSpec{GoName: "Status", Kind: ir.KindString}
+	goOnlySpec := ir.MessageSpec{
+		Name:             "GoOnly",
+		TypeID:           501,
+		GoPackageName:    "testspb",
+		Fields:           []ir.FieldSpec{goOnlyID, goOnlyStatus},
+		PrimaryKeyFields: []ir.FieldSpec{goOnlyID},
+		SecondaryIndexes: []ir.SecondaryIndexSpec{
+			{
+				Fields:  []ir.FieldSpec{goOnlyStatus},
+				IndexID: 5011,
+			},
+		},
+	}
+	var p2 bufferPrinter
+	GenerateMessage(&p2, goOnlySpec)
+	out2 := p2.sb.String()
+	if !strings.Contains(out2, "old.Status != entity.Status") {
+		t.Errorf("expected Upsert diff check for non-PK field when ProtoName is empty, got:\n%s", out2)
+	}
+	if !strings.Contains(out2, "entity.Status, pkTuple[0]") {
+		t.Errorf("expected Delete to use entity.Status and pkTuple[0] when ProtoName is empty, got:\n%s", out2)
+	}
+}
+
+

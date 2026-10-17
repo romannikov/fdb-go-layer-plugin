@@ -383,11 +383,14 @@ func (r *auditlogRepository) ScanIndex(ctx context.Context, tr fdblayer.Transact
 		return nil, err
 	}
 	var idxSchema []fdblayer.FieldKind
+	var pkOffsets []int
 	switch index {
 	case AuditLogByActor:
 		idxSchema = []fdblayer.FieldKind{fdblayer.FieldKindString, fdblayer.FieldKindVersionstamp}
+		pkOffsets = []int{4}
 	case AuditLogByTags:
 		idxSchema = []fdblayer.FieldKind{fdblayer.FieldKindString, fdblayer.FieldKindVersionstamp}
+		pkOffsets = []int{4}
 	default:
 		return nil, fmt.Errorf("auditlog index %d: %w", index, fdblayer.ErrUnknownIndex)
 	}
@@ -411,7 +414,7 @@ func (r *auditlogRepository) ScanIndex(ctx context.Context, tr fdblayer.Transact
 		rangeOpts.Limit = scanCfg.Limit + 1
 	}
 	kvs := fdblayer.GetRange(tr, fdb.KeyRange{Begin: rangeBegin, End: rangeEnd}, rangeOpts).GetSliceOrPanic()
-	pkIndexStart := 3 + len(idxSchema) - 1
+	expectedTupleLen := 3 + len(idxSchema)
 	if scanCfg.Limit > 0 && len(kvs) > scanCfg.Limit {
 		nextTpl, err := dir.Unpack(kvs[scanCfg.Limit].Key)
 		if err != nil {
@@ -433,15 +436,16 @@ func (r *auditlogRepository) ScanIndex(ctx context.Context, tr fdblayer.Transact
 		if err != nil {
 			return nil, err
 		}
-		if len(tpl) <= pkIndexStart {
+		if len(tpl) < expectedTupleLen {
 			continue
 		}
-		pkTuple := tpl[pkIndexStart:]
-		pkTuples[i] = pkTuple
-		keyTpl := make(tuple.Tuple, 2+len(pkTuple))
+		keyTpl := make(tuple.Tuple, 2+len(pkOffsets))
 		keyTpl[0] = AuditLogTypeID
 		keyTpl[1] = fdblayer.DataNamespace
-		copy(keyTpl[2:], pkTuple)
+		for j, off := range pkOffsets {
+			keyTpl[2+j] = tpl[off]
+		}
+		pkTuples[i] = keyTpl[2:]
 		futures[i] = tr.Get(dir.Pack(keyTpl))
 	}
 	for i, future := range futures {
